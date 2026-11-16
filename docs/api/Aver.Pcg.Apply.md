@@ -2,24 +2,48 @@
 
 # Aver.Pcg.Apply public API
 
-2 public types and 8 public members, read from `scripting/csharp/Aver.Pcg.Apply/` (1 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+2 public types and 8 public members, read from `scripting/csharp/Aver.Pcg.Apply/` (1 source files). Members are grouped by kind and sorted alphabetically; signatures are single lines as declared, and the summary is the first sentence of the XML summary. Every type in every assembly: [index](index.md); every member: [members-a-z](members-a-z.md).
+
+## Contents
+
+**namespace Aver.Pcg.Apply**
+
+- Classes: [PcgApply](#pcgapply)
+- Structs: [ApplyResult](#applyresult)
 
 ## namespace Aver.Pcg.Apply
+
+<a id="applyresult"></a>
 
 ### ApplyResult
 
 `public readonly struct ApplyResult` - What happened when placements were applied.
 
-- `public int Spawned { get; init; }` - Placements that became live entities.
-- `public int UnknownClass { get; init; }` - Placements whose Asset named no known actor class.
-- `public int EmptyAsset { get; init; }` - Placements with an empty Asset.
-- `public int Total { get; }` - Total placements considered.
-- `public override string ToString()` - A one-line summary, so a caller can log the outcome without unpacking it.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `EmptyAsset` | `public int EmptyAsset { get; init; }` | Placements with an empty Asset. |
+| `Spawned` | `public int Spawned { get; init; }` | Placements that became live entities. |
+| `Total` | `public int Total { get; }` | Total placements considered. |
+| `UnknownClass` | `public int UnknownClass { get; init; }` | Placements whose Asset named no known actor class. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ToString` | `public override string ToString()` | A one-line summary, so a caller can log the outcome without unpacking it. |
+
+<a id="pcgapply"></a>
 
 ### PcgApply
 
 `public static class PcgApply` - Turns F#-generated placements into live entities.
 
-- `public static EngineVec3 ToEngine(in PcgVec3 v)` - Converts an F# PCG vector to the engine's.
-- `public static EngineQuat ToEngine(in PcgQuat q)` - Converts an F# PCG quaternion to the engine's.
-- `public static ApplyResult Apply(Placement[] placements, List<Entity>? spawned = null)` - Spawns one entity per placement.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Apply` | `public static ApplyResult Apply(Placement[] placements, List<Entity>? spawned = null)` | Spawns one entity per placement. |
+| `ToEngine` | `public static EngineQuat ToEngine(in PcgQuat q)` | Converts an F# PCG quaternion to the engine's. |
+| `ToEngine` | `public static EngineVec3 ToEngine(in PcgVec3 v)` | Converts an F# PCG vector to the engine's. |

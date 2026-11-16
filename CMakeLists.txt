@@ -873,8 +873,9 @@ endif()
 
 # The node reference and the C# API index are generated, and the node palette is a C++ mirror of the C# tables.
 # NodeCatalogCheck fails on any disagreement between a table row and its palette entry, a duplicate node key, a
-# family with no test file, or a stale docs/nodes page; CsharpApiIndexCheck fails on a stale docs/api page.
-# Fix a failure with: python scripts/node-catalog.py --write   /   python scripts/csharp-api-index.py --write
+# family with no test file, or a stale docs/nodes page; CsharpApiIndexCheck fails on a stale docs/api page;
+# AbiIndexCheck fails on a stale docs/abi page or a skipped *_abi.h declaration.
+# Fix a failure with: python scripts/node-catalog.py --write   /   python scripts/csharp-api-index.py --write   /   python scripts/abi-index.py --write
 if(AVER_BUILD_TESTS)
   find_package(Python3 QUIET COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)
@@ -882,8 +883,10 @@ if(AVER_BUILD_TESTS)
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/scripts/node-catalog.py" --check)
     add_test(NAME CsharpApiIndexCheck
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/scripts/csharp-api-index.py" --check)
-    set_tests_properties(NodeCatalogCheck CsharpApiIndexCheck PROPERTIES TIMEOUT 120)
+    add_test(NAME AbiIndexCheck
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/scripts/abi-index.py" --check)
+    set_tests_properties(NodeCatalogCheck CsharpApiIndexCheck AbiIndexCheck PROPERTIES TIMEOUT 120)
   else()
-    message(STATUS "Aver: no Python 3 found - NodeCatalogCheck and CsharpApiIndexCheck are not registered")
+    message(STATUS "Aver: no Python 3 found - NodeCatalogCheck, CsharpApiIndexCheck and AbiIndexCheck are not registered")
   endif()
 endif()

@@ -1012,7 +1012,7 @@ A partial `Entity` (`EntityRenderProps.cs`) writes the scene's own component fie
 
 ## 23. The generated index of the public surface
 
-`docs/api/` is generated from source by `python scripts/csharp-api-index.py --write`: one page per assembly (`Aver.Framework`, `Aver.Scene`, `Aver.Physics`, `Aver.UI`, `Aver.Synapse`, `Aver.LevelInstance`, `Aver.Prefab`, `Aver.Scripting`, `Aver.Pcg.Apply`) listing every public type and member as a one-line signature with the first sentence of its XML summary, plus an index (`docs/api/index.md`). It reads the `.cs` files, so it needs no build and cannot drift (ctest `CsharpApiIndexCheck`). This guide explains how the pieces fit together; the index answers "does a member for this exist". Every Aver Node is a thin wrapper over a member listed there (`docs/nodes/`).
+`docs/api/` is generated from source by `python scripts/csharp-api-index.py --write`: one page per assembly (`Aver.Framework`, `Aver.Scene`, `Aver.Physics`, `Aver.UI`, `Aver.Synapse`, `Aver.LevelInstance`, `Aver.Prefab`, `Aver.Scripting`, `Aver.Pcg.Apply`) opening with a contents table (namespace, then kind, alphabetical) and giving each type a member table (constructors, properties, fields, methods, events; Member | Signature | Summary), plus an A-Z index of all types (`docs/api/index.md`) and an A-Z list of every member (`docs/api/members-a-z.md`). It reads the `.cs` files, so it needs no build and cannot drift (ctest `CsharpApiIndexCheck`). This guide explains how the pieces fit together; the index answers "does a member for this exist". Every Aver Node is a thin wrapper over a member listed there (`docs/nodes/`).
 
 ## 24. Not yet available
 

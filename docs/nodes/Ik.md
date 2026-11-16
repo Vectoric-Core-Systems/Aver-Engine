@@ -2,20 +2,22 @@
 
 # Ik nodes
 
+Contents: 11 nodes sorted A-Z by type (`AN_` prefix ignored); categories: Animation. [All nodes A-Z](index.md).
+
 11 nodes. Rows: `scripting/csharp/Aver.Graph/GraphIkNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsIk.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
 | Type | Display | Category | Path | Pins | Attributes | C# |
 |---|---|---|---|---|---|---|
-| `BindIkGoal` | Bind IK Goal | Animation | P | in: `exec` exec, `entity` int, `target` int, `ox` float, `oy` float, `oz` float<br>out: `then` exec, `success` bool | `goal`, `socket` (optional) | `IkGraphInterop.BindIkGoalForGraph` |
-| `ClearIkGoal` | Clear IK Goal | Animation | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `goal` (optional) | `IkGraphInterop.ClearIkGoalForGraph` |
-| `ClearRigInput` | Clear Rig Input | Animation | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `input` (optional) | `IkGraphInterop.ClearRigInputForGraph` |
-| `GetFootIkState` | Get Foot IK State | Animation | D | in: `entity` int<br>out: `found` bool, `offsetCm` float, `plant` float, `nx` float, `ny` float, `nz` float | `foot` (optional) | `IkGraphInterop.GetFootIkStateForGraph` |
-| `GetIkGoalState` | Get IK Goal State | Animation | D | in: `entity` int<br>out: `found` bool, `alpha` float, `errorCm` float, `reached` bool | `goal` | `IkGraphInterop.GetIkGoalStateForGraph` |
-| `SetFootIkWeight` | Set Foot IK Weight | Animation | P | in: `exec` exec, `entity` int, `weight` float, `blendSeconds` float = 0.2<br>out: `then` exec, `success` bool | `foot` (optional) | `IkGraphInterop.SetFootIkWeightForGraph` |
-| `SetIkGoal` | Set IK Goal | Animation | P | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float, `useRotation` bool, `pitch` float, `yaw` float, `roll` float, `space` int<br>out: `then` exec, `success` bool | `goal` | `IkGraphInterop.SetIkGoalForGraph`<br>Rotation is pitch / yaw / roll in degrees (the editor's order), used only when useRotation. |
-| `SetIkGoalWeight` | Set IK Goal Weight | Animation | P | in: `exec` exec, `entity` int, `weight` float, `blendSeconds` float = 0.15<br>out: `then` exec, `success` bool | `goal` | `IkGraphInterop.SetIkGoalWeightForGraph` |
-| `SetIkRig` | Set IK Rig | Animation | P | in: `exec` exec, `entity` int, `weight` float = 1<br>out: `then` exec, `success` bool | `rig` | `IkGraphInterop.SetIkRigForGraph` |
-| `SetRigInputFloat` | Set Rig Input (Float) | Animation | P | in: `exec` exec, `entity` int, `value` float<br>out: `then` exec, `success` bool | `input` | `IkGraphInterop.SetRigInputFloatForGraph` |
-| `SetRigInputVec3` | Set Rig Input (Vector) | Animation | P | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | `input` | `IkGraphInterop.SetRigInputVec3ForGraph` |
+| <a id="bindikgoal"></a>`BindIkGoal` | Bind IK Goal | Animation | P | in: `exec` exec, `entity` int, `target` int, `ox` float, `oy` float, `oz` float<br>out: `then` exec, `success` bool | `goal`, `socket` (optional) | `IkGraphInterop.BindIkGoalForGraph` |
+| <a id="clearikgoal"></a>`ClearIkGoal` | Clear IK Goal | Animation | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `goal` (optional) | `IkGraphInterop.ClearIkGoalForGraph` |
+| <a id="clearriginput"></a>`ClearRigInput` | Clear Rig Input | Animation | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `input` (optional) | `IkGraphInterop.ClearRigInputForGraph` |
+| <a id="getfootikstate"></a>`GetFootIkState` | Get Foot IK State | Animation | D | in: `entity` int<br>out: `found` bool, `offsetCm` float, `plant` float, `nx` float, `ny` float, `nz` float | `foot` (optional) | `IkGraphInterop.GetFootIkStateForGraph` |
+| <a id="getikgoalstate"></a>`GetIkGoalState` | Get IK Goal State | Animation | D | in: `entity` int<br>out: `found` bool, `alpha` float, `errorCm` float, `reached` bool | `goal` | `IkGraphInterop.GetIkGoalStateForGraph` |
+| <a id="setfootikweight"></a>`SetFootIkWeight` | Set Foot IK Weight | Animation | P | in: `exec` exec, `entity` int, `weight` float, `blendSeconds` float = 0.2<br>out: `then` exec, `success` bool | `foot` (optional) | `IkGraphInterop.SetFootIkWeightForGraph` |
+| <a id="setikgoal"></a>`SetIkGoal` | Set IK Goal | Animation | P | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float, `useRotation` bool, `pitch` float, `yaw` float, `roll` float, `space` int<br>out: `then` exec, `success` bool | `goal` | `IkGraphInterop.SetIkGoalForGraph`<br>Rotation is pitch / yaw / roll in degrees (the editor's order), used only when useRotation. |
+| <a id="setikgoalweight"></a>`SetIkGoalWeight` | Set IK Goal Weight | Animation | P | in: `exec` exec, `entity` int, `weight` float, `blendSeconds` float = 0.15<br>out: `then` exec, `success` bool | `goal` | `IkGraphInterop.SetIkGoalWeightForGraph` |
+| <a id="setikrig"></a>`SetIkRig` | Set IK Rig | Animation | P | in: `exec` exec, `entity` int, `weight` float = 1<br>out: `then` exec, `success` bool | `rig` | `IkGraphInterop.SetIkRigForGraph` |
+| <a id="setriginputfloat"></a>`SetRigInputFloat` | Set Rig Input (Float) | Animation | P | in: `exec` exec, `entity` int, `value` float<br>out: `then` exec, `success` bool | `input` | `IkGraphInterop.SetRigInputFloatForGraph` |
+| <a id="setriginputvec3"></a>`SetRigInputVec3` | Set Rig Input (Vector) | Animation | P | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | `input` | `IkGraphInterop.SetRigInputVec3ForGraph` |

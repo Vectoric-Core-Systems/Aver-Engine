@@ -2,11 +2,13 @@
 
 # DataLayer nodes
 
+Contents: 2 nodes sorted A-Z by type (`AN_` prefix ignored); categories: World. [All nodes A-Z](index.md).
+
 2 nodes. Rows: `scripting/csharp/Aver.Graph/GraphDataLayerNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsDataLayer.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
 | Type | Display | Category | Path | Pins | Attributes | C# |
 |---|---|---|---|---|---|---|
-| `AN_GetDataLayerState` | Get Data Layer State | World | D | out: `state` int | `layer` | `DataLayersGraph.GetStateForGraph`<br>AN_GetDataLayerState: the state in force for the layer (0 unloaded, 1 loaded, 2 activated), or -1 for an unknown layer. |
-| `AN_SetDataLayerState` | Set Data Layer State | World | P | in: `exec` exec, `state` int<br>out: `then` exec, `success` bool | `layer` | `DataLayersGraph.SetStateForGraph`<br>AN_SetDataLayerState: asks the layer to take the state (0 unloaded, 1 loaded, 2 activated). |
+| <a id="an_getdatalayerstate"></a>`AN_GetDataLayerState` | Get Data Layer State | World | D | out: `state` int | `layer` | `DataLayersGraph.GetStateForGraph`<br>AN_GetDataLayerState: the state in force for the layer (0 unloaded, 1 loaded, 2 activated), or -1 for an unknown layer. |
+| <a id="an_setdatalayerstate"></a>`AN_SetDataLayerState` | Set Data Layer State | World | P | in: `exec` exec, `state` int<br>out: `then` exec, `success` bool | `layer` | `DataLayersGraph.SetStateForGraph`<br>AN_SetDataLayerState: asks the layer to take the state (0 unloaded, 1 loaded, 2 activated). |

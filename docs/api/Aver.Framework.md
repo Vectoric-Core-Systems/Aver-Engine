@@ -2,3752 +2,6834 @@
 
 # Aver.Framework public API
 
-320 public types and 2655 public members, read from `scripting/csharp/Aver.Framework/` (163 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+320 public types and 2655 public members, read from `scripting/csharp/Aver.Framework/` (163 source files). Members are grouped by kind and sorted alphabetically; signatures are single lines as declared, and the summary is the first sentence of the XML summary. Every type in every assembly: [index](index.md); every member: [members-a-z](members-a-z.md).
+
+## Contents
+
+**namespace Aver.Framework**
+
+- Classes: [AbilityBuilder](#abilitybuilder), [AbilityDef](#abilitydef), [AbilitySystem](#abilitysystem), [Accessibility](#accessibility), [Accessibility.Input](#accessibility-input), [AccessSettingsStore](#accesssettingsstore), [ActorBuilder](#actorbuilder), [Actors](#actors), [AttributeDef](#attributedef), [AttributeSetBuilder](#attributesetbuilder), [AttributeSetDef](#attributesetdef), [Audio](#audio), [AverAbilityAttribute](#averabilityattribute), [AverAbilitySystemAttribute](#averabilitysystemattribute), [AverActor](#averactor), [AverCharacter](#avercharacter), [AverClassAttribute](#averclassattribute), [AverGameInstance](#avergameinstance), [AverGameMode](#avergamemode), [AverGameModeAttribute](#avergamemodeattribute), [AverGameplayDefsAttribute](#avergameplaydefsattribute), [AverMath](#avermath), [AverPawn](#averpawn), [AverPlayerController](#averplayercontroller), [AverRandom](#averrandom), [AverReverbVolume](#averreverbvolume), [CameraFx](#camerafx), [CameraRig](#camerarig), [Captions](#captions), [ClassBuilder](#classbuilder), [ClassNames](#classnames), [ConfigFile](#configfile), [CustomEnv](#customenv), [DataColumnAttribute](#datacolumnattribute), [DataContentGraph](#datacontentgraph), [DataIgnoreAttribute](#dataignoreattribute), [DataLayers](#datalayers), [DataRowNameAttribute](#datarownameattribute), [DataTable](#datatable), [DataTableBinder](#datatablebinder), [DataTables](#datatables), [DebugDraw](#debugdraw), [Deferred](#deferred), [Display](#display), [DisplayWindow](#displaywindow), [DriveActionNames](#driveactionnames), [DrivingContext](#drivingcontext), [EditableAttribute](#editableattribute), [EffectBuilder](#effectbuilder), [EffectDef](#effectdef), [EffectSpec](#effectspec), [Engine](#engine), [EnhancedInput](#enhancedinput), [EnvFx](#envfx), [EventData](#eventdata), [Events](#events), [FaceShapes](#faceshapes), [Frame](#frame), [FrameworkRebindProvider](#frameworkrebindprovider), [FrameworkSettingsStore](#frameworksettingsstore), [Game](#game), [Gamepads](#gamepads), [GameplayAbilities](#gameplayabilities), [GameplayAbility](#gameplayability), [GameplayDefs](#gameplaydefs), [GameplayTagContainer](#gameplaytagcontainer), [Groups](#groups), [Hair](#hair), [Image](#image), [Input](#input), [InputAction](#inputaction), [InputEvent](#inputevent), [InputEventJoypadButton](#inputeventjoypadbutton), [InputEventJoypadMotion](#inputeventjoypadmotion), [InputEventKey](#inputeventkey), [InputEventMouseButton](#inputeventmousebutton), [InputEventMouseMotion](#inputeventmousemotion), [InputEventMouseWheel](#inputeventmousewheel), [InputEventTouch](#inputeventtouch), [InputEventTouchMotion](#inputeventtouchmotion), [InputMappingContext](#inputmappingcontext), [InputScheme](#inputscheme), [Landscape](#landscape), [LevelSequences](#levelsequences), [Loc](#loc), [LocFormat](#locformat), [LocGraph](#locgraph), [ModelAttribute](#modelattribute), [ModelImport](#modelimport), [ModelImportGraph](#modelimportgraph), [ModelImportOptions](#modelimportoptions), [ModifierDef](#modifierdef), [MultiMeshes](#multimeshes), [Music](#music), [OS](#os), [Particles](#particles), [Paths](#paths), [PhysicalSurfaces](#physicalsurfaces), [Physics](#physics), [Pointer](#pointer), [PoseInterpolation](#poseinterpolation), [PostFx](#postfx), [Preload](#preload), [ProjectSettings](#projectsettings), [RandomNumberGenerator](#randomnumbergenerator), [RenderSettings](#rendersettings), [Ropes](#ropes), [RuntimeMeshes](#runtimemeshes), [RuntimeTexture](#runtimetexture), [Scene2D](#scene2d), [SceneQueries](#scenequeries), [Settings](#settings), [Sky](#sky), [SoftBodies](#softbodies), [SoftFields](#softfields), [SoftShapes](#softshapes), [Speech](#speech), [SubViews](#subviews), [Surface](#surface), [Timers](#timers), [Touch](#touch), [UiGameSettings](#uigamesettings), [VehicleHud](#vehiclehud), [Vehicles](#vehicles), [Visemes](#visemes), [Water](#water), [WorldOrigin](#worldorigin)
+- Structs: [AbilityHandle](#abilityhandle), [ActiveEffectHandle](#activeeffecthandle), [ActorClass](#actorclass), [AttributeRef](#attributeref), [BindingHandle](#bindinghandle), [Blackboard](#blackboard), [Body](#body), [BoneInfo](#boneinfo), [BonePose](#bonepose), [Brain](#brain), [Camera2D](#camera2d), [Car](#car), [ContactEvent](#contactevent), [Double3](#double3), [Entity](#entity), [EventSubscription](#eventsubscription), [EventValue](#eventvalue), [Game.CursorScope](#game-cursorscope), [GameplayTag](#gameplaytag), [ImageColor](#imagecolor), [InputModifier](#inputmodifier), [InputTrigger](#inputtrigger), [Layer2D](#layer2d), [LocText](#loctext), [ModelHandle](#modelhandle), [OverlapEvent](#overlapevent), [Parallax2D](#parallax2d), [ProbeBlend](#probeblend), [RaycastHit](#raycasthit), [Sound](#sound), [SoundGraph](#soundgraph), [Sprite2D](#sprite2d), [SpriteAnim2D](#spriteanim2d), [SpriteAnimFrame2D](#spriteanimframe2d), [SubViewInfo](#subviewinfo), [TimerHandle](#timerhandle), [Transform2D](#transform2d), [Voice](#voice), [WorldPos](#worldpos)
+- Interfaces: [IGasClientRequests](#igasclientrequests), [IGasHost](#igashost), [IGasReplicationSink](#igasreplicationsink), [IRawTable](#irawtable)
+- Enums: [AbilityCommit](#abilitycommit), [AbilityFailure](#abilityfailure), [ActionEvent](#actionevent), [AudioDeviceState](#audiodevicestate), [BeginReason](#beginreason), [BlackboardScope](#blackboardscope), [BlackboardType](#blackboardtype), [BodyFacing](#bodyfacing), [BoneChannels](#bonechannels), [BrainKind](#brainkind), [BrainStatus](#brainstatus), [Bus](#bus), [Camera2DFlags](#camera2dflags), [CameraBlendCurve](#camerablendcurve), [CameraMode](#cameramode), [CameraModifierKind](#cameramodifierkind), [CameraRigFlags](#camerarigflags), [CameraRigPreset](#camerarigpreset), [CameraView](#cameraview), [CanvasScaleMode](#canvasscalemode), [CanvasStretchAspect](#canvasstretchaspect), [CanvasStretchMode](#canvasstretchmode), [CaptionKind](#captionkind), [CaptionMode](#captionmode), [ColourVisionMode](#colourvisionmode), [Component](#component), [CursorShape](#cursorshape), [CustomEnvKind](#customenvkind), [DataColumnType](#datacolumntype), [DataLayerResult](#datalayerresult), [DataLayerState](#datalayerstate), [DeadZoneType](#deadzonetype), [EffectFailure](#effectfailure), [EffectPolicy](#effectpolicy), [EndReason](#endreason), [EventValueKind](#eventvaluekind), [FadeCurve](#fadecurve), [FogVolumeShapeKind](#fogvolumeshapekind), [GamepadAxis](#gamepadaxis), [GamepadButton](#gamepadbutton), [HairColliderShape](#haircollidershape), [IkSpace](#ikspace), [ImageFormat](#imageformat), [ImageInterpolation](#imageinterpolation), [InputSource](#inputsource), [InputValueType](#inputvaluetype), [InterpolationMode](#interpolationmode), [Key](#key), [Layer2DFlags](#layer2dflags), [LifeState](#lifestate), [MagnitudeKind](#magnitudekind), [MeshGiMode](#meshgimode), [MeshShadowMode](#meshshadowmode), [ModOp](#modop), [MotionDrive](#motiondrive), [MotionFacing](#motionfacing), [Parallax2DFlags](#parallax2dflags), [ParticleParamKind](#particleparamkind), [PauseMode](#pausemode), [PlayState](#playstate), [PointerMode](#pointermode), [PresentMode](#presentmode), [RagdollMode](#ragdollmode), [RenderKey](#renderkey), [RootMotionAxes](#rootmotionaxes), [RootMotionImport](#rootmotionimport), [RootMotionMode](#rootmotionmode), [RopeEnd](#ropeend), [Scene2DComponent](#scene2dcomponent), [SoftContactMode](#softcontactmode), [SoftDamageKind](#softdamagekind), [SoftEventKind](#softeventkind), [SoftFieldKind](#softfieldkind), [SoftFieldShape](#softfieldshape), [SoftFieldTargets](#softfieldtargets), [SoftPreset](#softpreset), [SpeakerLayout](#speakerlayout), [Sprite2DBlend](#sprite2dblend), [Sprite2DFlags](#sprite2dflags), [SpriteAnimEventKind](#spriteanimeventkind), [StackExpire](#stackexpire), [StackScope](#stackscope), [StereoUpmix](#stereoupmix), [SubViewClear](#subviewclear), [SubViewUpdate](#subviewupdate), [SwizzleOrder](#swizzleorder), [TickGroup](#tickgroup), [TimerFlags](#timerflags), [Transform2DFlags](#transform2dflags), [TriggerState](#triggerstate), [VehicleEventKind](#vehicleeventkind), [VehiclePreset](#vehiclepreset), [WaterKind](#waterkind), [WindowFlags](#windowflags), [WindowMode](#windowmode), [WorldEnvKey](#worldenvkey)
+- Records: [ActiveEffectInfo](#activeeffectinfo), [AttributeChange](#attributechange), [CameraPose](#camerapose), [CameraRigState](#camerarigstate), [CarSpec](#carspec), [CarState](#carstate), [DriveBinding](#drivebinding), [GroundSample](#groundsample), [HairState](#hairstate), [HitEvent](#hitevent), [JellyState](#jellystate), [ModelImportResult](#modelimportresult), [ParticleStats](#particlestats), [RenderStats](#renderstats), [RopeState](#ropestate), [SoftBodyState](#softbodystate), [SoftEvent](#softevent), [SoftFieldSpec](#softfieldspec), [SoftSensorEvent](#softsensorevent), [SpriteAnimEvent2D](#spriteanimevent2d), [SurfaceHit](#surfacehit), [VehicleEvent](#vehicleevent), [VehicleTelemetry](#vehicletelemetry), [WaterSample](#watersample), [WheelPlan](#wheelplan), [WheelTelemetry](#wheeltelemetry)
+- Delegates: [PreAttributeChange](#preattributechange), [Scene2DTextureResolver](#scene2dtextureresolver)
+
+**namespace Aver.Framework.Hosting**
+
+- Classes: [ExtensionContext](#extensioncontext), [ExtensionHost](#extensionhost)
+- Interfaces: [IAverExtension](#iaverextension)
+
+**namespace Aver.Framework.Net**
+
+- Classes: [LoopbackNetwork](#loopbacknetwork), [LoopbackTransport](#loopbacktransport), [NativeNetTransport](#nativenettransport), [NetCodec](#netcodec), [NetConnection](#netconnection), [NetFormatException](#netformatexception), [NetObject](#netobject), [NetReader](#netreader), [NetRelevance](#netrelevance), [NetSession](#netsession), [NetStats](#netstats), [NetTypeAttribute](#nettypeattribute), [NetTypes](#nettypes), [NetWriter](#netwriter), [ReplicatedAttribute](#replicatedattribute), [RpcAttribute](#rpcattribute)
+- Structs: [NetTransportEvent](#nettransportevent)
+- Interfaces: [INetTransport](#inettransport)
+- Enums: [NetRole](#netrole), [NetSessionState](#netsessionstate), [NetTransportEventType](#nettransporteventtype), [RpcTarget](#rpctarget)
+- Records: [NetRpcRejection](#netrpcrejection)
 
 ## namespace Aver.Framework
+
+<a id="abilitybuilder"></a>
 
 ### AbilityBuilder
 
 `public sealed class AbilityBuilder` - Fluent AbilityDef builder.
 
-- `public AbilityBuilder AbilityTags(params string[] tags)` - The ability's own tags.
-- `public AbilityBuilder Cancels(params string[] tags)` - Activating cancels running abilities whose tags match.
-- `public AbilityBuilder Blocks(params string[] tags)` - While running, abilities whose tags match cannot activate.
-- `public AbilityBuilder Owns(params string[] tags)` - Tags the owner holds while the ability runs.
-- `public AbilityBuilder RequiresTags(params string[] tags)` - The owner must have all of these.
-- `public AbilityBuilder BlockedByTags(params string[] tags)` - The owner must have none of these.
-- `public AbilityBuilder Cost(string effectName)` - The instant effect paid on commit (looked up when registering).
-- `public AbilityBuilder Cost(EffectDef effect)` - The instant effect paid on commit.
-- `public AbilityBuilder Cooldown(string effectName)` - The duration effect whose granted tags are the cooldown (looked up when registering).
-- `public AbilityBuilder Cooldown(EffectDef effect)` - The duration effect whose granted tags are the cooldown.
-- `public AbilityBuilder Commit(AbilityCommit commit)` - When cost and cooldown are paid.
-- `public AbilityBuilder Duration(float seconds)` - Auto-end after this many seconds.
-- `public AbilityBuilder TriggerOnEvent(string tag)` - Activates on a gameplay event whose tag matches.
-- `public AbilityBuilder TriggerWhenGranted()` - Passive: activates when granted.
-- `public AbilityBuilder Retrigger(bool on = true)` - Activating while running restarts it.
-- `public AbilityBuilder Behaviour(string name)` - The [AverAbility] name of a C# behaviour.
-- `public AbilityDef Build()` - The definition, not yet registered.
-- `public AbilityDef? Register()` - Registers the definition.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AbilityTags` | `public AbilityBuilder AbilityTags(params string[] tags)` | The ability's own tags. |
+| `Behaviour` | `public AbilityBuilder Behaviour(string name)` | The [AverAbility] name of a C# behaviour. |
+| `BlockedByTags` | `public AbilityBuilder BlockedByTags(params string[] tags)` | The owner must have none of these. |
+| `Blocks` | `public AbilityBuilder Blocks(params string[] tags)` | While running, abilities whose tags match cannot activate. |
+| `Build` | `public AbilityDef Build()` | The definition, not yet registered. |
+| `Cancels` | `public AbilityBuilder Cancels(params string[] tags)` | Activating cancels running abilities whose tags match. |
+| `Commit` | `public AbilityBuilder Commit(AbilityCommit commit)` | When cost and cooldown are paid. |
+| `Cooldown` | `public AbilityBuilder Cooldown(EffectDef effect)` | The duration effect whose granted tags are the cooldown. |
+| `Cooldown` | `public AbilityBuilder Cooldown(string effectName)` | The duration effect whose granted tags are the cooldown (looked up when registering). |
+| `Cost` | `public AbilityBuilder Cost(EffectDef effect)` | The instant effect paid on commit. |
+| `Cost` | `public AbilityBuilder Cost(string effectName)` | The instant effect paid on commit (looked up when registering). |
+| `Duration` | `public AbilityBuilder Duration(float seconds)` | Auto-end after this many seconds. |
+| `Owns` | `public AbilityBuilder Owns(params string[] tags)` | Tags the owner holds while the ability runs. |
+| `Register` | `public AbilityDef? Register()` | Registers the definition. |
+| `RequiresTags` | `public AbilityBuilder RequiresTags(params string[] tags)` | The owner must have all of these. |
+| `Retrigger` | `public AbilityBuilder Retrigger(bool on = true)` | Activating while running restarts it. |
+| `TriggerOnEvent` | `public AbilityBuilder TriggerOnEvent(string tag)` | Activates on a gameplay event whose tag matches. |
+| `TriggerWhenGranted` | `public AbilityBuilder TriggerWhenGranted()` | Passive: activates when granted. |
+
+<a id="abilitycommit"></a>
 
 ### AbilityCommit
 
 `public enum AbilityCommit` - When an activated ability pays its cost and cooldown.
 
-Values: `Activate`, `Manual`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Activate` | `Activate` |  |
+| `Manual` | `Manual` |  |
+
+<a id="abilitydef"></a>
 
 ### AbilityDef
 
 `public sealed class AbilityDef` - An ability definition (immutable once registered).
 
-- `public string Name` - Unique name.
-- `public int Id` - Registry id, assigned at registration (0 until then).
-- `public GameplayTagContainer AbilityTags` - The ability's own tags.
-- `public GameplayTagContainer CancelsTags` - Activating cancels running abilities whose tags match any of these.
-- `public GameplayTagContainer BlocksTags` - While running, abilities whose tags match any of these cannot activate.
-- `public GameplayTagContainer OwnedTags` - Tags the owner holds while the ability runs.
-- `public GameplayTagContainer RequiredTags` - The owner must have all of these to activate.
-- `public GameplayTagContainer BlockedTags` - The owner must have none of these to activate.
-- `public GameplayTagContainer TriggerEvents` - Gameplay-event tags that activate the ability.
-- `public EffectDef? Cost` - An instant effect paid on commit.
-- `public EffectDef? Cooldown` - A duration effect granting the cooldown tag(s), applied on commit.
-- `public AbilityCommit Commit` - When cost and cooldown are paid.
-- `public float Duration` - Auto-end after this many seconds; 0 = until ended.
-- `public bool TriggerOnGranted` - Passive: activates when granted.
-- `public bool Retrigger` - Activating while running ends the old run and starts a new one.
-- `public string? Behaviour` - Name of a registered C# GameplayAbility, or null for a graph-only ability.
-- `public override string ToString()` - Inherited documentation.
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AbilityTags` | `public GameplayTagContainer AbilityTags` | The ability's own tags. |
+| `Behaviour` | `public string? Behaviour` | Name of a registered C# GameplayAbility, or null for a graph-only ability. |
+| `BlockedTags` | `public GameplayTagContainer BlockedTags` | The owner must have none of these to activate. |
+| `BlocksTags` | `public GameplayTagContainer BlocksTags` | While running, abilities whose tags match any of these cannot activate. |
+| `CancelsTags` | `public GameplayTagContainer CancelsTags` | Activating cancels running abilities whose tags match any of these. |
+| `Commit` | `public AbilityCommit Commit` | When cost and cooldown are paid. |
+| `Cooldown` | `public EffectDef? Cooldown` | A duration effect granting the cooldown tag(s), applied on commit. |
+| `Cost` | `public EffectDef? Cost` | An instant effect paid on commit. |
+| `Duration` | `public float Duration` | Auto-end after this many seconds; 0 = until ended. |
+| `Id` | `public int Id` | Registry id, assigned at registration (0 until then). |
+| `Name` | `public string Name` | Unique name. |
+| `OwnedTags` | `public GameplayTagContainer OwnedTags` | Tags the owner holds while the ability runs. |
+| `RequiredTags` | `public GameplayTagContainer RequiredTags` | The owner must have all of these to activate. |
+| `Retrigger` | `public bool Retrigger` | Activating while running ends the old run and starts a new one. |
+| `TriggerEvents` | `public GameplayTagContainer TriggerEvents` | Gameplay-event tags that activate the ability. |
+| `TriggerOnGranted` | `public bool TriggerOnGranted` | Passive: activates when granted. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ToString` | `public override string ToString()` | Inherited documentation. |
+
+<a id="abilityfailure"></a>
 
 ### AbilityFailure
 
 `public enum AbilityFailure` - Why an ability could not be activated.
 
-Values: `None = 0`, `NoSystem = 1`, `NotGranted = 2`, `AlreadyActive = 3`, `MissingRequiredTag = 4`, `BlockedByTag = 5`, `BlockedByAbility = 6`, `OnCooldown = 7`, `CannotAfford = 8`, `BehaviourRefused = 9`, `NoAuthority = 10`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AlreadyActive` | `AlreadyActive = 3` |  |
+| `BehaviourRefused` | `BehaviourRefused = 9` |  |
+| `BlockedByAbility` | `BlockedByAbility = 6` |  |
+| `BlockedByTag` | `BlockedByTag = 5` |  |
+| `CannotAfford` | `CannotAfford = 8` |  |
+| `MissingRequiredTag` | `MissingRequiredTag = 4` |  |
+| `NoAuthority` | `NoAuthority = 10` |  |
+| `None` | `None = 0` |  |
+| `NoSystem` | `NoSystem = 1` |  |
+| `NotGranted` | `NotGranted = 2` |  |
+| `OnCooldown` | `OnCooldown = 7` |  |
+
+<a id="abilityhandle"></a>
 
 ### AbilityHandle
 
 `public readonly struct AbilityHandle : IEquatable<AbilityHandle>` - A handle to a granted ability on one system.
 
-- `public int Value { get; }` - The raw handle.
-- `public bool IsValid { get; }` - True for a non-zero handle.
-- `public bool Equals(AbilityHandle other)` - Inherited documentation.
-- `public override bool Equals(object? obj)` - Inherited documentation.
-- `public override int GetHashCode()` - Inherited documentation.
-- `public static bool operator ==(AbilityHandle a, AbilityHandle b)` - Equality.
-- `public static bool operator !=(AbilityHandle a, AbilityHandle b)` - Inequality.
-- `public override string ToString()` - Inherited documentation.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `IsValid` | `public bool IsValid { get; }` | True for a non-zero handle. |
+| `Value` | `public int Value { get; }` | The raw handle. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Equals` | `public bool Equals(AbilityHandle other)` | Inherited documentation. |
+| `Equals` | `public override bool Equals(object? obj)` | Inherited documentation. |
+| `GetHashCode` | `public override int GetHashCode()` | Inherited documentation. |
+| `operator !=` | `public static bool operator !=(AbilityHandle a, AbilityHandle b)` | Inequality. |
+| `operator ==` | `public static bool operator ==(AbilityHandle a, AbilityHandle b)` | Equality. |
+| `ToString` | `public override string ToString()` | Inherited documentation. |
+
+<a id="abilitysystem"></a>
 
 ### AbilitySystem
 
 `public sealed class AbilitySystem` - The gameplay ability component of one entity: attributes with modifiers, counted tags, active effects and granted abilities.
 
-- `public static AbilitySystem? Of(Entity e)` - The entity's system, or null if it has none.
-- `public static AbilitySystem GetOrAdd(Entity e)` - The entity's system, created if absent.
-- `public static bool Remove(Entity e)` - Drops the entity's system without raising any notification.
-- `public Entity Owner { get; }` - The entity this system belongs to.
-- `public bool HasAuthority { get; set; }` - False on a client proxy: every mutating call then refuses (see docs/GAMEPLAY_ABILITIES.md, replication seam).
-- `public event Action<AttributeChange>? AttributeChanged` - Raised after an attribute's Current value changes.
-- `public event Action<GameplayTag, bool, int>? TagChanged` - Raised when a tag (or an ancestor of a tag) becomes present or absent: tag, present, count.
-- `public event Action<ActiveEffectInfo>? EffectApplied` - Raised when an effect is applied (instant effects report an invalid handle).
-- `public event Action<ActiveEffectInfo>? EffectRemoved` - Raised when an effect is removed or expires.
-- `public event Action<AbilityHandle, bool>? AbilityActivated` - Raised when an ability starts (the flag is always false).
-- `public event Action<AbilityHandle, bool>? AbilityEnded` - Raised when an ability ends; the flag is true if it was cancelled.
-- `public PreAttributeChange? PreAttributeChange` - Lets code adjust an attribute's new Current value before it is stored.
-- `public bool AddAttributeSet(string name)` - Adds the registered set called name.
-- `public bool AddAttributeSet(AttributeSetDef def)` - Adds a set.
-- `public bool Has(AttributeRef a)` - True if the entity has this attribute.
-- `public float GetValue(AttributeRef a)` - The attribute's Current value (Base plus active modifiers); 0 if absent or a meta attribute.
-- `public float GetBase(AttributeRef a)` - The attribute's permanent Base value; 0 if absent.
-- `public IEnumerable<AttributeRef> Attributes { get; }` - Every attribute on this entity, in the order the sets were added.
-- `public bool SetBase(AttributeRef a, float value, Entity instigator = default)` - Sets an attribute's Base (clamped to its bounds).
-- `public GameplayTagContainer Tags { get; }` - The effective tags (loose, granted by effects and owned by running abilities) as a read-only view.
-- `public bool HasTag(GameplayTag t)` - True if a tag matching t is held (hierarchical).
-- `public int TagCount(GameplayTag t)` - References held to t and its descendants.
-- `public void AddLooseTag(GameplayTag t, int count = 1)` - Adds loose references to a tag (not tied to any effect).
-- `public void RemoveLooseTag(GameplayTag t, int count = 1)` - Removes loose references (never more than were added loosely).
-- `public ActiveEffectHandle Apply(EffectSpec spec, out EffectFailure failure)` - Applies an effect to this entity.
-- `public ActiveEffectHandle Apply(EffectSpec spec)` - Applies an effect and discards the failure reason.
-- `public static ActiveEffectHandle ApplyTo(Entity target, EffectSpec spec)` - Applies an effect to target, creating its system if needed.
-- `public bool Remove(ActiveEffectHandle h)` - Removes one active effect.
-- `public int RemoveByTag(GameplayTag t)` - Removes every active effect whose asset or granted tags match t.
-- `public int RemoveByDef(EffectDef d)` - Removes every active instance of a definition.
-- `public bool TryGetEffect(ActiveEffectHandle h, out ActiveEffectInfo info)` - Looks an active effect up by handle.
-- `public bool TryGetEffect(EffectDef d, out ActiveEffectInfo info)` - The first active instance of a definition.
-- `public IReadOnlyList<ActiveEffectInfo> ActiveEffects { get; }` - A snapshot of every active effect in application order.
-- `public AbilityHandle Grant(string abilityName, int level = 1)` - Grants a registered ability (idempotent per ability).
-- `public bool Revoke(AbilityHandle h)` - Revokes an ability, ending it first if it is running.
-- `public AbilityHandle Find(string abilityName)` - The handle of a granted ability by name; invalid if not granted.
-- `public bool IsActive(AbilityHandle h)` - True while the ability is running.
-- `public AbilityFailure CanActivate(AbilityHandle h)` - Whether the ability could activate now, without activating it.
-- `public AbilityFailure TryActivate(AbilityHandle h, Entity target = default)` - Activates an ability.
-- `public bool Commit(AbilityHandle h)` - Pays the running ability's cost and cooldown.
-- `public bool End(AbilityHandle h, bool cancelled = false)` - Ends a running ability.
-- `public int CancelAbilities(GameplayTag tag)` - Cancels every running ability whose tags match tag.
-- `public float CooldownRemaining(AbilityHandle h)` - Seconds until the ability's cooldown ends (0 if ready; +infinity for an endless cooldown effect).
-- `public int SendGameplayEvent(GameplayTag tag, Entity instigator = default, float magnitude = 0f, Entity target = default)` - Raises a gameplay event on this entity and activates every granted ability triggered by it (hierarchical match).
-- `public AbilityHandle TryActivateByTag(GameplayTag tag, Entity target, out AbilityFailure failure)` - Activates the first granted ability whose tags match tag and that can run.
-- `public string Describe()` - A multi-line description of attributes, tags, effects and abilities, for logs.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ActiveEffects` | `public IReadOnlyList<ActiveEffectInfo> ActiveEffects { get; }` | A snapshot of every active effect in application order. |
+| `Attributes` | `public IEnumerable<AttributeRef> Attributes { get; }` | Every attribute on this entity, in the order the sets were added. |
+| `HasAuthority` | `public bool HasAuthority { get; set; }` | False on a client proxy: every mutating call then refuses (see docs/GAMEPLAY_ABILITIES.md, replication seam). |
+| `Owner` | `public Entity Owner { get; }` | The entity this system belongs to. |
+| `Tags` | `public GameplayTagContainer Tags { get; }` | The effective tags (loose, granted by effects and owned by running abilities) as a read-only view. |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `PreAttributeChange` | `public PreAttributeChange? PreAttributeChange` | Lets code adjust an attribute's new Current value before it is stored. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AddAttributeSet` | `public bool AddAttributeSet(AttributeSetDef def)` | Adds a set. |
+| `AddAttributeSet` | `public bool AddAttributeSet(string name)` | Adds the registered set called name. |
+| `AddLooseTag` | `public void AddLooseTag(GameplayTag t, int count = 1)` | Adds loose references to a tag (not tied to any effect). |
+| `Apply` | `public ActiveEffectHandle Apply(EffectSpec spec)` | Applies an effect and discards the failure reason. |
+| `Apply` | `public ActiveEffectHandle Apply(EffectSpec spec, out EffectFailure failure)` | Applies an effect to this entity. |
+| `ApplyTo` | `public static ActiveEffectHandle ApplyTo(Entity target, EffectSpec spec)` | Applies an effect to target, creating its system if needed. |
+| `CanActivate` | `public AbilityFailure CanActivate(AbilityHandle h)` | Whether the ability could activate now, without activating it. |
+| `CancelAbilities` | `public int CancelAbilities(GameplayTag tag)` | Cancels every running ability whose tags match tag. |
+| `Commit` | `public bool Commit(AbilityHandle h)` | Pays the running ability's cost and cooldown. |
+| `CooldownRemaining` | `public float CooldownRemaining(AbilityHandle h)` | Seconds until the ability's cooldown ends (0 if ready; +infinity for an endless cooldown effect). |
+| `Describe` | `public string Describe()` | A multi-line description of attributes, tags, effects and abilities, for logs. |
+| `End` | `public bool End(AbilityHandle h, bool cancelled = false)` | Ends a running ability. |
+| `Find` | `public AbilityHandle Find(string abilityName)` | The handle of a granted ability by name; invalid if not granted. |
+| `GetBase` | `public float GetBase(AttributeRef a)` | The attribute's permanent Base value; 0 if absent. |
+| `GetOrAdd` | `public static AbilitySystem GetOrAdd(Entity e)` | The entity's system, created if absent. |
+| `GetValue` | `public float GetValue(AttributeRef a)` | The attribute's Current value (Base plus active modifiers); 0 if absent or a meta attribute. |
+| `Grant` | `public AbilityHandle Grant(string abilityName, int level = 1)` | Grants a registered ability (idempotent per ability). |
+| `Has` | `public bool Has(AttributeRef a)` | True if the entity has this attribute. |
+| `HasTag` | `public bool HasTag(GameplayTag t)` | True if a tag matching t is held (hierarchical). |
+| `IsActive` | `public bool IsActive(AbilityHandle h)` | True while the ability is running. |
+| `Of` | `public static AbilitySystem? Of(Entity e)` | The entity's system, or null if it has none. |
+| `Remove` | `public bool Remove(ActiveEffectHandle h)` | Removes one active effect. |
+| `Remove` | `public static bool Remove(Entity e)` | Drops the entity's system without raising any notification. |
+| `RemoveByDef` | `public int RemoveByDef(EffectDef d)` | Removes every active instance of a definition. |
+| `RemoveByTag` | `public int RemoveByTag(GameplayTag t)` | Removes every active effect whose asset or granted tags match t. |
+| `RemoveLooseTag` | `public void RemoveLooseTag(GameplayTag t, int count = 1)` | Removes loose references (never more than were added loosely). |
+| `Revoke` | `public bool Revoke(AbilityHandle h)` | Revokes an ability, ending it first if it is running. |
+| `SendGameplayEvent` | `public int SendGameplayEvent(GameplayTag tag, Entity instigator = default, float magnitude = 0f, Entity target = default)` | Raises a gameplay event on this entity and activates every granted ability triggered by it (hierarchical match). |
+| `SetBase` | `public bool SetBase(AttributeRef a, float value, Entity instigator = default)` | Sets an attribute's Base (clamped to its bounds). |
+| `TagCount` | `public int TagCount(GameplayTag t)` | References held to t and its descendants. |
+| `TryActivate` | `public AbilityFailure TryActivate(AbilityHandle h, Entity target = default)` | Activates an ability. |
+| `TryActivateByTag` | `public AbilityHandle TryActivateByTag(GameplayTag tag, Entity target, out AbilityFailure failure)` | Activates the first granted ability whose tags match tag and that can run. |
+| `TryGetEffect` | `public bool TryGetEffect(ActiveEffectHandle h, out ActiveEffectInfo info)` | Looks an active effect up by handle. |
+| `TryGetEffect` | `public bool TryGetEffect(EffectDef d, out ActiveEffectInfo info)` | The first active instance of a definition. |
+
+**Events**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AbilityActivated` | `public event Action<AbilityHandle, bool>? AbilityActivated` | Raised when an ability starts (the flag is always false). |
+| `AbilityEnded` | `public event Action<AbilityHandle, bool>? AbilityEnded` | Raised when an ability ends; the flag is true if it was cancelled. |
+| `AttributeChanged` | `public event Action<AttributeChange>? AttributeChanged` | Raised after an attribute's Current value changes. |
+| `EffectApplied` | `public event Action<ActiveEffectInfo>? EffectApplied` | Raised when an effect is applied (instant effects report an invalid handle). |
+| `EffectRemoved` | `public event Action<ActiveEffectInfo>? EffectRemoved` | Raised when an effect is removed or expires. |
+| `TagChanged` | `public event Action<GameplayTag, bool, int>? TagChanged` | Raised when a tag (or an ancestor of a tag) becomes present or absent: tag, present, count. |
+
+<a id="accessibility"></a>
 
 ### Accessibility
 
 `public static class Accessibility` - The player's accessibility options: every one is a float under a stable key (access.*, plus graphics.uiScale), clamped and snapped by the native table.
 
-- `public static event Action<string, float>? Changed` - Raised from Tick, once per accepted change: key and new value.
-- `public static float Get(string key, float fallback = 0f)` - The value of any key in the table (or a dynamic access.input.toggle.&lt;Action&gt;); fallback for an unknown key or when the framework is not loaded.
-- `public static bool Set(string key, float value)` - Sets a key, clamped to its range.
-- `public static void ResetToDefaults()` - Puts every option back to its default.
-- `public static int Revision { get; }` - Bumps on every accepted change.
-- `public static void Tick(float dt)` - Once a frame (HostBridge group 0): drains the accepted changes into Settings, raises Changed, flushes the file after 0.5 s without a change, and runs the speech queue.
-- `public static void FlushNow()` - Writes any pending change to disk now (the settings screen closing).
-- `public static float UiScale { get; set; }` - The whole-UI scale, 0.75 to 2.0 (key graphics.uiScale).
-- `public static float TextScale { get; set; }` - Text-only scale, 0.75 to 2.0.
-- `public static bool HighContrast { get; set; }` - High-contrast UI: the contrast theme, authored colours ignored.
-- `public static ColourVisionMode ColourVision { get; set; }` - The colour-vision filter.
-- `public static float ColourStrength { get; set; }` - How far the filter moves colour, 0 to 1.
-- `public static bool SimulateColourVision { get; set; }` - Developer preview: show what a colour-blind viewer sees instead of correcting for them.
-- `public static bool ReduceMotion { get; set; }` - The master "reduce motion" gate: zeroes shake, bob, motion blur and the lens effects while on.
-- `public static float ShakeScale { get; set; }` - Camera shake amount, 0 to 1.
-- `public static float BobScale { get; set; }` - Head bob amount, 0 to 1.
-- `public static bool MotionBlurAllowed { get; set; }` - Whether motion blur is allowed.
-- `public static bool LensEffectsAllowed { get; set; }` - Whether chromatic aberration, film grain and lens flare are allowed.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `BobScale` | `public static float BobScale { get; set; }` | Head bob amount, 0 to 1. |
+| `ColourStrength` | `public static float ColourStrength { get; set; }` | How far the filter moves colour, 0 to 1. |
+| `ColourVision` | `public static ColourVisionMode ColourVision { get; set; }` | The colour-vision filter. |
+| `HighContrast` | `public static bool HighContrast { get; set; }` | High-contrast UI: the contrast theme, authored colours ignored. |
+| `LensEffectsAllowed` | `public static bool LensEffectsAllowed { get; set; }` | Whether chromatic aberration, film grain and lens flare are allowed. |
+| `MotionBlurAllowed` | `public static bool MotionBlurAllowed { get; set; }` | Whether motion blur is allowed. |
+| `ReduceMotion` | `public static bool ReduceMotion { get; set; }` | The master "reduce motion" gate: zeroes shake, bob, motion blur and the lens effects while on. |
+| `Revision` | `public static int Revision { get; }` | Bumps on every accepted change. |
+| `ShakeScale` | `public static float ShakeScale { get; set; }` | Camera shake amount, 0 to 1. |
+| `SimulateColourVision` | `public static bool SimulateColourVision { get; set; }` | Developer preview: show what a colour-blind viewer sees instead of correcting for them. |
+| `TextScale` | `public static float TextScale { get; set; }` | Text-only scale, 0.75 to 2.0. |
+| `UiScale` | `public static float UiScale { get; set; }` | The whole-UI scale, 0.75 to 2.0 (key graphics.uiScale). |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `FlushNow` | `public static void FlushNow()` | Writes any pending change to disk now (the settings screen closing). |
+| `Get` | `public static float Get(string key, float fallback = 0f)` | The value of any key in the table (or a dynamic access.input.toggle.&lt;Action&gt;); fallback for an unknown key or when the framework is not loaded. |
+| `ResetToDefaults` | `public static void ResetToDefaults()` | Puts every option back to its default. |
+| `Set` | `public static bool Set(string key, float value)` | Sets a key, clamped to its range. |
+| `Tick` | `public static void Tick(float dt)` | Once a frame (HostBridge group 0): drains the accepted changes into Settings, raises Changed, flushes the file after 0.5 s without a change, and runs the speech queue. |
+
+**Events**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Changed` | `public static event Action<string, float>? Changed` | Raised from Tick, once per accepted change: key and new value. |
+
+<a id="accessibility-input"></a>
 
 ### Accessibility.Input
 
 `public static class Input` - Input assistance: toggle instead of hold, and timing scales.
 
-- `public static bool IsToggleEnabled(string action)` - Whether the action is a toggle (a tap latches it on, another releases it).
-- `public static void SetToggle(string action, bool on)` - Turns toggle-instead-of-hold on or off for a Digital action.
-- `public static void SetToggleAllowed(string action, bool allowed)` - False hides the action from the settings page and ignores a saved toggle (a Pause key, say).
-- `public static bool IsToggleAllowed(string action)` - Whether the action may be a toggle.
-- `public static float HoldScale { get; set; }` - Multiplies hold times, 0.25 to 1 (shorter holds).
-- `public static float WindowScale { get; set; }` - Multiplies tap and combo windows, 1 to 4 (longer windows).
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `HoldScale` | `public static float HoldScale { get; set; }` | Multiplies hold times, 0.25 to 1 (shorter holds). |
+| `WindowScale` | `public static float WindowScale { get; set; }` | Multiplies tap and combo windows, 1 to 4 (longer windows). |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `IsToggleAllowed` | `public static bool IsToggleAllowed(string action)` | Whether the action may be a toggle. |
+| `IsToggleEnabled` | `public static bool IsToggleEnabled(string action)` | Whether the action is a toggle (a tap latches it on, another releases it). |
+| `SetToggle` | `public static void SetToggle(string action, bool on)` | Turns toggle-instead-of-hold on or off for a Digital action. |
+| `SetToggleAllowed` | `public static void SetToggleAllowed(string action, bool allowed)` | False hides the action from the settings page and ignores a saved toggle (a Pause key, say). |
+
+<a id="accesssettingsstore"></a>
 
 ### AccessSettingsStore
 
 `public sealed class AccessSettingsStore : ISettingsStore` - ISettingsStore that answers every accessibility key (access.* and graphics.uiScale) from Accessibility and the rest from Settings.
 
-- `public static bool Owns(string key)` - True for the keys this store owns.
-- `public float Get(string key, float fallback)` - Inherited documentation.
-- `public void Set(string key, float value)` - Inherited documentation.
-- `public void Flush()` - Inherited documentation.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Flush` | `public void Flush()` | Inherited documentation. |
+| `Get` | `public float Get(string key, float fallback)` | Inherited documentation. |
+| `Owns` | `public static bool Owns(string key)` | True for the keys this store owns. |
+| `Set` | `public void Set(string key, float value)` | Inherited documentation. |
+
+<a id="actionevent"></a>
 
 ### ActionEvent
 
 `public enum ActionEvent` - What changed in an action's state during the last update, as a bit mask.
 
-Values: `None = 0`, `Started = 1`, `Ongoing = 2`, `Triggered = 4`, `Completed = 8`, `Canceled = 16`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Canceled` | `Canceled = 16` |  |
+| `Completed` | `Completed = 8` |  |
+| `None` | `None = 0` |  |
+| `Ongoing` | `Ongoing = 2` |  |
+| `Started` | `Started = 1` |  |
+| `Triggered` | `Triggered = 4` |  |
+
+<a id="activeeffecthandle"></a>
 
 ### ActiveEffectHandle
 
 `public readonly struct ActiveEffectHandle : IEquatable<ActiveEffectHandle>` - A handle to an active effect on one system.
 
-- `public int Value { get; }` - The raw handle.
-- `public bool IsValid { get; }` - True for a non-zero handle; says nothing about whether the effect is still active.
-- `public bool Equals(ActiveEffectHandle other)` - Inherited documentation.
-- `public override bool Equals(object? obj)` - Inherited documentation.
-- `public override int GetHashCode()` - Inherited documentation.
-- `public static bool operator ==(ActiveEffectHandle a, ActiveEffectHandle b)` - Equality.
-- `public static bool operator !=(ActiveEffectHandle a, ActiveEffectHandle b)` - Inequality.
-- `public override string ToString()` - Inherited documentation.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `IsValid` | `public bool IsValid { get; }` | True for a non-zero handle; says nothing about whether the effect is still active. |
+| `Value` | `public int Value { get; }` | The raw handle. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Equals` | `public bool Equals(ActiveEffectHandle other)` | Inherited documentation. |
+| `Equals` | `public override bool Equals(object? obj)` | Inherited documentation. |
+| `GetHashCode` | `public override int GetHashCode()` | Inherited documentation. |
+| `operator !=` | `public static bool operator !=(ActiveEffectHandle a, ActiveEffectHandle b)` | Inequality. |
+| `operator ==` | `public static bool operator ==(ActiveEffectHandle a, ActiveEffectHandle b)` | Equality. |
+| `ToString` | `public override string ToString()` | Inherited documentation. |
+
+<a id="activeeffectinfo"></a>
 
 ### ActiveEffectInfo
 
 `public readonly record struct ActiveEffectInfo(ActiveEffectHandle Handle, EffectDef Def, Entity Source, int Stacks, float Remaining, bool Inhibited)` - A snapshot of one active effect.
 
+<a id="actorbuilder"></a>
+
 ### ActorBuilder
 
 `public sealed class ActorBuilder` - Builds the model tree an actor carries: each Place spawns a child mesh under the actor.
 
-- `public ModelHandle Place( ulong modelId, string meshPath, string material, (float X, float Y, float Z) pos, (float Yaw, float Pitch, float Roll) rot, (float X, float Y, float Z) scale)` - Places one model under the actor and returns its handle.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Place` | `public ModelHandle Place( ulong modelId, string meshPath, string material, (float X, float Y, float Z) pos, (float Yaw, float Pitch, float Roll) rot, (float X, float Y, float Z) scale)` | Places one model under the actor and returns its handle. |
+
+<a id="actorclass"></a>
 
 ### ActorClass
 
 `public readonly struct ActorClass : IEquatable<ActorClass>` - A handle to a registered class (a registry row), not an instance.
 
-- `public int Handle { get; }` - The raw ABI class handle.
-- `public static ActorClass Find(string name)` - Finds a class by its declared name.
-- `public string Name { get; }`
-- `public bool IsValid { get; }`
-- `public bool Equals(ActorClass o)`
-- `public override bool Equals(object? o)`
-- `public override int GetHashCode()`
-- `public override string ToString()`
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Handle` | `public int Handle { get; }` | The raw ABI class handle. |
+| `IsValid` | `public bool IsValid { get; }` |  |
+| `Name` | `public string Name { get; }` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Equals` | `public bool Equals(ActorClass o)` |  |
+| `Equals` | `public override bool Equals(object? o)` |  |
+| `Find` | `public static ActorClass Find(string name)` | Finds a class by its declared name. |
+| `GetHashCode` | `public override int GetHashCode()` |  |
+| `ToString` | `public override string ToString()` |  |
+
+<a id="actors"></a>
 
 ### Actors
 
 `public static class Actors` - Turns an Entity back into the C# object that is that actor.
 
-- `public static AverActor? Get(Entity e)` - The managed actor bound to e, or null if it is dead, not an actor, or disabled.
-- `public static T? Get<T>(Entity e) where T : AverActor` - The managed actor bound to e as T, or null.
-- `public static Entity Spawn(ActorClass c, Vec3 at, Quat rotation, Vec3 scale)` - Spawns c at a position, orientation and scale, from outside an actor.
-- `public static Entity Spawn(ActorClass c, Vec3 at)` - Spawns c at a position, unrotated and unscaled.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Get` | `public static AverActor? Get(Entity e)` | The managed actor bound to e, or null if it is dead, not an actor, or disabled. |
+| `Get` | `public static T? Get<T>(Entity e) where T : AverActor` | The managed actor bound to e as T, or null. |
+| `Spawn` | `public static Entity Spawn(ActorClass c, Vec3 at)` | Spawns c at a position, unrotated and unscaled. |
+| `Spawn` | `public static Entity Spawn(ActorClass c, Vec3 at, Quat rotation, Vec3 scale)` | Spawns c at a position, orientation and scale, from outside an actor. |
+
+<a id="attributechange"></a>
 
 ### AttributeChange
 
 `public readonly record struct AttributeChange(AbilitySystem System, AttributeRef Attribute, float OldValue, float NewValue, Entity Instigator)` - A change in an attribute's Current value, delivered after the mutation that caused it has finished.
 
+<a id="attributedef"></a>
+
 ### AttributeDef
 
 `public sealed class AttributeDef` - One attribute of a set: its default Base, its bounds and its meta behaviour.
 
-- `public string Name` - Attribute name (global per system).
-- `public float DefaultBase` - Base value a fresh entity starts with.
-- `public float Min` - Literal lower bound (default -infinity).
-- `public float Max` - Literal upper bound (default +infinity).
-- `public AttributeRef MinFrom` - When valid, another attribute's Current value is the lower bound instead of Min.
-- `public AttributeRef MaxFrom` - When valid, another attribute's Current value is the upper bound instead of Max.
-- `public bool IsMeta` - A meta attribute is never stored; an instant Add to it is forwarded (or just announced) and it reads 0 again.
-- `public AttributeRef ForwardTo` - Meta only: the attribute an instant Add is forwarded to.
-- `public float ForwardScale` - Meta only: multiplier applied to the forwarded amount.
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `DefaultBase` | `public float DefaultBase` | Base value a fresh entity starts with. |
+| `ForwardScale` | `public float ForwardScale` | Meta only: multiplier applied to the forwarded amount. |
+| `ForwardTo` | `public AttributeRef ForwardTo` | Meta only: the attribute an instant Add is forwarded to. |
+| `IsMeta` | `public bool IsMeta` | A meta attribute is never stored; an instant Add to it is forwarded (or just announced) and it reads 0 again. |
+| `Max` | `public float Max` | Literal upper bound (default +infinity). |
+| `MaxFrom` | `public AttributeRef MaxFrom` | When valid, another attribute's Current value is the upper bound instead of Max. |
+| `Min` | `public float Min` | Literal lower bound (default -infinity). |
+| `MinFrom` | `public AttributeRef MinFrom` | When valid, another attribute's Current value is the lower bound instead of Min. |
+| `Name` | `public string Name` | Attribute name (global per system). |
+
+<a id="attributeref"></a>
 
 ### AttributeRef
 
 `public readonly struct AttributeRef : IEquatable<AttributeRef>` - An interned attribute name.
 
-- `public int Id { get; }` - The interned id; 0 is none.
-- `public bool IsValid { get; }` - True for a real attribute.
-- `public string Name { get; }` - The attribute name; empty for none.
-- `public static AttributeRef Of(string name)` - Interns name (letters, digits and underscores, not starting with a digit).
-- `public bool Equals(AttributeRef other)` - Inherited documentation.
-- `public override bool Equals(object? obj)` - Inherited documentation.
-- `public override int GetHashCode()` - Inherited documentation.
-- `public static bool operator ==(AttributeRef a, AttributeRef b)` - Equality.
-- `public static bool operator !=(AttributeRef a, AttributeRef b)` - Inequality.
-- `public override string ToString()` - Inherited documentation.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Id` | `public int Id { get; }` | The interned id; 0 is none. |
+| `IsValid` | `public bool IsValid { get; }` | True for a real attribute. |
+| `Name` | `public string Name { get; }` | The attribute name; empty for none. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Equals` | `public bool Equals(AttributeRef other)` | Inherited documentation. |
+| `Equals` | `public override bool Equals(object? obj)` | Inherited documentation. |
+| `GetHashCode` | `public override int GetHashCode()` | Inherited documentation. |
+| `Of` | `public static AttributeRef Of(string name)` | Interns name (letters, digits and underscores, not starting with a digit). |
+| `operator !=` | `public static bool operator !=(AttributeRef a, AttributeRef b)` | Inequality. |
+| `operator ==` | `public static bool operator ==(AttributeRef a, AttributeRef b)` | Equality. |
+| `ToString` | `public override string ToString()` | Inherited documentation. |
+
+<a id="attributesetbuilder"></a>
 
 ### AttributeSetBuilder
 
 `public sealed class AttributeSetBuilder` - Fluent AttributeSetDef builder.
 
-- `public AttributeSetBuilder Attribute(string name, float defaultBase, float min = float.NegativeInfinity, float max = float.PositiveInfinity, string? minFrom = null, string? maxFrom = null)` - An attribute with a default Base and literal bounds, or bounds read from other attributes.
-- `public AttributeSetBuilder Meta(string name, string? forwardTo = null, float scale = 1f)` - A meta attribute: never stored; an instant Add is forwarded (times scale) to forwardTo or announced.
-- `public AttributeSetDef Build()` - The definition, not yet registered.
-- `public AttributeSetDef? Register()` - Registers the set.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Attribute` | `public AttributeSetBuilder Attribute(string name, float defaultBase, float min = float.NegativeInfinity, float max = float.PositiveInfinity, string? minFrom = null, string? maxFrom = null)` | An attribute with a default Base and literal bounds, or bounds read from other attributes. |
+| `Build` | `public AttributeSetDef Build()` | The definition, not yet registered. |
+| `Meta` | `public AttributeSetBuilder Meta(string name, string? forwardTo = null, float scale = 1f)` | A meta attribute: never stored; an instant Add is forwarded (times scale) to forwardTo or announced. |
+| `Register` | `public AttributeSetDef? Register()` | Registers the set. |
+
+<a id="attributesetdef"></a>
 
 ### AttributeSetDef
 
 `public sealed class AttributeSetDef` - A named group of attributes added to an entity together.
 
-- `public string Name` - Set name.
-- `public IReadOnlyList<AttributeDef> Attributes` - The attributes in declaration order.
-- `public AttributeSetDef()` - An empty set (fill the fields).
-- `public AttributeSetDef(string name, IReadOnlyList<AttributeDef> attributes)` - A set with its attributes.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AttributeSetDef` | `public AttributeSetDef()` | An empty set (fill the fields). |
+| `AttributeSetDef` | `public AttributeSetDef(string name, IReadOnlyList<AttributeDef> attributes)` | A set with its attributes. |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Attributes` | `public IReadOnlyList<AttributeDef> Attributes` | The attributes in declaration order. |
+| `Name` | `public string Name` | Set name. |
+
+<a id="audio"></a>
 
 ### Audio
 
 `public static class Audio` - The mixer as a script sees it: load a sound, play it, steer it, place the listener.
 
-- `public const int ZoneReverbSlots = 4` - How many zone send reverbs the mixer pre-allocates.
-- `public static bool SetZoneReverb(int slot, float wet, float decaySeconds = 1.5f, float damping = 0.4f, Sound impulse = default, float predelayMs = 0f)` - Sets zone send reverb slot: wet is its return level (0 turns the slot off), decay the RT60 in seconds.
-- `public static bool Ready { get; }` - True when a device is open and the mixer thread is running.
-- `public static int SampleRate { get; }` - The device's sample rate in Hz, or 0 before audio has started.
-- `public static int Channels { get; }` - The mixer's channel count (1, 2, 6 or 8), or 0 before audio has started.
-- `public static SpeakerLayout Speakers { get; set; }` - The layout the project asks for.
-- `public static StereoUpmix Upmix { get; set; }` - How a stereo source and the reverb return are spread over 5.1 / 7.1.
-- `public static float LfeSend { get; set; }` - How much of every voice goes to the LFE channel of a 5.1 / 7.1 mix, 0..1.
-- `public static bool Binaural { get; set; }` - Headphone mode: positional sounds on a stereo mix are placed with an analytic head model (interaural delay, head shadow, a pinna cue; no measured data) instead of the plain pan.
-- `public static int Underruns { get; }` - Buffers the device asked for and did not get in time.
-- `public static AudioDeviceState DeviceState { get; }` - Where the output device stands.
-- `public static string DeviceName { get; }` - The output device's friendly name; the last one that was open while there is none.
-- `public static int DeviceChannels { get; }` - The device's hardware channel count (Channels is what the mixer renders: 1, 2, 6 or 8).
-- `public static int DeviceBufferFrames { get; }` - The device buffer (period) granted, in frames.
-- `public static float DeviceLatencyMs { get; }` - Output latency in milliseconds: the backend's own figure when it has one, else the buffer length.
-- `public static int DeviceChanges { get; }` - Devices opened after the first: default changes, unplugs and returns.
-- `public static int ActiveVoices { get; }` - How many voices are sounding right now.
-- `public static int StolenVoices { get; }` - How many voices have been cut short to make room for a newer one.
-- `public static void Collect()` - Reclaims unloaded sounds whose last voice has ended.
-- `public static Sound Load(string path)` - Loads a sound file and returns a handle, or None.
-- `public static Sound LoadPcm(float[] samples, int channels, int sampleRate)` - Registers generated samples as a playable sound: interleaved f32, 1 or 2 channels.
-- `public static Voice Play(Sound sound, float volume = 1f, float pitch = 1f, bool looping = false, Bus bus = Bus.Sfx)` - Plays a sound the same in both ears — UI clicks, music, narration.
-- `public static Voice PlayAt(Sound sound, Vec3 position, float volume = 1f, float pitch = 1f, bool looping = false, Bus bus = Bus.Sfx, float innerCm = 100f, float outerCm = 2000f)` - Plays a sound panned and attenuated against the listener.
-- `public static Voice PlayFile(string path, float volume = 1f, float pitch = 1f, bool looping = false, Bus bus = Bus.Sfx)` - Loads and plays in one call, for the common "just make this noise" case.
-- `public static void StopAll()` - Stops every voice at once.
-- `public static void SetListener(Vec3 position, Vec3 forward, Vec3 right)` - Where the ears are and which way they face.
-- `public static float MasterVolume { get; set; }` - The master volume, 0..1, applied over every bus.
-- `public static float GetBusVolume(Bus bus)` - Reads one bus's volume, 0..1.
-- `public static void SetBusVolume(Bus bus, float volume)` - Sets one bus's volume, 0..1 — how a game gives the player separate SFX and music sliders.
-- `public static SoundGraph LoadGraph(string path)` - Loads and compiles a .ocsnd for real-time play.
-- `public static Voice PlayGraph(SoundGraph graph, float volume = 1f, bool looping = false, Bus bus = Bus.Sfx, uint seed = 0)` - Plays a sound graph flat in both ears, evaluated on the audio thread.
-- `public static Voice PlayGraph(SoundGraph graph, float volume, bool looping, Bus bus, uint seed, ReadOnlySpan<(string Name, float Value)> inputs)` - As PlayGraph(SoundGraph, float, bool, Bus, uint), with live inputs set before the first block, so a voice that starts at rpm 3000 does not ramp up from the default.
-- `public static Voice PlayGraphAt(SoundGraph graph, Vec3 position, float volume = 1f, bool looping = false, Bus bus = Bus.Sfx, float innerCm = 100f, float outerCm = 2000f, uint seed = 0)` - Plays a sound graph at a world position, panned and attenuated against the listener (centimetres).
-- `public static Voice PlayGraphAt(SoundGraph graph, Vec3 position, float volume, bool looping, Bus bus, float innerCm, float outerCm, uint seed, ReadOnlySpan<(string Name, float Value)> inputs)` - As the other PlayGraphAt, with live inputs set before the first block.
-- `public static Voice PlayStream(string path, float volume = 1f, float pitch = 1f, bool looping = false, Bus bus = Bus.Sfx, float fadeInSeconds = 0f)` - Streams a file from disk, flat in both ears: long ambience, dialogue, music.
-- `public static Voice PlayStreamAt(string path, Vec3 position, float volume = 1f, float pitch = 1f, bool looping = false, Bus bus = Bus.Sfx, float innerCm = 100f, float outerCm = 2000f, float fadeInSeconds = 0f)` - Streams a file as a positioned voice.
-- `public static void SetReverb(float wet, float decaySeconds = 1.5f, float damping = 0.4f)` - The listener-side reverb.
-- `public static void SetOcclusionCurve(float minCutoffHz, float minVolume)` - The low-pass cutoff and linear volume a fully occluded voice reaches.
-- `public static int StreamUnderruns { get; }` - Blocks in which a stream ran out of decoded audio.
-- `public static int ActiveStreams { get; }` - Streams currently held by a playing voice.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ActiveStreams` | `public static int ActiveStreams { get; }` | Streams currently held by a playing voice. |
+| `ActiveVoices` | `public static int ActiveVoices { get; }` | How many voices are sounding right now. |
+| `Binaural` | `public static bool Binaural { get; set; }` | Headphone mode: positional sounds on a stereo mix are placed with an analytic head model (interaural delay, head shadow, a pinna cue; no measured data) instead of the plain pan. |
+| `Channels` | `public static int Channels { get; }` | The mixer's channel count (1, 2, 6 or 8), or 0 before audio has started. |
+| `DeviceBufferFrames` | `public static int DeviceBufferFrames { get; }` | The device buffer (period) granted, in frames. |
+| `DeviceChanges` | `public static int DeviceChanges { get; }` | Devices opened after the first: default changes, unplugs and returns. |
+| `DeviceChannels` | `public static int DeviceChannels { get; }` | The device's hardware channel count (Channels is what the mixer renders: 1, 2, 6 or 8). |
+| `DeviceLatencyMs` | `public static float DeviceLatencyMs { get; }` | Output latency in milliseconds: the backend's own figure when it has one, else the buffer length. |
+| `DeviceName` | `public static string DeviceName { get; }` | The output device's friendly name; the last one that was open while there is none. |
+| `DeviceState` | `public static AudioDeviceState DeviceState { get; }` | Where the output device stands. |
+| `LfeSend` | `public static float LfeSend { get; set; }` | How much of every voice goes to the LFE channel of a 5.1 / 7.1 mix, 0..1. |
+| `MasterVolume` | `public static float MasterVolume { get; set; }` | The master volume, 0..1, applied over every bus. |
+| `Ready` | `public static bool Ready { get; }` | True when a device is open and the mixer thread is running. |
+| `SampleRate` | `public static int SampleRate { get; }` | The device's sample rate in Hz, or 0 before audio has started. |
+| `Speakers` | `public static SpeakerLayout Speakers { get; set; }` | The layout the project asks for. |
+| `StolenVoices` | `public static int StolenVoices { get; }` | How many voices have been cut short to make room for a newer one. |
+| `StreamUnderruns` | `public static int StreamUnderruns { get; }` | Blocks in which a stream ran out of decoded audio. |
+| `Underruns` | `public static int Underruns { get; }` | Buffers the device asked for and did not get in time. |
+| `Upmix` | `public static StereoUpmix Upmix { get; set; }` | How a stereo source and the reverb return are spread over 5.1 / 7.1. |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ZoneReverbSlots` | `public const int ZoneReverbSlots = 4` | How many zone send reverbs the mixer pre-allocates. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Collect` | `public static void Collect()` | Reclaims unloaded sounds whose last voice has ended. |
+| `GetBusVolume` | `public static float GetBusVolume(Bus bus)` | Reads one bus's volume, 0..1. |
+| `Load` | `public static Sound Load(string path)` | Loads a sound file and returns a handle, or None. |
+| `LoadGraph` | `public static SoundGraph LoadGraph(string path)` | Loads and compiles a .ocsnd for real-time play. |
+| `LoadPcm` | `public static Sound LoadPcm(float[] samples, int channels, int sampleRate)` | Registers generated samples as a playable sound: interleaved f32, 1 or 2 channels. |
+| `Play` | `public static Voice Play(Sound sound, float volume = 1f, float pitch = 1f, bool looping = false, Bus bus = Bus.Sfx)` | Plays a sound the same in both ears — UI clicks, music, narration. |
+| `PlayAt` | `public static Voice PlayAt(Sound sound, Vec3 position, float volume = 1f, float pitch = 1f, bool looping = false, Bus bus = Bus.Sfx, float innerCm = 100f, float outerCm = 2000f)` | Plays a sound panned and attenuated against the listener. |
+| `PlayFile` | `public static Voice PlayFile(string path, float volume = 1f, float pitch = 1f, bool looping = false, Bus bus = Bus.Sfx)` | Loads and plays in one call, for the common "just make this noise" case. |
+| `PlayGraph` | `public static Voice PlayGraph(SoundGraph graph, float volume = 1f, bool looping = false, Bus bus = Bus.Sfx, uint seed = 0)` | Plays a sound graph flat in both ears, evaluated on the audio thread. |
+| `PlayGraph` | `public static Voice PlayGraph(SoundGraph graph, float volume, bool looping, Bus bus, uint seed, ReadOnlySpan<(string Name, float Value)> inputs)` | As PlayGraph(SoundGraph, float, bool, Bus, uint), with live inputs set before the first block, so a voice that starts at rpm 3000 does not ramp up from the default. |
+| `PlayGraphAt` | `public static Voice PlayGraphAt(SoundGraph graph, Vec3 position, float volume = 1f, bool looping = false, Bus bus = Bus.Sfx, float innerCm = 100f, float outerCm = 2000f, uint seed = 0)` | Plays a sound graph at a world position, panned and attenuated against the listener (centimetres). |
+| `PlayGraphAt` | `public static Voice PlayGraphAt(SoundGraph graph, Vec3 position, float volume, bool looping, Bus bus, float innerCm, float outerCm, uint seed, ReadOnlySpan<(string Name, float Value)> inputs)` | As the other PlayGraphAt, with live inputs set before the first block. |
+| `PlayStream` | `public static Voice PlayStream(string path, float volume = 1f, float pitch = 1f, bool looping = false, Bus bus = Bus.Sfx, float fadeInSeconds = 0f)` | Streams a file from disk, flat in both ears: long ambience, dialogue, music. |
+| `PlayStreamAt` | `public static Voice PlayStreamAt(string path, Vec3 position, float volume = 1f, float pitch = 1f, bool looping = false, Bus bus = Bus.Sfx, float innerCm = 100f, float outerCm = 2000f, float fadeInSeconds = 0f)` | Streams a file as a positioned voice. |
+| `SetBusVolume` | `public static void SetBusVolume(Bus bus, float volume)` | Sets one bus's volume, 0..1 — how a game gives the player separate SFX and music sliders. |
+| `SetListener` | `public static void SetListener(Vec3 position, Vec3 forward, Vec3 right)` | Where the ears are and which way they face. |
+| `SetOcclusionCurve` | `public static void SetOcclusionCurve(float minCutoffHz, float minVolume)` | The low-pass cutoff and linear volume a fully occluded voice reaches. |
+| `SetReverb` | `public static void SetReverb(float wet, float decaySeconds = 1.5f, float damping = 0.4f)` | The listener-side reverb. |
+| `SetZoneReverb` | `public static bool SetZoneReverb(int slot, float wet, float decaySeconds = 1.5f, float damping = 0.4f, Sound impulse = default, float predelayMs = 0f)` | Sets zone send reverb slot: wet is its return level (0 turns the slot off), decay the RT60 in seconds. |
+| `StopAll` | `public static void StopAll()` | Stops every voice at once. |
+
+<a id="audiodevicestate"></a>
 
 ### AudioDeviceState
 
 `public enum AudioDeviceState` - Where the output device stands, mirroring AVER_AUDIO_DEVICE_* in audio_abi.h and aver::audio::OutputState.
 
-Values: `Stopped = 0`, `Running = 1`, `None = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `None` | `None = 2` |  |
+| `Running` | `Running = 1` |  |
+| `Stopped` | `Stopped = 0` |  |
+
+<a id="averabilityattribute"></a>
 
 ### AverAbilityAttribute
 
 `public sealed class AverAbilityAttribute : Attribute` - Binds a GameplayAbility subclass to the name an ability definition's BEHAVIOUR uses.
 
-- `public string Name { get; }` - The behaviour name.
-- `public AverAbilityAttribute(string name)` - Binds the class to name.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AverAbilityAttribute` | `public AverAbilityAttribute(string name)` | Binds the class to name. |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Name` | `public string Name { get; }` | The behaviour name. |
+
+<a id="averabilitysystemattribute"></a>
 
 ### AverAbilitySystemAttribute
 
 `public sealed class AverAbilitySystemAttribute : Attribute` - Class defaults for an actor class's ability system: sets added, abilities granted, effects applied and tags held when an instance begins play (merged with any ACTORDEFAULTS block; this attribute wins on conflicts).
 
-- `public string[] AttributeSets { get; set; }` - Attribute sets to add.
-- `public string[] Grant { get; set; }` - Abilities to grant.
-- `public string[] Apply { get; set; }` - Effects to apply to the actor itself.
-- `public string[] Tags { get; set; }` - Loose tags to hold.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Apply` | `public string[] Apply { get; set; }` | Effects to apply to the actor itself. |
+| `AttributeSets` | `public string[] AttributeSets { get; set; }` | Attribute sets to add. |
+| `Grant` | `public string[] Grant { get; set; }` | Abilities to grant. |
+| `Tags` | `public string[] Tags { get; set; }` | Loose tags to hold. |
+
+<a id="averactor"></a>
 
 ### AverActor
 
 `public abstract class AverActor` - The root gameplay type: something in the world with a transform and a lifecycle.
 
-- `public Entity Self { get; }` - This actor's entity.
-- `public virtual void OnBeginPlay(BeginReason reason)` - Runs once when this actor begins playing, for a spawn, a world start or a hot reload.
-- `public virtual void OnTick(float dt)` - Runs once a frame, after the frame's physics steps.dt is the frame time in seconds.
-- `public virtual void OnPhysicsTick(float dt)` - Runs once per fixed physics step, before that step: 0 to 8 times a frame.
-- `public virtual void OnInput(InputEvent e)` - Receives each input event first, deepest actor first.
-- `public virtual void OnUnhandledInput(InputEvent e)` - Receives the input events nothing else handled: the place for gameplay controls, so a click on a menu does not also fire a weapon.
-- `public bool InputEnabled { get; set; }` - Whether this actor receives input events.
-- `public bool TickEnabled { get; set; }` - Whether OnTick runs.
-- `public bool PhysicsTickEnabled { get; set; }` - Whether OnPhysicsTick runs.
-- `public int TickPriority { get; set; }` - Order among actors in the OnTick pass: lower runs first, equal priorities in scene-tree order (a parent before its children, siblings in the order they were added).
-- `public int PhysicsTickPriority { get; set; }` - Order among actors in the OnPhysicsTick pass, as TickPriority.
-- `public PauseMode PauseMode { get; set; }` - Whether this actor ticks while the game is paused; Inherit by default, which takes the nearest actor above it in the scene tree.
-- `public static AverActor? TakePending(Type type)` - The instance offered for the bind that is running, when it is a type; otherwise null.
-- `public virtual void OnEnterTree()` - Runs when the actor enters the world, before OnBeginPlay.
-- `public virtual void OnExitTree()` - Runs when the actor leaves the world, before OnEndPlay; children leave before their parent.
-- `public virtual void OnParentChanged()` - Runs when the actor's parent in the scene tree changed.
-- `public virtual void OnTransformChanged()` - Runs once a frame, after OnTick, when the actor's world transform moved, if NotifyTransform is on.
-- `public bool NotifyTransform { get; set; }` - Whether OnTransformChanged is called.
-- `public void QueueDestroy()` - Destroys this actor at the end of the frame, after every tick and deferred call.
-- `public virtual void OnEndPlay(EndReason reason)` - Runs once when this actor stops playing.
-- `public virtual void OnRebound()` - Runs after a hot reload has rebound this instance and restored its native state.
-- `public virtual bool OnEvent(string name)` - Runs when a named event is raised at this actor's entity.
-- `public bool AddToGroup(string group)` - Puts this actor in a named group.
-- `public bool RemoveFromGroup(string group)` - Takes this actor out of a named group.
-- `public bool IsInGroup(string group)` - Whether this actor is in a named group.
-- `public bool Persistent { get; set; }` - Survives level travel, with everything under it (an autoload).
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `InputEnabled` | `public bool InputEnabled { get; set; }` | Whether this actor receives input events. |
+| `NotifyTransform` | `public bool NotifyTransform { get; set; }` | Whether OnTransformChanged is called. |
+| `PauseMode` | `public PauseMode PauseMode { get; set; }` | Whether this actor ticks while the game is paused; Inherit by default, which takes the nearest actor above it in the scene tree. |
+| `Persistent` | `public bool Persistent { get; set; }` | Survives level travel, with everything under it (an autoload). |
+| `PhysicsTickEnabled` | `public bool PhysicsTickEnabled { get; set; }` | Whether OnPhysicsTick runs. |
+| `PhysicsTickPriority` | `public int PhysicsTickPriority { get; set; }` | Order among actors in the OnPhysicsTick pass, as TickPriority. |
+| `Self` | `public Entity Self { get; }` | This actor's entity. |
+| `TickEnabled` | `public bool TickEnabled { get; set; }` | Whether OnTick runs. |
+| `TickPriority` | `public int TickPriority { get; set; }` | Order among actors in the OnTick pass: lower runs first, equal priorities in scene-tree order (a parent before its children, siblings in the order they were added). |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AddToGroup` | `public bool AddToGroup(string group)` | Puts this actor in a named group. |
+| `IsInGroup` | `public bool IsInGroup(string group)` | Whether this actor is in a named group. |
+| `OnBeginPlay` | `public virtual void OnBeginPlay(BeginReason reason)` | Runs once when this actor begins playing, for a spawn, a world start or a hot reload. |
+| `OnEndPlay` | `public virtual void OnEndPlay(EndReason reason)` | Runs once when this actor stops playing. |
+| `OnEnterTree` | `public virtual void OnEnterTree()` | Runs when the actor enters the world, before OnBeginPlay. |
+| `OnEvent` | `public virtual bool OnEvent(string name)` | Runs when a named event is raised at this actor's entity. |
+| `OnExitTree` | `public virtual void OnExitTree()` | Runs when the actor leaves the world, before OnEndPlay; children leave before their parent. |
+| `OnInput` | `public virtual void OnInput(InputEvent e)` | Receives each input event first, deepest actor first. |
+| `OnParentChanged` | `public virtual void OnParentChanged()` | Runs when the actor's parent in the scene tree changed. |
+| `OnPhysicsTick` | `public virtual void OnPhysicsTick(float dt)` | Runs once per fixed physics step, before that step: 0 to 8 times a frame. |
+| `OnRebound` | `public virtual void OnRebound()` | Runs after a hot reload has rebound this instance and restored its native state. |
+| `OnTick` | `public virtual void OnTick(float dt)` | Runs once a frame, after the frame's physics steps.dt is the frame time in seconds. |
+| `OnTransformChanged` | `public virtual void OnTransformChanged()` | Runs once a frame, after OnTick, when the actor's world transform moved, if NotifyTransform is on. |
+| `OnUnhandledInput` | `public virtual void OnUnhandledInput(InputEvent e)` | Receives the input events nothing else handled: the place for gameplay controls, so a click on a menu does not also fire a weapon. |
+| `QueueDestroy` | `public void QueueDestroy()` | Destroys this actor at the end of the frame, after every tick and deferred call. |
+| `RemoveFromGroup` | `public bool RemoveFromGroup(string group)` | Takes this actor out of a named group. |
+| `TakePending` | `public static AverActor? TakePending(Type type)` | The instance offered for the bind that is running, when it is a type; otherwise null. |
+
+<a id="avercharacter"></a>
 
 ### AverCharacter
 
 `public class AverCharacter : AverPawn` - A pawn for a walking character, first- or third-person, driven by WASD and the mouse.
 
-- `public float MoveSpeed` - Ground move speed, centimetres per second.
-- `public float MotionHalfLife` - Seconds for the body's horizontal velocity to close half the gap to the wanted velocity (a critically damped approach).
-- `public float TurnSpeed` - Mouse-look sensitivity, degrees of yaw per pixel of mouse movement.
-- `public CameraView CameraViewMode` - Which view the camera should use while this character is possessed.
-- `public float EyeHeight` - First-person eye height above the character's origin (its feet), centimetres.
-- `public float BoomLength` - Third-person camera distance behind the character, centimetres.
-- `public float Height` - Total capsule height including both caps, centimetres.
-- `public float Radius` - Capsule radius, centimetres.
-- `public float JumpSpeed` - Upward speed a jump starts with, cm/s.
-- `public float PitchMin` - How far the view may look down / up, degrees.
-- `public Entity View { get; }` - The character's head: a child entity at eye height carrying the view pitch.
-- `public bool AttachCameraRig(CameraRigPreset preset = CameraRigPreset.Chase)` - Gives this character a gameplay camera rig on its own entity (docs/CAMERAS.md): spring-arm collision, lag, blends and the modifier stack in place of the fixed boom.
-- `public float Yaw { get; }` - The character's facing yaw, degrees, in (-180, 180].
-- `public float Pitch { get; }` - The view pitch, degrees, clamped to PitchMin..PitchMax.
-- `public Vec3 EyePosition { get; }` - Where the eyes are: the character's feet plus EyeHeight.
-- `public Vec3 LookDirection { get; }` - The unit direction the character is looking: yaw and pitch.
-- `public Vec3 WalkForward { get; }` - The ground-plane direction the character walks when moving forward.
-- `public Vec3 WalkRight { get; }` - The ground-plane direction to the character's right.
-- `public bool IsSimulated { get; }` - True when this character is backed by the physics world rather than translating directly.
-- `public bool IsGrounded { get; }` - True while standing on ground shallow enough to hold.
-- `public Vec3 Velocity { get; set; }` - The character's own velocity, cm/s, relative to what it stands on.
-- `public bool Jump()` - Jumps if grounded.
-- `public void EnsureView()` - Creates the view node if absent and publishes it as the camera transform.
-- `public void Teleport(Vec3 feetPosition)` - Moves the character and its capsule to a feet position, clearing velocity.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `EyePosition` | `public Vec3 EyePosition { get; }` | Where the eyes are: the character's feet plus EyeHeight. |
+| `IsGrounded` | `public bool IsGrounded { get; }` | True while standing on ground shallow enough to hold. |
+| `IsSimulated` | `public bool IsSimulated { get; }` | True when this character is backed by the physics world rather than translating directly. |
+| `LookDirection` | `public Vec3 LookDirection { get; }` | The unit direction the character is looking: yaw and pitch. |
+| `Pitch` | `public float Pitch { get; }` | The view pitch, degrees, clamped to PitchMin..PitchMax. |
+| `Velocity` | `public Vec3 Velocity { get; set; }` | The character's own velocity, cm/s, relative to what it stands on. |
+| `View` | `public Entity View { get; }` | The character's head: a child entity at eye height carrying the view pitch. |
+| `WalkForward` | `public Vec3 WalkForward { get; }` | The ground-plane direction the character walks when moving forward. |
+| `WalkRight` | `public Vec3 WalkRight { get; }` | The ground-plane direction to the character's right. |
+| `Yaw` | `public float Yaw { get; }` | The character's facing yaw, degrees, in (-180, 180]. |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `BoomLength` | `public float BoomLength` | Third-person camera distance behind the character, centimetres. |
+| `CameraViewMode` | `public CameraView CameraViewMode` | Which view the camera should use while this character is possessed. |
+| `EyeHeight` | `public float EyeHeight` | First-person eye height above the character's origin (its feet), centimetres. |
+| `Height` | `public float Height` | Total capsule height including both caps, centimetres. |
+| `JumpSpeed` | `public float JumpSpeed` | Upward speed a jump starts with, cm/s. |
+| `MotionHalfLife` | `public float MotionHalfLife` | Seconds for the body's horizontal velocity to close half the gap to the wanted velocity (a critically damped approach). |
+| `MoveSpeed` | `public float MoveSpeed` | Ground move speed, centimetres per second. |
+| `PitchMin` | `public float PitchMin` | How far the view may look down / up, degrees. |
+| `Radius` | `public float Radius` | Capsule radius, centimetres. |
+| `TurnSpeed` | `public float TurnSpeed` | Mouse-look sensitivity, degrees of yaw per pixel of mouse movement. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AttachCameraRig` | `public bool AttachCameraRig(CameraRigPreset preset = CameraRigPreset.Chase)` | Gives this character a gameplay camera rig on its own entity (docs/CAMERAS.md): spring-arm collision, lag, blends and the modifier stack in place of the fixed boom. |
+| `EnsureView` | `public void EnsureView()` | Creates the view node if absent and publishes it as the camera transform. |
+| `Jump` | `public bool Jump()` | Jumps if grounded. |
+| `Teleport` | `public void Teleport(Vec3 feetPosition)` | Moves the character and its capsule to a feet position, clearing velocity. |
+
+<a id="averclassattribute"></a>
 
 ### AverClassAttribute
 
 `public sealed class AverClassAttribute : Attribute` - Registers the type it decorates as a gameplay class and names its parent class.
 
-- `public AverClassAttribute(string name)` - Registers the class under name.
-- `public string Name { get; }` - The registry name, which need not match the C# identifier.
-- `public string Parent { get; init; }` - The parent class name, resolved at seal.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AverClassAttribute` | `public AverClassAttribute(string name)` | Registers the class under name. |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Name` | `public string Name { get; }` | The registry name, which need not match the C# identifier. |
+| `Parent` | `public string Parent { get; init; }` | The parent class name, resolved at seal. |
+
+<a id="avergameinstance"></a>
 
 ### AverGameInstance
 
 `public abstract class AverGameInstance : AverActor` - Process-lifetime state that spans worlds.
 
+<a id="avergamemode"></a>
+
 ### AverGameMode
 
 `public abstract class AverGameMode : AverActor` - The rules of a level while it plays.
 
-- `public virtual void OnPostLogin(Entity controller)` - Runs after a player's controller has entered the world.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `OnPostLogin` | `public virtual void OnPostLogin(Entity controller)` | Runs after a player's controller has entered the world. |
+
+<a id="avergamemodeattribute"></a>
 
 ### AverGameModeAttribute
 
 `public sealed class AverGameModeAttribute : Attribute` - Registers a GameMode class and names, by string, the pawn and controller it hands out.
 
-- `public AverGameModeAttribute(string name)` - Registers the GameMode under name.
-- `public string Name { get; }` - The registry name.
-- `public string DefaultPawnClass { get; init; }` - Class name of the pawn every joining player is given.
-- `public string PlayerControllerClass { get; init; }` - Class name of the controller that possesses that pawn.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AverGameModeAttribute` | `public AverGameModeAttribute(string name)` | Registers the GameMode under name. |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `DefaultPawnClass` | `public string DefaultPawnClass { get; init; }` | Class name of the pawn every joining player is given. |
+| `Name` | `public string Name { get; }` | The registry name. |
+| `PlayerControllerClass` | `public string PlayerControllerClass { get; init; }` | Class name of the controller that possesses that pawn. |
+
+<a id="avergameplaydefsattribute"></a>
 
 ### AverGameplayDefsAttribute
 
 `public sealed class AverGameplayDefsAttribute : Attribute` - Marks a static class with static void Define() that registers definitions with the GameplayDefs builders.
 
+<a id="avermath"></a>
+
 ### AverMath
 
 `public static class AverMath` - Maths beyond MathF: ranges, interpolation, angles, integer and bit helpers, and vector and rotator conversions in this engine's basis (+X forward, +Y right, +Z up, centimetres, degrees).
 
-- `public const float Deg2Rad = MathF.PI / 180f` - Degrees to radians.
-- `public const float Rad2Deg = 180f / MathF.PI` - Radians to degrees.
-- `public static float Tan(float a)` - Tangent of an angle in radians.
-- `public static float Asin(float a)` - Arc sine in radians; the input is clamped to -1..1.
-- `public static float Acos(float a)` - Arc cosine in radians; the input is clamped to -1..1.
-- `public static float Atan(float a)` - Arc tangent in radians.
-- `public static float Atan2(float y, float x)` - Angle in radians of the point (x, y) from +X.
-- `public static float Sign(float a)` - -1, 0 or 1 by the sign of a; NaN gives 0.
-- `public static float Frac(float a)` - The fractional part, a - floor(a), so a negative input still gives 0 up to 1.
-- `public static float Truncate(float a)` - Drops the fractional part, rounding toward zero.
-- `public static float DegToRad(float degrees)` - Degrees to radians.
-- `public static float RadToDeg(float radians)` - Radians to degrees.
-- `public static float Exp(float a)` - e raised to a.
-- `public static float Log(float a)` - Natural logarithm; zero or negative input gives 0 rather than NaN.
-- `public static float SmoothStep(float edge0, float edge1, float x)` - Smooth 0 to 1 ramp between two edges (3t^2 - 2t^3).
-- `public static float InverseLerp(float a, float b, float value)` - Where value sits between a and b (0 at a, 1 at b), not clamped.
-- `public static float MapRange(float value, float inMin, float inMax, float outMin, float outMax, bool clamp = true)` - Remaps value from one range to another.
-- `public static float Wrap(float value, float min, float max)` - Wraps value into [min, max).
-- `public static float InterpTo(float current, float target, float deltaTime, float speed)` - One frame of exponential approach to target.
-- `public static float DeltaAngle(float a, float b)` - The signed shortest turn in degrees from a to b, in (-180, 180].
-- `public static float LerpAngle(float a, float b, float t)` - Interpolates between two angles in degrees the short way round.
-- `public static bool NearlyEqual(float a, float b, float tolerance = 0.0001f)` - True when the two values differ by no more than tolerance.
-- `public static bool IsFinite(float a)` - True for any value that is not NaN or an infinity.
-- `public static int IntAdd(int a, int b)` - Wrapping addition.
-- `public static int IntSubtract(int a, int b)` - Wrapping subtraction.
-- `public static int IntMultiply(int a, int b)` - Wrapping multiplication.
-- `public static int IntDivide(int a, int b)` - Division truncating toward zero; a zero divisor gives 0.
-- `public static int IntModulo(int a, int b)` - Remainder whose sign follows the dividend; a zero divisor gives 0.
-- `public static int IntClamp(int a, int min, int max)` - min(max(a, min), max).
-- `public static int IntAbs(int a)` - Absolute value; MinValue stays negative.
-- `public static int IntSign(int a)` - -1, 0 or 1.
-- `public static int BitShiftLeft(int a, int count)` - Shifts left; the count is masked to 0..31.
-- `public static int BitShiftRight(int a, int count)` - Shifts right filling with zeros (not the sign bit), so a mask with the top bit set shifts as a mask; the count is masked to 0..31.
-- `public static bool BitTest(int value, int bit)` - True when bit bit (0 is the lowest) is set; a bit outside 0..31 is false.
-- `public static float Length2D(float x, float y)` - Length of (x, y), ignoring Z.
-- `public static float Distance2D(float ax, float ay, float bx, float by)` - Distance between two points on the ground plane, ignoring Z.
-- `public static Vec3 Reflect(Vec3 v, Vec3 normal)` - Mirrors v about a surface with the given normal (which need not be unit).
-- `public static Vec3 Project(Vec3 a, Vec3 onto)` - The part of a along onto.
-- `public static Vec3 ClampLength(Vec3 v, float maxLength)` - Shortens v to at most maxLength keeping its direction.
-- `public static float Angle(Vec3 a, Vec3 b)` - The angle in degrees between two directions, 0..180.
-- `public static Vec3 InterpTo(Vec3 current, Vec3 target, float deltaTime, float speed)` - InterpTo(float, float, float, float) applied to each component.
-- `public static Vec3 ForwardOf(Rot r)` - The unit direction a Rot points along: Rot.ToQuat() applied to Forward.
-- `public static Rot RotatorOf(Vec3 direction)` - The yaw and pitch (roll 0) that make Forward point along direction, the inverse of ForwardOf.
-- `public static Rot LookAt(Vec3 from, Vec3 to)` - The yaw and pitch (roll 0) that turn an observer at from to face to.
-- `public static Vec3 Rotate(Vec3 v, Rot r)` - Rotates v by r (v' = q v q* with q = r.ToQuat()).
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Deg2Rad` | `public const float Deg2Rad = MathF.PI / 180f` | Degrees to radians. |
+| `Rad2Deg` | `public const float Rad2Deg = 180f / MathF.PI` | Radians to degrees. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Acos` | `public static float Acos(float a)` | Arc cosine in radians; the input is clamped to -1..1. |
+| `Angle` | `public static float Angle(Vec3 a, Vec3 b)` | The angle in degrees between two directions, 0..180. |
+| `Asin` | `public static float Asin(float a)` | Arc sine in radians; the input is clamped to -1..1. |
+| `Atan` | `public static float Atan(float a)` | Arc tangent in radians. |
+| `Atan2` | `public static float Atan2(float y, float x)` | Angle in radians of the point (x, y) from +X. |
+| `BitShiftLeft` | `public static int BitShiftLeft(int a, int count)` | Shifts left; the count is masked to 0..31. |
+| `BitShiftRight` | `public static int BitShiftRight(int a, int count)` | Shifts right filling with zeros (not the sign bit), so a mask with the top bit set shifts as a mask; the count is masked to 0..31. |
+| `BitTest` | `public static bool BitTest(int value, int bit)` | True when bit bit (0 is the lowest) is set; a bit outside 0..31 is false. |
+| `ClampLength` | `public static Vec3 ClampLength(Vec3 v, float maxLength)` | Shortens v to at most maxLength keeping its direction. |
+| `DegToRad` | `public static float DegToRad(float degrees)` | Degrees to radians. |
+| `DeltaAngle` | `public static float DeltaAngle(float a, float b)` | The signed shortest turn in degrees from a to b, in (-180, 180]. |
+| `Distance2D` | `public static float Distance2D(float ax, float ay, float bx, float by)` | Distance between two points on the ground plane, ignoring Z. |
+| `Exp` | `public static float Exp(float a)` | e raised to a. |
+| `ForwardOf` | `public static Vec3 ForwardOf(Rot r)` | The unit direction a Rot points along: Rot.ToQuat() applied to Forward. |
+| `Frac` | `public static float Frac(float a)` | The fractional part, a - floor(a), so a negative input still gives 0 up to 1. |
+| `IntAbs` | `public static int IntAbs(int a)` | Absolute value; MinValue stays negative. |
+| `IntAdd` | `public static int IntAdd(int a, int b)` | Wrapping addition. |
+| `IntClamp` | `public static int IntClamp(int a, int min, int max)` | min(max(a, min), max). |
+| `IntDivide` | `public static int IntDivide(int a, int b)` | Division truncating toward zero; a zero divisor gives 0. |
+| `InterpTo` | `public static Vec3 InterpTo(Vec3 current, Vec3 target, float deltaTime, float speed)` | InterpTo(float, float, float, float) applied to each component. |
+| `InterpTo` | `public static float InterpTo(float current, float target, float deltaTime, float speed)` | One frame of exponential approach to target. |
+| `IntModulo` | `public static int IntModulo(int a, int b)` | Remainder whose sign follows the dividend; a zero divisor gives 0. |
+| `IntMultiply` | `public static int IntMultiply(int a, int b)` | Wrapping multiplication. |
+| `IntSign` | `public static int IntSign(int a)` | -1, 0 or 1. |
+| `IntSubtract` | `public static int IntSubtract(int a, int b)` | Wrapping subtraction. |
+| `InverseLerp` | `public static float InverseLerp(float a, float b, float value)` | Where value sits between a and b (0 at a, 1 at b), not clamped. |
+| `IsFinite` | `public static bool IsFinite(float a)` | True for any value that is not NaN or an infinity. |
+| `Length2D` | `public static float Length2D(float x, float y)` | Length of (x, y), ignoring Z. |
+| `LerpAngle` | `public static float LerpAngle(float a, float b, float t)` | Interpolates between two angles in degrees the short way round. |
+| `Log` | `public static float Log(float a)` | Natural logarithm; zero or negative input gives 0 rather than NaN. |
+| `LookAt` | `public static Rot LookAt(Vec3 from, Vec3 to)` | The yaw and pitch (roll 0) that turn an observer at from to face to. |
+| `MapRange` | `public static float MapRange(float value, float inMin, float inMax, float outMin, float outMax, bool clamp = true)` | Remaps value from one range to another. |
+| `NearlyEqual` | `public static bool NearlyEqual(float a, float b, float tolerance = 0.0001f)` | True when the two values differ by no more than tolerance. |
+| `Project` | `public static Vec3 Project(Vec3 a, Vec3 onto)` | The part of a along onto. |
+| `RadToDeg` | `public static float RadToDeg(float radians)` | Radians to degrees. |
+| `Reflect` | `public static Vec3 Reflect(Vec3 v, Vec3 normal)` | Mirrors v about a surface with the given normal (which need not be unit). |
+| `Rotate` | `public static Vec3 Rotate(Vec3 v, Rot r)` | Rotates v by r (v' = q v q* with q = r.ToQuat()). |
+| `RotatorOf` | `public static Rot RotatorOf(Vec3 direction)` | The yaw and pitch (roll 0) that make Forward point along direction, the inverse of ForwardOf. |
+| `Sign` | `public static float Sign(float a)` | -1, 0 or 1 by the sign of a; NaN gives 0. |
+| `SmoothStep` | `public static float SmoothStep(float edge0, float edge1, float x)` | Smooth 0 to 1 ramp between two edges (3t^2 - 2t^3). |
+| `Tan` | `public static float Tan(float a)` | Tangent of an angle in radians. |
+| `Truncate` | `public static float Truncate(float a)` | Drops the fractional part, rounding toward zero. |
+| `Wrap` | `public static float Wrap(float value, float min, float max)` | Wraps value into [min, max). |
+
+<a id="averpawn"></a>
 
 ### AverPawn
 
 `public abstract class AverPawn : AverActor` - An actor that can be possessed by a controller.
 
-- `public virtual void OnPossessed(Entity controller)` - Runs when controller takes control of this pawn.
-- `public virtual void OnUnpossessed()` - Runs when this pawn's controller releases it.
-- `public Entity Controller { get; }` - The controller currently possessing this pawn, or None.
-- `public T? ControllerAs<T>() where T : AverPlayerController` - The possessing controller as T, or null.
-- `public bool IsPossessed { get; }` - True while some controller possesses this pawn.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Controller` | `public Entity Controller { get; }` | The controller currently possessing this pawn, or None. |
+| `IsPossessed` | `public bool IsPossessed { get; }` | True while some controller possesses this pawn. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ControllerAs` | `public T? ControllerAs<T>() where T : AverPlayerController` | The possessing controller as T, or null. |
+| `OnPossessed` | `public virtual void OnPossessed(Entity controller)` | Runs when controller takes control of this pawn. |
+| `OnUnpossessed` | `public virtual void OnUnpossessed()` | Runs when this pawn's controller releases it. |
+
+<a id="averplayercontroller"></a>
 
 ### AverPlayerController
 
 `public class AverPlayerController : AverActor` - The will that drives a pawn.
 
-- `public Entity Possessed { get; }` - The pawn this controller currently drives, or None if none.
-- `public T? PossessedAs<T>() where T : AverPawn` - The possessed pawn as T, or null if none or another type.
-- `public bool HasPawn { get; }` - True while this controller drives a pawn.
-- `public bool Possess(Entity pawn)` - Takes control of pawn, stealing it from another controller if need be.
-- `public bool Possess(AverPawn pawn)` - Takes control of pawn directly.
-- `public bool Unpossess()` - Releases the currently possessed pawn.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `HasPawn` | `public bool HasPawn { get; }` | True while this controller drives a pawn. |
+| `Possessed` | `public Entity Possessed { get; }` | The pawn this controller currently drives, or None if none. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Possess` | `public bool Possess(AverPawn pawn)` | Takes control of pawn directly. |
+| `Possess` | `public bool Possess(Entity pawn)` | Takes control of pawn, stealing it from another controller if need be. |
+| `PossessedAs` | `public T? PossessedAs<T>() where T : AverPawn` | The possessed pawn as T, or null if none or another type. |
+| `Unpossess` | `public bool Unpossess()` | Releases the currently possessed pawn. |
+
+<a id="averrandom"></a>
 
 ### AverRandom
 
 `public static class AverRandom` - One process-wide pseudo-random generator for gameplay, reseedable so a sequence can repeat.
 
-- `public static RandomNumberGenerator Generator { get; }` - The shared generator itself, for its state or the methods not mirrored here.
-- `public static void Seed(int seed)` - Restarts the generator from seed; the same seed repeats the same sequence.
-- `public static void Randomize()` - Reseeds from the clock.
-- `public static float NextFloat()` - A float in [0, 1).
-- `public static float NextFloat(float min, float max)` - A float in [min, max).
-- `public static int NextInt(int min, int max)` - An integer in [min, max] with BOTH ends reachable.
-- `public static bool NextBool(float chance = 0.5f)` - True with probability chance (0 never, 1 always; NaN never).
-- `public static Vec3 UnitVector()` - A unit direction uniformly distributed over the sphere.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Generator` | `public static RandomNumberGenerator Generator { get; }` | The shared generator itself, for its state or the methods not mirrored here. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `NextBool` | `public static bool NextBool(float chance = 0.5f)` | True with probability chance (0 never, 1 always; NaN never). |
+| `NextFloat` | `public static float NextFloat()` | A float in [0, 1). |
+| `NextFloat` | `public static float NextFloat(float min, float max)` | A float in [min, max). |
+| `NextInt` | `public static int NextInt(int min, int max)` | An integer in [min, max] with BOTH ends reachable. |
+| `Randomize` | `public static void Randomize()` | Reseeds from the clock. |
+| `Seed` | `public static void Seed(int seed)` | Restarts the generator from seed; the same seed repeats the same sequence. |
+| `UnitVector` | `public static Vec3 UnitVector()` | A unit direction uniformly distributed over the sphere. |
+
+<a id="averreverbvolume"></a>
 
 ### AverReverbVolume
 
 `public sealed class AverReverbVolume : AverActor` - A box reverb zone.
 
-- `public float HalfExtentX` - Half the box's size along its local X, centimetres.
-- `public float HalfExtentY` - Half the box's size along its local Y, centimetres.
-- `public float HalfExtentZ` - Half the box's size along its local Z, centimetres.
-- `public float BlendDistanceCm` - Distance outside the surface over which the reverb fades to nothing.
-- `public float Wet` - Reverb return level, 0 to 1.
-- `public float DecaySeconds` - Time for the tail to fall 60 dB, seconds.
-- `public float Damping` - 0 bright to 1 dark.
-- `public float Priority` - Higher wins where zones overlap.
-- `public override void OnBeginPlay(BeginReason reason)` - Attaches the zone component with the values above.
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `BlendDistanceCm` | `public float BlendDistanceCm` | Distance outside the surface over which the reverb fades to nothing. |
+| `Damping` | `public float Damping` | 0 bright to 1 dark. |
+| `DecaySeconds` | `public float DecaySeconds` | Time for the tail to fall 60 dB, seconds. |
+| `HalfExtentX` | `public float HalfExtentX` | Half the box's size along its local X, centimetres. |
+| `HalfExtentY` | `public float HalfExtentY` | Half the box's size along its local Y, centimetres. |
+| `HalfExtentZ` | `public float HalfExtentZ` | Half the box's size along its local Z, centimetres. |
+| `Priority` | `public float Priority` | Higher wins where zones overlap. |
+| `Wet` | `public float Wet` | Reverb return level, 0 to 1. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `OnBeginPlay` | `public override void OnBeginPlay(BeginReason reason)` | Attaches the zone component with the values above. |
+
+<a id="beginreason"></a>
 
 ### BeginReason
 
 `public enum BeginReason` - Why OnBeginPlay is running: a fresh spawn, a world start, or a hot reload.
 
-Values: `Spawn = 0`, `Play = 1`, `Reload = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Play` | `Play = 1` |  |
+| `Reload` | `Reload = 2` |  |
+| `Spawn` | `Spawn = 0` |  |
+
+<a id="bindinghandle"></a>
 
 ### BindingHandle
 
 `public readonly struct BindingHandle` - Refers to one binding just added to a context, so a trigger or modifier can be chained on it: BindKey(Jump, Key.Space).Trigger(InputTrigger.Tap()).
 
-- `public BindingHandle Trigger(InputTrigger trigger)` - Adds a trigger to this binding, evaluated on this binding's value alone.
-- `public BindingHandle Modify(InputModifier modifier)` - Adds a modifier to this binding, applied to its value before the action sums it.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Modify` | `public BindingHandle Modify(InputModifier modifier)` | Adds a modifier to this binding, applied to its value before the action sums it. |
+| `Trigger` | `public BindingHandle Trigger(InputTrigger trigger)` | Adds a trigger to this binding, evaluated on this binding's value alone. |
+
+<a id="blackboard"></a>
 
 ### Blackboard
 
 `public readonly struct Blackboard` - One entity's AI blackboard (reach it with entity.Blackboard).
 
-- `public BlackboardType TypeOf(string key)` - The key's type, or None when it is not defined.
-- `public bool Has(string key)` - Whether the key is defined.
-- `public bool Define(string key, BlackboardType type, BlackboardScope scope = BlackboardScope.Agent)` - Defines a key explicitly (a behaviour tree's own schema defines its keys already).
-- `public bool Reset(string key)` - Restores a key to its default value.
-- `public bool SetTeam(string team)` - Puts this entity on a team: its Shared keys then live on that team's board, visible to every teammate.
-- `public bool TryGetBool(string key, out bool value)`
-- `public bool GetBool(string key, bool fallback = false)`
-- `public bool SetBool(string key, bool value)`
-- `public bool TryGetInt(string key, out long value)`
-- `public long GetInt(string key, long fallback = 0)`
-- `public bool SetInt(string key, long value)`
-- `public bool TryGetFloat(string key, out float value)`
-- `public float GetFloat(string key, float fallback = 0f)`
-- `public bool SetFloat(string key, float value)`
-- `public bool TryGetVec3(string key, out Vec3 value)`
-- `public Vec3 GetVec3(string key, Vec3 fallback = default)`
-- `public bool SetVec3(string key, Vec3 value)`
-- `public bool TryGetString(string key, out string value)`
-- `public string GetString(string key, string fallback = "")`
-- `public bool SetString(string key, string value)`
-- `public bool TryGetEntity(string key, out Entity value)`
-- `public Entity GetEntity(string key)`
-- `public bool SetEntity(string key, Entity value)`
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Define` | `public bool Define(string key, BlackboardType type, BlackboardScope scope = BlackboardScope.Agent)` | Defines a key explicitly (a behaviour tree's own schema defines its keys already). |
+| `GetBool` | `public bool GetBool(string key, bool fallback = false)` |  |
+| `GetEntity` | `public Entity GetEntity(string key)` |  |
+| `GetFloat` | `public float GetFloat(string key, float fallback = 0f)` |  |
+| `GetInt` | `public long GetInt(string key, long fallback = 0)` |  |
+| `GetString` | `public string GetString(string key, string fallback = "")` |  |
+| `GetVec3` | `public Vec3 GetVec3(string key, Vec3 fallback = default)` |  |
+| `Has` | `public bool Has(string key)` | Whether the key is defined. |
+| `Reset` | `public bool Reset(string key)` | Restores a key to its default value. |
+| `SetBool` | `public bool SetBool(string key, bool value)` |  |
+| `SetEntity` | `public bool SetEntity(string key, Entity value)` |  |
+| `SetFloat` | `public bool SetFloat(string key, float value)` |  |
+| `SetInt` | `public bool SetInt(string key, long value)` |  |
+| `SetString` | `public bool SetString(string key, string value)` |  |
+| `SetTeam` | `public bool SetTeam(string team)` | Puts this entity on a team: its Shared keys then live on that team's board, visible to every teammate. |
+| `SetVec3` | `public bool SetVec3(string key, Vec3 value)` |  |
+| `TryGetBool` | `public bool TryGetBool(string key, out bool value)` |  |
+| `TryGetEntity` | `public bool TryGetEntity(string key, out Entity value)` |  |
+| `TryGetFloat` | `public bool TryGetFloat(string key, out float value)` |  |
+| `TryGetInt` | `public bool TryGetInt(string key, out long value)` |  |
+| `TryGetString` | `public bool TryGetString(string key, out string value)` |  |
+| `TryGetVec3` | `public bool TryGetVec3(string key, out Vec3 value)` |  |
+| `TypeOf` | `public BlackboardType TypeOf(string key)` | The key's type, or None when it is not defined. |
+
+<a id="blackboardscope"></a>
 
 ### BlackboardScope
 
 `public enum BlackboardScope` - Where a blackboard key lives: private to the agent, or on the board its whole team shares.
 
-Values: `Agent = 0`, `Shared = 1`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Agent` | `Agent = 0` |  |
+| `Shared` | `Shared = 1` |  |
+
+<a id="blackboardtype"></a>
 
 ### BlackboardType
 
 `public enum BlackboardType` - The type of a blackboard key.
 
-Values: `None = 0`, `Bool = 1`, `Int = 2`, `Float = 3`, `Vec3 = 4`, `String = 5`, `Entity = 6`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Bool` | `Bool = 1` |  |
+| `Entity` | `Entity = 6` |  |
+| `Float` | `Float = 3` |  |
+| `Int` | `Int = 2` |  |
+| `None` | `None = 0` |  |
+| `String` | `String = 5` |  |
+| `Vec3` | `Vec3 = 4` |  |
+
+<a id="body"></a>
 
 ### Body
 
 `public readonly struct Body : IEquatable<Body>` - A rigid body in the simulation.
 
-- `public int Handle { get; }` - The raw ABI handle.
-- `public static Body None { get; }` - The invalid handle.
-- `public bool IsValid { get; }` - True when this names a body rather than nothing.
-- `public Vec3 Position { get; }` - Centre of mass position, centimetres.
-- `public Quat Rotation { get; }` - Rotation.
-- `public Vec3 Velocity { get; }` - Linear velocity, cm/s.
-- `public bool SetPosition(Vec3 p)` - Teleports the body, ignoring collision on the way.
-- `public bool SetVelocity(Vec3 v)` - Sets linear velocity, cm/s.
-- `public bool AddVelocity(Vec3 delta)` - Adds to the body's velocity.
-- `public bool Destroy()` - Removes the body from the world.
-- `public bool SetEntity(Entity e)` - Stamps this body with the entity that owns it, so a later Raycast against it reports e through Entity.
-- `public bool Equals(Body o)`
-- `public override bool Equals(object? o)`
-- `public override int GetHashCode()`
-- `public override string ToString()`
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Handle` | `public int Handle { get; }` | The raw ABI handle. |
+| `IsValid` | `public bool IsValid { get; }` | True when this names a body rather than nothing. |
+| `None` | `public static Body None { get; }` | The invalid handle. |
+| `Position` | `public Vec3 Position { get; }` | Centre of mass position, centimetres. |
+| `Rotation` | `public Quat Rotation { get; }` | Rotation. |
+| `Velocity` | `public Vec3 Velocity { get; }` | Linear velocity, cm/s. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AddVelocity` | `public bool AddVelocity(Vec3 delta)` | Adds to the body's velocity. |
+| `Destroy` | `public bool Destroy()` | Removes the body from the world. |
+| `Equals` | `public bool Equals(Body o)` |  |
+| `Equals` | `public override bool Equals(object? o)` |  |
+| `GetHashCode` | `public override int GetHashCode()` |  |
+| `SetEntity` | `public bool SetEntity(Entity e)` | Stamps this body with the entity that owns it, so a later Raycast against it reports e through Entity. |
+| `SetPosition` | `public bool SetPosition(Vec3 p)` | Teleports the body, ignoring collision on the way. |
+| `SetVelocity` | `public bool SetVelocity(Vec3 v)` | Sets linear velocity, cm/s. |
+| `ToString` | `public override string ToString()` |  |
+
+<a id="bodyfacing"></a>
 
 ### BodyFacing
 
 `public enum BodyFacing` - How a fallen body lies.
 
-Values: `Upright = 0`, `Supine = 1`, `Prone = 2`, `Side = 3`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Prone` | `Prone = 2` |  |
+| `Side` | `Side = 3` |  |
+| `Supine` | `Supine = 1` |  |
+| `Upright` | `Upright = 0` |  |
+
+<a id="bonechannels"></a>
 
 ### BoneChannels
 
 `public enum BoneChannels` - Which channels of a bone a pose write sets; the others keep what the animation produced.
 
-Values: `Position = FwPose.Position`, `Rotation = FwPose.Rotation`, `Scale = FwPose.Scale`, `All = FwPose.All`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `All` | `All = FwPose.All` |  |
+| `Position` | `Position = FwPose.Position` |  |
+| `Rotation` | `Rotation = FwPose.Rotation` |  |
+| `Scale` | `Scale = FwPose.Scale` |  |
+
+<a id="boneinfo"></a>
 
 ### BoneInfo
 
 `public readonly struct BoneInfo` - A bone of an entity's skeleton: its name, parent and rest transform (parent-local).
 
-- `public int Index { get; }`
-- `public string Name { get; }`
-- `public int Parent { get; }`
-- `public BonePose Rest { get; }`
-- `public BoneInfo(int index, string name, int parent, BonePose rest)`
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `BoneInfo` | `public BoneInfo(int index, string name, int parent, BonePose rest)` |  |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Index` | `public int Index { get; }` |  |
+| `Name` | `public string Name { get; }` |  |
+| `Parent` | `public int Parent { get; }` |  |
+| `Rest` | `public BonePose Rest { get; }` |  |
+
+<a id="bonepose"></a>
 
 ### BonePose
 
 `public readonly struct BonePose` - A bone's transform: engine units (centimetres, the skeleton's own axes).
 
-- `public Vec3 Position { get; }`
-- `public Quat Rotation { get; }`
-- `public Vec3 Scale { get; }`
-- `public BonePose(Vec3 position, Quat rotation, Vec3 scale)`
-- `public static BonePose Identity { get; }`
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `BonePose` | `public BonePose(Vec3 position, Quat rotation, Vec3 scale)` |  |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Identity` | `public static BonePose Identity { get; }` |  |
+| `Position` | `public Vec3 Position { get; }` |  |
+| `Rotation` | `public Quat Rotation { get; }` |  |
+| `Scale` | `public Vec3 Scale { get; }` |  |
+
+<a id="brain"></a>
 
 ### Brain
 
 `public readonly struct Brain` - One entity's brain (reach it with entity.Brain).
 
-- `public BrainKind Kind { get; }`
-- `public BrainStatus Status { get; }`
-- `public bool SetAsset(string contentPath)` - Gives the entity the brain at a content-relative path ("AI/Guard.ocst" or "AI/Guard.ocbt"), attaching the AI component when it has none.
-- `public bool SendEvent(string name, int payloadInt = 0, float payloadFloat = 0f)` - Sends a state tree an event; its transitions on event:Name see it on the next update, and the blackboard keys EventPayload / EventPayloadF carry the payload.
-- `public string ActiveState { get; }` - The active leaf state's dotted path ("Combat.Chase"), "" when none.
-- `public bool IsInState(string path)` - Whether a state is anywhere in the active chain ("Combat" is while "Combat.Chase" runs).
-- `public bool Restart()` - Exits every state (aborting running tasks) and starts again at the next update.
-- `public bool Stop()` - Exits every state and stays stopped until Restart.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ActiveState` | `public string ActiveState { get; }` | The active leaf state's dotted path ("Combat.Chase"), "" when none. |
+| `Kind` | `public BrainKind Kind { get; }` |  |
+| `Status` | `public BrainStatus Status { get; }` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `IsInState` | `public bool IsInState(string path)` | Whether a state is anywhere in the active chain ("Combat" is while "Combat.Chase" runs). |
+| `Restart` | `public bool Restart()` | Exits every state (aborting running tasks) and starts again at the next update. |
+| `SendEvent` | `public bool SendEvent(string name, int payloadInt = 0, float payloadFloat = 0f)` | Sends a state tree an event; its transitions on event:Name see it on the next update, and the blackboard keys EventPayload / EventPayloadF carry the payload. |
+| `SetAsset` | `public bool SetAsset(string contentPath)` | Gives the entity the brain at a content-relative path ("AI/Guard.ocst" or "AI/Guard.ocbt"), attaching the AI component when it has none. |
+| `Stop` | `public bool Stop()` | Exits every state and stays stopped until Restart. |
+
+<a id="brainkind"></a>
 
 ### BrainKind
 
 `public enum BrainKind` - What kind of brain an entity has.
 
-Values: `None = 0`, `BehaviourTree = 1`, `StateTree = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `BehaviourTree` | `BehaviourTree = 1` |  |
+| `None` | `None = 0` |  |
+| `StateTree` | `StateTree = 2` |  |
+
+<a id="brainstatus"></a>
 
 ### BrainStatus
 
 `public enum BrainStatus` - Where the brain is.
 
-Values: `Idle = 0`, `Running = 1`, `Succeeded = 2`, `Failed = 3`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Failed` | `Failed = 3` |  |
+| `Idle` | `Idle = 0` |  |
+| `Running` | `Running = 1` |  |
+| `Succeeded` | `Succeeded = 2` |  |
+
+<a id="bus"></a>
 
 ### Bus
 
 `public enum Bus` - The four mixer buses, mirroring AVER_AUDIO_BUS_* in modules/audio.abi/include/aver/audio/audio_abi.h and aver::audio::Bus in Sound.hpp.
 
-Values: `Sfx = 0`, `Music = 1`, `Voice = 2`, `Ui = 3`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Music` | `Music = 1` |  |
+| `Sfx` | `Sfx = 0` |  |
+| `Ui` | `Ui = 3` |  |
+| `Voice` | `Voice = 2` |  |
+
+<a id="camera2d"></a>
 
 ### Camera2D
 
 `public struct Camera2D` - A 2D camera on an entity that has a Transform2D.
 
-- `public Vector2 Zoom` - Zoom; 0 reads as 1, larger shows less.
-- `public Vector2 Offset` - Added to the entity's position to get the view centre.
-- `public Vector4 Limit` - Left, top, right, bottom in world units; each applies only with its limit flag.
-- `public float SmoothSpeed` - Easing rate with Smoothing; 0 reads as 5.
-- `public Vector4 Drag` - Left, top, right, bottom drag margins as fractions of the half view; used with the drag flags.
-- `public Camera2DFlags Flags` - Behaviour bits.
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Drag` | `public Vector4 Drag` | Left, top, right, bottom drag margins as fractions of the half view; used with the drag flags. |
+| `Flags` | `public Camera2DFlags Flags` | Behaviour bits. |
+| `Limit` | `public Vector4 Limit` | Left, top, right, bottom in world units; each applies only with its limit flag. |
+| `Offset` | `public Vector2 Offset` | Added to the entity's position to get the view centre. |
+| `SmoothSpeed` | `public float SmoothSpeed` | Easing rate with Smoothing; 0 reads as 5. |
+| `Zoom` | `public Vector2 Zoom` | Zoom; 0 reads as 1, larger shows less. |
+
+<a id="camera2dflags"></a>
 
 ### Camera2DFlags
 
 `public enum Camera2DFlags : uint` - Flags of Camera2D.
 
-Values: `None = 0`, `Disabled = 1`, `Current = 2`, `FollowRotation = 4`, `Smoothing = 8`, `DragHorizontal = 16`, `DragVertical = 32`, `AnchorTopLeft = 64`, `LimitLeft = 128`, `LimitTop = 256`, `LimitRight = 512`, `LimitBottom = 1024`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AnchorTopLeft` | `AnchorTopLeft = 64` |  |
+| `Current` | `Current = 2` |  |
+| `Disabled` | `Disabled = 1` |  |
+| `DragHorizontal` | `DragHorizontal = 16` |  |
+| `DragVertical` | `DragVertical = 32` |  |
+| `FollowRotation` | `FollowRotation = 4` |  |
+| `LimitBottom` | `LimitBottom = 1024` |  |
+| `LimitLeft` | `LimitLeft = 128` |  |
+| `LimitRight` | `LimitRight = 512` |  |
+| `LimitTop` | `LimitTop = 256` |  |
+| `None` | `None = 0` |  |
+| `Smoothing` | `Smoothing = 8` |  |
+
+<a id="camerablendcurve"></a>
 
 ### CameraBlendCurve
 
 `public enum CameraBlendCurve` - The curve of a view-target blend.
 
-Values: `EaseInOut = 0`, `Linear = 1`, `EaseIn = 2`, `EaseOut = 3`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `EaseIn` | `EaseIn = 2` |  |
+| `EaseInOut` | `EaseInOut = 0` |  |
+| `EaseOut` | `EaseOut = 3` |  |
+| `Linear` | `Linear = 1` |  |
+
+<a id="camerafx"></a>
 
 ### CameraFx
 
 `public static class CameraFx` - Camera shake and head bob.
 
-- `public static void AddShake(float trauma)` - Adds shake trauma, 0 to 1; it saturates at 1 and decays on its own.
-- `public static void SetBob(float amount01, float speedCmPerSec)` - Head bob for this frame: amount 0 to 1 and the ground speed in cm/s.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AddShake` | `public static void AddShake(float trauma)` | Adds shake trauma, 0 to 1; it saturates at 1 and decays on its own. |
+| `SetBob` | `public static void SetBob(float amount01, float speedCmPerSec)` | Head bob for this frame: amount 0 to 1 and the ground speed in cm/s. |
+
+<a id="cameramode"></a>
 
 ### CameraMode
 
 `public enum CameraMode` - How a rig places the camera.
 
-Values: `Chase = 0`, `Orbit = 1`, `FirstPerson = 2`, `Seat = 3`, `TopDown = 4`, `Fixed = 5`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Chase` | `Chase = 0` |  |
+| `FirstPerson` | `FirstPerson = 2` |  |
+| `Fixed` | `Fixed = 5` |  |
+| `Orbit` | `Orbit = 1` |  |
+| `Seat` | `Seat = 3` |  |
+| `TopDown` | `TopDown = 4` |  |
+
+<a id="cameramodifierkind"></a>
 
 ### CameraModifierKind
 
 `public enum CameraModifierKind` - What a camera modifier changes.
 
-Values: `FovKick = 0`, `FovScale = 1`, `Punch = 2`, `RollLean = 3`, `ArmScale = 4`, `SocketOffset = 5`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ArmScale` | `ArmScale = 4` |  |
+| `FovKick` | `FovKick = 0` |  |
+| `FovScale` | `FovScale = 1` |  |
+| `Punch` | `Punch = 2` |  |
+| `RollLean` | `RollLean = 3` |  |
+| `SocketOffset` | `SocketOffset = 5` |  |
+
+<a id="camerapose"></a>
 
 ### CameraPose
 
 `public readonly record struct CameraPose(Vec3 Position, float YawDegrees, float PitchDegrees, float RollDegrees, float FovDegrees, float NearCm, float FarCm)` - The camera after the active rig and the modifier stack, before the player's shake and bob.
 
+<a id="camerarig"></a>
+
 ### CameraRig
 
 `public static class CameraRig` - The camera system: which rig is the view, blends between rigs, the modifier stack, and shake with distance.
 
-- `public const string EventViewTargetChanged = "CameraViewTargetChanged"` - Raised (at the new view target, or the pawn when none) when the live rig changes.
-- `public const string EventBlendFinished = "CameraBlendFinished"` - Raised when a blend into the live rig completes.
-- `public const string EventCut = "CameraCut"` - Raised when the camera teleports (a cut, or a lag snap).
-- `public static bool SetViewTarget(Entity rig, float blendSeconds = 0.5f, CameraBlendCurve curve = CameraBlendCurve.EaseInOut, bool cut = false)` - Makes rig the view.
-- `public static bool ClearViewTarget(float blendSeconds = 0.5f, CameraBlendCurve curve = CameraBlendCurve.EaseInOut)` - Back to automatic selection: the best rig under the possessed pawn, else the legacy camera.
-- `public static bool Cut(Entity rig = default)` - Snaps the lag state of rig (none = the active rig): the camera jumps to where it would be at rest, with no blend and no trail.
-- `public static Entity ActiveRig { get; }` - The rig that is the view now, or None for the legacy pawn camera.
-- `public static bool IsBlending { get; }` - True while a blend between views is running.
-- `public static bool TryGetPose(out CameraPose pose)` - The camera pose after the rig and the modifier stack (before the player's shake and bob).
-- `public static int PushFovKick(float deltaDegrees, float inSeconds = 0.05f, float holdSeconds = 0.1f, float outSeconds = 0.4f, int tag = 0)` - A FOV kick: deltaDegrees added, ramping in, holding, ramping out.
-- `public static int PushFovScale(float multiplier, float blendSeconds = 0.2f, int tag = 0)` - Zoom: the FOV is multiplied by multiplier (0.6 zooms in), held until removed.
-- `public static int PushPunch(float pitchDegrees, float yawDegrees = 0f, float rollDegrees = 0f, float recoverSeconds = 0.3f, int tag = 0)` - A recoil: a quick rotation offset that eases back over recoverSeconds.
-- `public static int PushRoll(float degrees, float blendSeconds = 0.3f, int tag = 0)` - A roll lean in degrees, held until removed.
-- `public static int PushArmScale(float factor, float blendSeconds = 0.3f, int tag = 0)` - The spring arm's length is multiplied by factor (zoom out for speed), held until removed.
-- `public static int PushSocketOffset(Vec3 cameraFrameOffset, float blendSeconds = 0.2f, int tag = 0)` - An offset at the arm's end in the camera frame (forward, right, up), held until removed: over-the-shoulder aim.
-- `public static bool RemoveModifier(int id, float outSeconds = -1f)` - Starts a modifier's blend out from its current strength (outSeconds &lt; 0 uses its own).
-- `public static int ClearModifiers(int tag = 0)` - Blends out every modifier with tag (0 = all).
-- `public static void AddShake(float trauma)` - Camera shake, 0..1: the existing CameraFx trauma (the player's shake and Reduce motion options apply).
-- `public static bool ShakeAt(Vec3 worldPosition, float radiusCm, float intensity, float falloffPower = 2f)` - Shake that fades with distance from the current camera: intensity * (1 - d/radius)^falloffPower.
-- `public static void DriveOrbitFromMouse(Entity rig, float degreesPerPixel = 0.15f, float wheelCmPerNotch = 40f)` - One frame of orbit control from the mouse: look input scaled by degreesPerPixel and the wheel as an arm change.
-- `public static CameraMode ModeOf(CameraRigPreset preset)` - The mode a preset starts in (VehicleChase is a Chase rig).
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ActiveRig` | `public static Entity ActiveRig { get; }` | The rig that is the view now, or None for the legacy pawn camera. |
+| `IsBlending` | `public static bool IsBlending { get; }` | True while a blend between views is running. |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `EventBlendFinished` | `public const string EventBlendFinished = "CameraBlendFinished"` | Raised when a blend into the live rig completes. |
+| `EventCut` | `public const string EventCut = "CameraCut"` | Raised when the camera teleports (a cut, or a lag snap). |
+| `EventViewTargetChanged` | `public const string EventViewTargetChanged = "CameraViewTargetChanged"` | Raised (at the new view target, or the pawn when none) when the live rig changes. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AddShake` | `public static void AddShake(float trauma)` | Camera shake, 0..1: the existing CameraFx trauma (the player's shake and Reduce motion options apply). |
+| `ClearModifiers` | `public static int ClearModifiers(int tag = 0)` | Blends out every modifier with tag (0 = all). |
+| `ClearViewTarget` | `public static bool ClearViewTarget(float blendSeconds = 0.5f, CameraBlendCurve curve = CameraBlendCurve.EaseInOut)` | Back to automatic selection: the best rig under the possessed pawn, else the legacy camera. |
+| `Cut` | `public static bool Cut(Entity rig = default)` | Snaps the lag state of rig (none = the active rig): the camera jumps to where it would be at rest, with no blend and no trail. |
+| `DriveOrbitFromMouse` | `public static void DriveOrbitFromMouse(Entity rig, float degreesPerPixel = 0.15f, float wheelCmPerNotch = 40f)` | One frame of orbit control from the mouse: look input scaled by degreesPerPixel and the wheel as an arm change. |
+| `ModeOf` | `public static CameraMode ModeOf(CameraRigPreset preset)` | The mode a preset starts in (VehicleChase is a Chase rig). |
+| `PushArmScale` | `public static int PushArmScale(float factor, float blendSeconds = 0.3f, int tag = 0)` | The spring arm's length is multiplied by factor (zoom out for speed), held until removed. |
+| `PushFovKick` | `public static int PushFovKick(float deltaDegrees, float inSeconds = 0.05f, float holdSeconds = 0.1f, float outSeconds = 0.4f, int tag = 0)` | A FOV kick: deltaDegrees added, ramping in, holding, ramping out. |
+| `PushFovScale` | `public static int PushFovScale(float multiplier, float blendSeconds = 0.2f, int tag = 0)` | Zoom: the FOV is multiplied by multiplier (0.6 zooms in), held until removed. |
+| `PushPunch` | `public static int PushPunch(float pitchDegrees, float yawDegrees = 0f, float rollDegrees = 0f, float recoverSeconds = 0.3f, int tag = 0)` | A recoil: a quick rotation offset that eases back over recoverSeconds. |
+| `PushRoll` | `public static int PushRoll(float degrees, float blendSeconds = 0.3f, int tag = 0)` | A roll lean in degrees, held until removed. |
+| `PushSocketOffset` | `public static int PushSocketOffset(Vec3 cameraFrameOffset, float blendSeconds = 0.2f, int tag = 0)` | An offset at the arm's end in the camera frame (forward, right, up), held until removed: over-the-shoulder aim. |
+| `RemoveModifier` | `public static bool RemoveModifier(int id, float outSeconds = -1f)` | Starts a modifier's blend out from its current strength (outSeconds &lt; 0 uses its own). |
+| `SetViewTarget` | `public static bool SetViewTarget(Entity rig, float blendSeconds = 0.5f, CameraBlendCurve curve = CameraBlendCurve.EaseInOut, bool cut = false)` | Makes rig the view. |
+| `ShakeAt` | `public static bool ShakeAt(Vec3 worldPosition, float radiusCm, float intensity, float falloffPower = 2f)` | Shake that fades with distance from the current camera: intensity * (1 - d/radius)^falloffPower. |
+| `TryGetPose` | `public static bool TryGetPose(out CameraPose pose)` | The camera pose after the rig and the modifier stack (before the player's shake and bob). |
+
+<a id="camerarigflags"></a>
 
 ### CameraRigFlags
 
 `public enum CameraRigFlags` - Rig switches, negative sense (zero is a working Chase rig).
 
-Values: `NoCollision = 1`, `NoInheritYaw = 2`, `NoInheritPitch = 4`, `NoInheritRoll = 8`, `NoFade = 16`, `LookAtTarget = 32`, `Disabled = 64`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Disabled` | `Disabled = 64` |  |
+| `LookAtTarget` | `LookAtTarget = 32` |  |
+| `NoCollision` | `NoCollision = 1` |  |
+| `NoFade` | `NoFade = 16` |  |
+| `NoInheritPitch` | `NoInheritPitch = 4` |  |
+| `NoInheritRoll` | `NoInheritRoll = 8` |  |
+| `NoInheritYaw` | `NoInheritYaw = 2` |  |
+
+<a id="camerarigpreset"></a>
 
 ### CameraRigPreset
 
 `public enum CameraRigPreset` - The starting values of a rig.
 
-Values: `Chase = 0`, `VehicleChase = 1`, `Orbit = 2`, `FirstPerson = 3`, `Seat = 4`, `TopDown = 5`, `Fixed = 6`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Chase` | `Chase = 0` |  |
+| `FirstPerson` | `FirstPerson = 3` |  |
+| `Fixed` | `Fixed = 6` |  |
+| `Orbit` | `Orbit = 2` |  |
+| `Seat` | `Seat = 4` |  |
+| `TopDown` | `TopDown = 5` |  |
+| `VehicleChase` | `VehicleChase = 1` |  |
+
+<a id="camerarigstate"></a>
 
 ### CameraRigState
 
 `public readonly record struct CameraRigState(float ArmCm, bool Active, bool Blending, bool Colliding, bool Faded)` - One rig's runtime state, as the system last wrote it.
 
+<a id="cameraview"></a>
+
 ### CameraView
 
 `public enum CameraView` - Which view the camera uses while a character is possessed.
 
-Values: `FirstPerson`, `ThirdPerson`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `FirstPerson` | `FirstPerson` |  |
+| `ThirdPerson` | `ThirdPerson` |  |
+
+<a id="canvasscalemode"></a>
 
 ### CanvasScaleMode
 
 `public enum CanvasScaleMode` - Whether the stretch scale may be fractional.
 
-Values: `Fractional = 0`, `Integer = 1`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Fractional` | `Fractional = 0` |  |
+| `Integer` | `Integer = 1` |  |
+
+<a id="canvasstretchaspect"></a>
 
 ### CanvasStretchAspect
 
 `public enum CanvasStretchAspect` - What the canvas does when the window's shape differs from the base size's.
 
-Values: `Ignore = 0`, `Keep = 1`, `KeepWidth = 2`, `KeepHeight = 3`, `Expand = 4`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Expand` | `Expand = 4` |  |
+| `Ignore` | `Ignore = 0` |  |
+| `Keep` | `Keep = 1` |  |
+| `KeepHeight` | `KeepHeight = 3` |  |
+| `KeepWidth` | `KeepWidth = 2` |  |
+
+<a id="canvasstretchmode"></a>
 
 ### CanvasStretchMode
 
 `public enum CanvasStretchMode` - The viewport stretch mode of the canvas.
 
-Values: `Disabled = 0`, `CanvasItems = 1`, `Viewport = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `CanvasItems` | `CanvasItems = 1` |  |
+| `Disabled` | `Disabled = 0` |  |
+| `Viewport` | `Viewport = 2` |  |
+
+<a id="captionkind"></a>
 
 ### CaptionKind
 
 `public enum CaptionKind` - The kind of a caption cue.
 
-Values: `Dialogue = 0`, `Sound = 1`, `Music = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Dialogue` | `Dialogue = 0` |  |
+| `Music` | `Music = 2` |  |
+| `Sound` | `Sound = 1` |  |
+
+<a id="captionmode"></a>
 
 ### CaptionMode
 
 `public enum CaptionMode` - What the captions show.
 
-Values: `Off = 0`, `Subtitles = 1`, `Captions = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Captions` | `Captions = 2` |  |
+| `Off` | `Off = 0` |  |
+| `Subtitles` | `Subtitles = 1` |  |
+
+<a id="captions"></a>
 
 ### Captions
 
 `public static class Captions` - Subtitles and sound captions (.occaptions).
 
-- `public static CaptionMode Mode { get; set; }` - What the captions show.
-- `public static int SizePreset { get; set; }` - 0 Small, 1 Medium, 2 Large, 3 Extra large.
-- `public static float BackgroundOpacity { get; set; }` - Background opacity, 0 to 1.
-- `public static bool TopOfScreen { get; set; }` - True for the top of the screen, false for the bottom.
-- `public static int MaxLines { get; set; }` - The most lines shown at once, 1 to 4.
-- `public static bool ShowSpeakerNames { get; set; }` - Show who is speaking.
-- `public static bool SpeakerColours { get; set; }` - Colour lines by speaker.
-- `public static bool DirectionHints { get; set; }` - Show a &lt; &gt; v hint for where a positional sound is.
-- `public static int Load(string contentRelativeDir = "Captions")` - Loads every .occaptions in a content-relative folder, replacing the cue set.
-- `public static bool Show(string cue)` - Shows a cue by id.
-- `public static bool ShowAt(string cue, Vec3 position)` - Shows a cue from a world position: its radius and the direction hint apply.
-- `public static bool ShowText(string speaker, string text, float seconds = 3f, CaptionKind kind = CaptionKind.Dialogue, uint rgba = 0xFFFFFFFF)` - Shows an ad-hoc line with no cue.
-- `public static void Stop(string? cue = null)` - Stops a cue's captions, or every caption with null.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `BackgroundOpacity` | `public static float BackgroundOpacity { get; set; }` | Background opacity, 0 to 1. |
+| `DirectionHints` | `public static bool DirectionHints { get; set; }` | Show a &lt; &gt; v hint for where a positional sound is. |
+| `MaxLines` | `public static int MaxLines { get; set; }` | The most lines shown at once, 1 to 4. |
+| `Mode` | `public static CaptionMode Mode { get; set; }` | What the captions show. |
+| `ShowSpeakerNames` | `public static bool ShowSpeakerNames { get; set; }` | Show who is speaking. |
+| `SizePreset` | `public static int SizePreset { get; set; }` | 0 Small, 1 Medium, 2 Large, 3 Extra large. |
+| `SpeakerColours` | `public static bool SpeakerColours { get; set; }` | Colour lines by speaker. |
+| `TopOfScreen` | `public static bool TopOfScreen { get; set; }` | True for the top of the screen, false for the bottom. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Load` | `public static int Load(string contentRelativeDir = "Captions")` | Loads every .occaptions in a content-relative folder, replacing the cue set. |
+| `Show` | `public static bool Show(string cue)` | Shows a cue by id. |
+| `ShowAt` | `public static bool ShowAt(string cue, Vec3 position)` | Shows a cue from a world position: its radius and the direction hint apply. |
+| `ShowText` | `public static bool ShowText(string speaker, string text, float seconds = 3f, CaptionKind kind = CaptionKind.Dialogue, uint rgba = 0xFFFFFFFF)` | Shows an ad-hoc line with no cue. |
+| `Stop` | `public static void Stop(string? cue = null)` | Stops a cue's captions, or every caption with null. |
+
+<a id="car"></a>
 
 ### Car
 
 `public readonly struct Car : IEquatable<Car>` - A car made by CreateCar: the physics vehicle and the scene entity that follows it.
 
-- `public AP.Vehicle Vehicle { get; }` - The physics vehicle.
-- `public Entity Entity { get; }` - The scene entity kept at the vehicle's pose; invalid if none could be made.
-- `public static Car None { get; }` - No car; also what a refused CreateCar returns.
-- `public int Handle { get; }` - The raw vehicle handle, 0 for no car.
-- `public bool IsValid { get; }` - True when the physics layer accepted the car.
-- `public bool SetInput(float throttle, float steer, float brake = 0f, float handbrake = 0f)` - The driver's input, which holds until set again: throttle -1..1 (negative reverses), steer -1..1 (+1 toward the car's right), brake and handbrake 0..1.
-- `public bool TryGetTelemetry(out VehicleTelemetry telemetry)` - The car's telemetry as of the last physics step.
-- `public bool Shift(int delta)` - Manual gearbox: one gear up (+1) or down (-1).
-- `public bool Flip(float liftCm = 50f)` - Puts the car upright about its heading, stopped, liftCm higher.
-- `public bool Enter(Entity driver)` - Puts driver in the seat (see EnterVehicle).
-- `public bool TryGetState(out CarState state)` - Speed, origin position and heading.
-- `public bool SetPose(Vec3 position, float yawDegrees)` - Puts the car's origin at position facing yawDegrees, stops it dead and wakes it.
-- `public bool WheelContact(int index)` - True when wheel index touched ground on the last step.
-- `public bool Destroy()` - Removes the vehicle, its chassis and its entity.
-- `public bool Equals(Car other)` - Inherited documentation.
-- `public override bool Equals(object? obj)` - Inherited documentation.
-- `public override int GetHashCode()` - Inherited documentation.
-- `public override string ToString()` - Inherited documentation.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Entity` | `public Entity Entity { get; }` | The scene entity kept at the vehicle's pose; invalid if none could be made. |
+| `Handle` | `public int Handle { get; }` | The raw vehicle handle, 0 for no car. |
+| `IsValid` | `public bool IsValid { get; }` | True when the physics layer accepted the car. |
+| `None` | `public static Car None { get; }` | No car; also what a refused CreateCar returns. |
+| `Vehicle` | `public AP.Vehicle Vehicle { get; }` | The physics vehicle. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Destroy` | `public bool Destroy()` | Removes the vehicle, its chassis and its entity. |
+| `Enter` | `public bool Enter(Entity driver)` | Puts driver in the seat (see EnterVehicle). |
+| `Equals` | `public bool Equals(Car other)` | Inherited documentation. |
+| `Equals` | `public override bool Equals(object? obj)` | Inherited documentation. |
+| `Flip` | `public bool Flip(float liftCm = 50f)` | Puts the car upright about its heading, stopped, liftCm higher. |
+| `GetHashCode` | `public override int GetHashCode()` | Inherited documentation. |
+| `SetInput` | `public bool SetInput(float throttle, float steer, float brake = 0f, float handbrake = 0f)` | The driver's input, which holds until set again: throttle -1..1 (negative reverses), steer -1..1 (+1 toward the car's right), brake and handbrake 0..1. |
+| `SetPose` | `public bool SetPose(Vec3 position, float yawDegrees)` | Puts the car's origin at position facing yawDegrees, stops it dead and wakes it. |
+| `Shift` | `public bool Shift(int delta)` | Manual gearbox: one gear up (+1) or down (-1). |
+| `ToString` | `public override string ToString()` | Inherited documentation. |
+| `TryGetState` | `public bool TryGetState(out CarState state)` | Speed, origin position and heading. |
+| `TryGetTelemetry` | `public bool TryGetTelemetry(out VehicleTelemetry telemetry)` | The car's telemetry as of the last physics step. |
+| `WheelContact` | `public bool WheelContact(int index)` | True when wheel index touched ground on the last step. |
+
+<a id="carspec"></a>
 
 ### CarSpec
 
 `public readonly record struct CarSpec` - The numbers that make a car.
 
-- `public Vec3 HalfExtentsCm { get; init; }` - Half extents of the chassis box, cm (X forward, Y right, Z up).
-- `public float GroundClearanceCm { get; init; }` - How high the chassis underside is off the ground the origin touches, cm.
-- `public Vec3 CentreOfMassCm { get; init; }` - Centre of mass relative to the origin, cm.
-- `public float MassKg { get; init; }` - Chassis mass, kg.
-- `public float WheelbaseCm { get; init; }` - Distance between the front and rear axles, cm.
-- `public float TrackCm { get; init; }` - Distance between the left and right wheels, cm.
-- `public float WheelRadiusCm { get; init; }` - Tyre radius, cm.
-- `public float WheelWidthCm { get; init; }` - Tyre width, cm.
-- `public float SuspensionMinCm { get; init; }` - Shortest suspension length (fully compressed), cm.
-- `public float SuspensionMaxCm { get; init; }` - Longest suspension length (fully drooped), cm.
-- `public float SuspensionHz { get; init; }` - Suspension spring frequency, Hz.
-- `public float SuspensionDamping { get; init; }` - Suspension damping ratio; 0.5 is a car, 1 is critically damped.
-- `public float FrontSteerDeg { get; init; }` - How far the front wheels turn at full steering, degrees.
-- `public float BrakeTorque { get; init; }` - The most each wheel's brake holds, N*m.
-- `public float HandBrakeTorque { get; init; }` - The most each rear wheel's handbrake holds, N*m.
-- `public float EngineTorque { get; init; }` - Engine peak torque, N*m.
-- `public float EngineMinRpm { get; init; }` - Engine idle revs per minute.
-- `public float EngineMaxRpm { get; init; }` - Engine rev limit per minute.
-- `public float MaxPitchRollDeg { get; init; }` - Keeps the chassis' up axis within this many degrees of the world's, so the car cannot land on its roof; 0 or less turns it off.
-- `public static CarSpec Default { get; }` - The frozen default car: a 460 x 190 x 90 cm box, 1500 kg, 280 cm wheelbase, 160 cm track, 36 cm tyres, a 500 N*m engine.
-- `public string ToOcVehicle()` - This car as .ocvehicle text: the four-wheel plan PlanWheels computes (front pair steered, rear pair driven with the handbrake), the engine and the chassis, with every other record at the physics layer's defaults, so the car drives exactly as it did before .ocvehicle existed.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `BrakeTorque` | `public float BrakeTorque { get; init; }` | The most each wheel's brake holds, N*m. |
+| `CentreOfMassCm` | `public Vec3 CentreOfMassCm { get; init; }` | Centre of mass relative to the origin, cm. |
+| `Default` | `public static CarSpec Default { get; }` | The frozen default car: a 460 x 190 x 90 cm box, 1500 kg, 280 cm wheelbase, 160 cm track, 36 cm tyres, a 500 N*m engine. |
+| `EngineMaxRpm` | `public float EngineMaxRpm { get; init; }` | Engine rev limit per minute. |
+| `EngineMinRpm` | `public float EngineMinRpm { get; init; }` | Engine idle revs per minute. |
+| `EngineTorque` | `public float EngineTorque { get; init; }` | Engine peak torque, N*m. |
+| `FrontSteerDeg` | `public float FrontSteerDeg { get; init; }` | How far the front wheels turn at full steering, degrees. |
+| `GroundClearanceCm` | `public float GroundClearanceCm { get; init; }` | How high the chassis underside is off the ground the origin touches, cm. |
+| `HalfExtentsCm` | `public Vec3 HalfExtentsCm { get; init; }` | Half extents of the chassis box, cm (X forward, Y right, Z up). |
+| `HandBrakeTorque` | `public float HandBrakeTorque { get; init; }` | The most each rear wheel's handbrake holds, N*m. |
+| `MassKg` | `public float MassKg { get; init; }` | Chassis mass, kg. |
+| `MaxPitchRollDeg` | `public float MaxPitchRollDeg { get; init; }` | Keeps the chassis' up axis within this many degrees of the world's, so the car cannot land on its roof; 0 or less turns it off. |
+| `SuspensionDamping` | `public float SuspensionDamping { get; init; }` | Suspension damping ratio; 0.5 is a car, 1 is critically damped. |
+| `SuspensionHz` | `public float SuspensionHz { get; init; }` | Suspension spring frequency, Hz. |
+| `SuspensionMaxCm` | `public float SuspensionMaxCm { get; init; }` | Longest suspension length (fully drooped), cm. |
+| `SuspensionMinCm` | `public float SuspensionMinCm { get; init; }` | Shortest suspension length (fully compressed), cm. |
+| `TrackCm` | `public float TrackCm { get; init; }` | Distance between the left and right wheels, cm. |
+| `WheelbaseCm` | `public float WheelbaseCm { get; init; }` | Distance between the front and rear axles, cm. |
+| `WheelRadiusCm` | `public float WheelRadiusCm { get; init; }` | Tyre radius, cm. |
+| `WheelWidthCm` | `public float WheelWidthCm { get; init; }` | Tyre width, cm. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ToOcVehicle` | `public string ToOcVehicle()` | This car as .ocvehicle text: the four-wheel plan PlanWheels computes (front pair steered, rear pair driven with the handbrake), the engine and the chassis, with every other record at the physics layer's defaults, so the car drives exactly as it did before .ocvehicle existed. |
+
+<a id="carstate"></a>
 
 ### CarState
 
 `public readonly record struct CarState(float ForwardSpeedCmS, Vec3 Position, float YawDegrees)` - A car's speed, position and heading, read from the physics step.
 
+<a id="classbuilder"></a>
+
 ### ClassBuilder
 
 `public sealed class ClassBuilder` - Writes a class's defaults into its registry row.
 
-- `public void Mesh(string meshPath, string material = "")` - Gives the class's own entity a mesh, and a material if one is named.
-- `public void PointLight(float intensityLux, float rangeCm)` - Adds a point light.
-- `public void Camera(float fovDegrees, float nearCm, float farCm)` - Adds a camera.
-- `public void CameraRig(CameraRigPreset preset = CameraRigPreset.Chase)` - Gives the class's own entity a gameplay camera rig seeded from preset (and a camera).
-- `public void Ticks(TickGroup group, int order = 0)` - Kept so older scripts compile.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Camera` | `public void Camera(float fovDegrees, float nearCm, float farCm)` | Adds a camera. |
+| `CameraRig` | `public void CameraRig(CameraRigPreset preset = CameraRigPreset.Chase)` | Gives the class's own entity a gameplay camera rig seeded from preset (and a camera). |
+| `Mesh` | `public void Mesh(string meshPath, string material = "")` | Gives the class's own entity a mesh, and a material if one is named. |
+| `PointLight` | `public void PointLight(float intensityLux, float rangeCm)` | Adds a point light. |
+| `Ticks` | `public void Ticks(TickGroup group, int order = 0)` | Kept so older scripts compile. |
+
+<a id="classnames"></a>
 
 ### ClassNames
 
 `public static class ClassNames` - Resolves a managed Type to the class name it declared, and caches the answer.
 
-- `public static string Of(Type t)` - The declared class name for t, or the C# type name if it has no marker attribute.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Of` | `public static string Of(Type t)` | The declared class name for t, or the C# type name if it has no marker attribute. |
+
+<a id="colourvisionmode"></a>
 
 ### ColourVisionMode
 
 `public enum ColourVisionMode` - The colour-vision filter modes.
 
-Values: `Off = 0`, `Protanopia = 1`, `Deuteranopia = 2`, `Tritanopia = 3`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Deuteranopia` | `Deuteranopia = 2` |  |
+| `Off` | `Off = 0` |  |
+| `Protanopia` | `Protanopia = 1` |  |
+| `Tritanopia` | `Tritanopia = 3` |  |
+
+<a id="component"></a>
 
 ### Component
 
 `public enum Component` - The built-in component kinds.
 
-Values: `Local = 1`, `World = 2`, `Hierarchy = 3`, `Name = 4`, `Tags = 5`, `MeshRenderer = 6`, `Light = 7`, `Camera = 8`, `SkeletalMesh = 9`, `Animator = 10`, `ParticleEmitter = 11`, `Attachment = 12`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Animator` | `Animator = 10` |  |
+| `Attachment` | `Attachment = 12` |  |
+| `Camera` | `Camera = 8` |  |
+| `Hierarchy` | `Hierarchy = 3` |  |
+| `Light` | `Light = 7` |  |
+| `Local` | `Local = 1` |  |
+| `MeshRenderer` | `MeshRenderer = 6` |  |
+| `Name` | `Name = 4` |  |
+| `ParticleEmitter` | `ParticleEmitter = 11` |  |
+| `SkeletalMesh` | `SkeletalMesh = 9` |  |
+| `Tags` | `Tags = 5` |  |
+| `World` | `World = 2` |  |
+
+<a id="configfile"></a>
 
 ### ConfigFile
 
 `public sealed class ConfigFile` - Sections of key/value pairs saved as text in an INI-style format: [section] lines, then key=value with strings quoted, numbers and true/false bare, and Vector3(x, y, z).
 
-- `public void SetValue(string section, string key, object? value)` - Sets a value, adding the section and key if needed.
-- `public object? GetValue(string section, string key, object? fallback = null)` - The value, or fallback when the section or key is absent.
-- `public T GetValue<T>(string section, string key, T fallback)` - The value converted to T, or fallback when absent or of another kind.
-- `public bool HasSection(string section)`
-- `public bool HasSectionKey(string section, string key)`
-- `public string[] GetSections()`
-- `public string[] GetSectionKeys(string section)`
-- `public void EraseSection(string section)`
-- `public void EraseSectionKey(string section, string key)`
-- `public void Clear()`
-- `public bool Save(string path)` - Writes the file; res:// and user:// paths are resolved.
-- `public bool Load(string path)` - Replaces the contents with the file's; false (contents unchanged) when it is missing or unreadable.
-- `public string ToText()` - The text Save writes.
-- `public bool Parse(string text)` - Replaces the contents with parsed text.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Clear` | `public void Clear()` |  |
+| `EraseSection` | `public void EraseSection(string section)` |  |
+| `EraseSectionKey` | `public void EraseSectionKey(string section, string key)` |  |
+| `GetSectionKeys` | `public string[] GetSectionKeys(string section)` |  |
+| `GetSections` | `public string[] GetSections()` |  |
+| `GetValue` | `public T GetValue<T>(string section, string key, T fallback)` | The value converted to T, or fallback when absent or of another kind. |
+| `GetValue` | `public object? GetValue(string section, string key, object? fallback = null)` | The value, or fallback when the section or key is absent. |
+| `HasSection` | `public bool HasSection(string section)` |  |
+| `HasSectionKey` | `public bool HasSectionKey(string section, string key)` |  |
+| `Load` | `public bool Load(string path)` | Replaces the contents with the file's; false (contents unchanged) when it is missing or unreadable. |
+| `Parse` | `public bool Parse(string text)` | Replaces the contents with parsed text. |
+| `Save` | `public bool Save(string path)` | Writes the file; res:// and user:// paths are resolved. |
+| `SetValue` | `public void SetValue(string section, string key, object? value)` | Sets a value, adding the section and key if needed. |
+| `ToText` | `public string ToText()` | The text Save writes. |
+
+<a id="contactevent"></a>
 
 ### ContactEvent
 
 `public readonly struct ContactEvent` - Two solid bodies that began touching during the last step.
 
-- `public Body A { get; }` - One of the two bodies; a contact is symmetric.
-- `public Body B { get; }`
-- `public Vec3 Point { get; }` - Where they touched, centimetres.
-- `public Vec3 Normal { get; }` - The contact normal, unit length.
-- `public Body Other(Body one)` - The other body in this contact; invalid if one is neither.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `A` | `public Body A { get; }` | One of the two bodies; a contact is symmetric. |
+| `B` | `public Body B { get; }` |  |
+| `Normal` | `public Vec3 Normal { get; }` | The contact normal, unit length. |
+| `Point` | `public Vec3 Point { get; }` | Where they touched, centimetres. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Other` | `public Body Other(Body one)` | The other body in this contact; invalid if one is neither. |
+
+<a id="cursorshape"></a>
 
 ### CursorShape
 
 `public enum CursorShape` - The cursor shapes a window offers.
 
-Values: `Arrow = 0`, `IBeam`, `PointingHand`, `Cross`, `Wait`, `Busy`, `Drag`, `CanDrop`, `Forbidden`, `VSize`, `HSize`, `BDiagSize`, `FDiagSize`, `Move`, `VSplit`, `HSplit`, `Help`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Arrow` | `Arrow = 0` |  |
+| `BDiagSize` | `BDiagSize` |  |
+| `Busy` | `Busy` |  |
+| `CanDrop` | `CanDrop` |  |
+| `Cross` | `Cross` |  |
+| `Drag` | `Drag` |  |
+| `FDiagSize` | `FDiagSize` |  |
+| `Forbidden` | `Forbidden` |  |
+| `Help` | `Help` |  |
+| `HSize` | `HSize` |  |
+| `HSplit` | `HSplit` |  |
+| `IBeam` | `IBeam` |  |
+| `Move` | `Move` |  |
+| `PointingHand` | `PointingHand` |  |
+| `VSize` | `VSize` |  |
+| `VSplit` | `VSplit` |  |
+| `Wait` | `Wait` |  |
+
+<a id="customenv"></a>
 
 ### CustomEnv
 
 `public static class CustomEnv` - Custom sky, fog and particles programs.
 
-- `public static bool Register(CustomEnvKind kind, string name, string ocgraphText)` - Registers (or replaces) the program name from the text of its .ocgraph.
-- `public static bool SetRegisters(CustomEnvKind kind, string name, float[] registers)` - Replaces the program's uniform registers (four floats a register, normal block then global block).
-- `public static bool UseSky(string? name)` - Makes the registered sky program the sky; null or empty returns to the engine's own sky.
-- `public static bool Unregister(CustomEnvKind kind, string name)` - Removes the program; false when no program of that kind and name is registered.
-- `public static int Count(CustomEnvKind kind)` - How many programs of the kind are registered.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Count` | `public static int Count(CustomEnvKind kind)` | How many programs of the kind are registered. |
+| `Register` | `public static bool Register(CustomEnvKind kind, string name, string ocgraphText)` | Registers (or replaces) the program name from the text of its .ocgraph. |
+| `SetRegisters` | `public static bool SetRegisters(CustomEnvKind kind, string name, float[] registers)` | Replaces the program's uniform registers (four floats a register, normal block then global block). |
+| `Unregister` | `public static bool Unregister(CustomEnvKind kind, string name)` | Removes the program; false when no program of that kind and name is registered. |
+| `UseSky` | `public static bool UseSky(string? name)` | Makes the registered sky program the sky; null or empty returns to the engine's own sky. |
+
+<a id="customenvkind"></a>
 
 ### CustomEnvKind
 
 `public enum CustomEnvKind` - The kinds of custom HLSL program the renderers can run beyond a mesh material (AVER_FW_CENV_*).
 
-Values: `Sky = 0`, `Fog = 1`, `Particles = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Fog` | `Fog = 1` |  |
+| `Particles` | `Particles = 2` |  |
+| `Sky` | `Sky = 0` |  |
+
+<a id="datacolumnattribute"></a>
 
 ### DataColumnAttribute
 
 `public sealed class DataColumnAttribute : Attribute` - Binds a member to the column of this name instead of the member's own name.
 
-- `public string Name { get; }` - The column header (without a type hint).
-- `public DataColumnAttribute(string name)` - Binds to the column called name.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `DataColumnAttribute` | `public DataColumnAttribute(string name)` | Binds to the column called name. |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Name` | `public string Name { get; }` | The column header (without a type hint). |
+
+<a id="datacolumntype"></a>
 
 ### DataColumnType
 
 `public enum DataColumnType` - The type a table column declares in its header (Damage:int); advisory, the cell text is what is stored.
 
-Values: `String`, `Int`, `Float`, `Bool`, `Vec3`, `Text`, `Strings`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Bool` | `Bool` |  |
+| `Float` | `Float` |  |
+| `Int` | `Int` |  |
+| `String` | `String` |  |
+| `Strings` | `Strings` |  |
+| `Text` | `Text` |  |
+| `Vec3` | `Vec3` |  |
+
+<a id="datacontentgraph"></a>
 
 ### DataContentGraph
 
 `public static class DataContentGraph` - The data-table graph nodes' entry points.
 
-- `public static bool FindRowForGraph(string table, string row, out int rowIndex)` - AN_FindDataTableRow: the index of the row called row (ASCII case-insensitive).
-- `public static bool FindRowByIntForGraph(string table, string column, int value, out int rowIndex)` - AN_FindDataTableRowByInt: the first row whose column holds value.
-- `public static int RowCountForGraph(string table)` - AN_DataTableRowCount.
-- `public static bool GetIntForGraph(string table, string column, int row, out int value)` - AN_GetDataTableInt.
-- `public static bool GetFloatForGraph(string table, string column, int row, out float value)` - AN_GetDataTableFloat.
-- `public static bool GetBoolForGraph(string table, string column, int row, out bool value)` - AN_GetDataTableBool.
-- `public static bool GetVec3ForGraph(string table, string column, int row, out float x, out float y, out float z)` - AN_GetDataTableVec3.
-- `public static bool SetUiTextForGraph(int widget, string table, string column, int row)` - AN_SetUiTextFromTable: the widget's text becomes the cell (a text reference in it still resolves in the UI).
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `FindRowByIntForGraph` | `public static bool FindRowByIntForGraph(string table, string column, int value, out int rowIndex)` | AN_FindDataTableRowByInt: the first row whose column holds value. |
+| `FindRowForGraph` | `public static bool FindRowForGraph(string table, string row, out int rowIndex)` | AN_FindDataTableRow: the index of the row called row (ASCII case-insensitive). |
+| `GetBoolForGraph` | `public static bool GetBoolForGraph(string table, string column, int row, out bool value)` | AN_GetDataTableBool. |
+| `GetFloatForGraph` | `public static bool GetFloatForGraph(string table, string column, int row, out float value)` | AN_GetDataTableFloat. |
+| `GetIntForGraph` | `public static bool GetIntForGraph(string table, string column, int row, out int value)` | AN_GetDataTableInt. |
+| `GetVec3ForGraph` | `public static bool GetVec3ForGraph(string table, string column, int row, out float x, out float y, out float z)` | AN_GetDataTableVec3. |
+| `RowCountForGraph` | `public static int RowCountForGraph(string table)` | AN_DataTableRowCount. |
+| `SetUiTextForGraph` | `public static bool SetUiTextForGraph(int widget, string table, string column, int row)` | AN_SetUiTextFromTable: the widget's text becomes the cell (a text reference in it still resolves in the UI). |
+
+<a id="dataignoreattribute"></a>
 
 ### DataIgnoreAttribute
 
 `public sealed class DataIgnoreAttribute : Attribute` - Leaves the member out of binding.
 
+<a id="datalayerresult"></a>
+
 ### DataLayerResult
 
 `public enum DataLayerResult` - What SetState(string, DataLayerState) did.
 
-Values: `Ok = 1`, `Unknown = 0`, `NotRuntime = -1`, `BadState = -2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `BadState` | `BadState = -2` |  |
+| `NotRuntime` | `NotRuntime = -1` |  |
+| `Ok` | `Ok = 1` |  |
+| `Unknown` | `Unknown = 0` |  |
+
+<a id="datalayers"></a>
 
 ### DataLayers
 
 `public static class DataLayers` - The level's data layers.
 
-- `public static int Count { get; }` - How many layers the loaded level declares.
-- `public static string Name(int index)` - The name of layer index, or an empty string for an unknown index.
-- `public static IReadOnlyList<string> Names()` - The names of every layer, in file order.
-- `public static bool TryGetState(string name, out DataLayerState state)` - The state in force for a layer (never above its parent's), or false for an unknown name.
-- `public static DataLayerState GetState(string name)` - The state in force for a layer; Unloaded for an unknown name (use TryGetState to tell the two apart).
-- `public static DataLayerResult SetState(string name, DataLayerState state)` - Asks for a layer to take a state.
-- `public static bool TryPollCompleted(out string name, out DataLayerState state)` - Takes the oldest finished change: the streamer has loaded what an activated layer needs in range, or evicted everything an unloaded one held.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Count` | `public static int Count { get; }` | How many layers the loaded level declares. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `GetState` | `public static DataLayerState GetState(string name)` | The state in force for a layer; Unloaded for an unknown name (use TryGetState to tell the two apart). |
+| `Name` | `public static string Name(int index)` | The name of layer index, or an empty string for an unknown index. |
+| `Names` | `public static IReadOnlyList<string> Names()` | The names of every layer, in file order. |
+| `SetState` | `public static DataLayerResult SetState(string name, DataLayerState state)` | Asks for a layer to take a state. |
+| `TryGetState` | `public static bool TryGetState(string name, out DataLayerState state)` | The state in force for a layer (never above its parent's), or false for an unknown name. |
+| `TryPollCompleted` | `public static bool TryPollCompleted(out string name, out DataLayerState state)` | Takes the oldest finished change: the streamer has loaded what an activated layer needs in range, or evicted everything an unloaded one held. |
+
+<a id="datalayerstate"></a>
 
 ### DataLayerState
 
 `public enum DataLayerState` - The runtime state of a data layer.
 
-Values: `Unloaded = 0`, `Loaded = 1`, `Activated = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Activated` | `Activated = 2` |  |
+| `Loaded` | `Loaded = 1` |  |
+| `Unloaded` | `Unloaded = 0` |  |
+
+<a id="datarownameattribute"></a>
 
 ### DataRowNameAttribute
 
 `public sealed class DataRowNameAttribute : Attribute` - The member (a string) receives the row's name.
 
+<a id="datatable"></a>
+
 ### DataTable
 
 `public sealed class DataTable<T> : IReadOnlyCollection<KeyValuePair<string, T>>, ITableRefresh` - An untyped view of a loaded data table (framework_table_abi.h).
 
-- `public string Path { get; }` - The absolute path of the file.
-- `public int Version { get; }` - Starts at 1 and rises on every successful reload; 0 while the file is not loaded.
-- `public bool IsLoaded { get; }` - True when the file is loaded.
-- `public int RowCount { get; }` - Inherited documentation.
-- `public int ColumnCount { get; }` - Inherited documentation.
-- `public int FindRow(string name)` - The row called name (ASCII case-insensitive), -1 if none.
-- `public int FindColumn(string name)` - The column called name (case-insensitive, spaces and underscores ignored), -1 if none.
-- `public string RowName(int r)` - Inherited documentation.
-- `public string ColumnName(int c)` - Inherited documentation.
-- `public DataColumnType ColumnType(int c)` - Inherited documentation.
-- `public string Cell(int r, int c)` - Inherited documentation.
-- `public string GetString(int r, int c, string fallback = "")` - The cell as text, or fallback when out of range.
-- `public int GetInt(int r, int c, int fallback = 0)` - The cell as an int, or fallback when out of range, empty or not a number.
-- `public float GetFloat(int r, int c, float fallback = 0)` - The cell as a float (invariant culture, a trailing "f" allowed), or fallback.
-- `public bool GetBool(int r, int c, bool fallback = false)` - The cell as a bool (true/false, yes/no, 1/0), or fallback.
-- `public bool TryGetVec3(int r, int c, out Vec3 v)` - The cell as three numbers separated by space, comma, semicolon or bar.
-- `public string Path { get; }` - The absolute path of the file.
-- `public int Version { get; }` - The file's version as of the last build; 0 while it is not loaded.
-- `public int Count { get; }` - The number of rows.
-- `public IReadOnlyList<string> Problems { get; }` - What went wrong while binding: "row 'sword' column 'Damage': 'abc' is not an int".
-- `public IEnumerable<string> RowNames { get; }` - The row names in file order.
-- `public IEnumerable<T> Rows { get; }` - The rows in file order.
-- `public bool TryGetRow(string name, out T row)` - The row called name (ASCII case-insensitive).
-- `public T GetRow(string name)` - The row called name; throws KeyNotFoundException naming the table and row.
-- `public event Action<DataTable<T>>? Reloaded` - Raised from Pump after the table was rebuilt (file reload or culture change).
-- `public IEnumerator<KeyValuePair<string, T>> GetEnumerator()` - Inherited documentation.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ColumnCount` | `public int ColumnCount { get; }` | Inherited documentation. |
+| `Count` | `public int Count { get; }` | The number of rows. |
+| `IsLoaded` | `public bool IsLoaded { get; }` | True when the file is loaded. |
+| `Path` | `public string Path { get; }` | The absolute path of the file. |
+| `Path` | `public string Path { get; }` | The absolute path of the file. |
+| `Problems` | `public IReadOnlyList<string> Problems { get; }` | What went wrong while binding: "row 'sword' column 'Damage': 'abc' is not an int". |
+| `RowCount` | `public int RowCount { get; }` | Inherited documentation. |
+| `RowNames` | `public IEnumerable<string> RowNames { get; }` | The row names in file order. |
+| `Rows` | `public IEnumerable<T> Rows { get; }` | The rows in file order. |
+| `Version` | `public int Version { get; }` | Starts at 1 and rises on every successful reload; 0 while the file is not loaded. |
+| `Version` | `public int Version { get; }` | The file's version as of the last build; 0 while it is not loaded. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Cell` | `public string Cell(int r, int c)` | Inherited documentation. |
+| `ColumnName` | `public string ColumnName(int c)` | Inherited documentation. |
+| `ColumnType` | `public DataColumnType ColumnType(int c)` | Inherited documentation. |
+| `FindColumn` | `public int FindColumn(string name)` | The column called name (case-insensitive, spaces and underscores ignored), -1 if none. |
+| `FindRow` | `public int FindRow(string name)` | The row called name (ASCII case-insensitive), -1 if none. |
+| `GetBool` | `public bool GetBool(int r, int c, bool fallback = false)` | The cell as a bool (true/false, yes/no, 1/0), or fallback. |
+| `GetEnumerator` | `public IEnumerator<KeyValuePair<string, T>> GetEnumerator()` | Inherited documentation. |
+| `GetFloat` | `public float GetFloat(int r, int c, float fallback = 0)` | The cell as a float (invariant culture, a trailing "f" allowed), or fallback. |
+| `GetInt` | `public int GetInt(int r, int c, int fallback = 0)` | The cell as an int, or fallback when out of range, empty or not a number. |
+| `GetRow` | `public T GetRow(string name)` | The row called name; throws KeyNotFoundException naming the table and row. |
+| `GetString` | `public string GetString(int r, int c, string fallback = "")` | The cell as text, or fallback when out of range. |
+| `RowName` | `public string RowName(int r)` | Inherited documentation. |
+| `TryGetRow` | `public bool TryGetRow(string name, out T row)` | The row called name (ASCII case-insensitive). |
+| `TryGetVec3` | `public bool TryGetVec3(int r, int c, out Vec3 v)` | The cell as three numbers separated by space, comma, semicolon or bar. |
+
+**Events**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Reloaded` | `public event Action<DataTable<T>>? Reloaded` | Raised from Pump after the table was rebuilt (file reload or culture change). |
+
+<a id="datatablebinder"></a>
 
 ### DataTableBinder
 
 `public static class DataTableBinder` - Maps table rows onto T by column name.
 
-- `public static T[] Bind<T>(IRawTable table, List<string> problems)` - Binds every row; element i of the result is table row i.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Bind` | `public static T[] Bind<T>(IRawTable table, List<string> problems)` | Binds every row; element i of the result is table row i. |
+
+<a id="datatables"></a>
 
 ### DataTables
 
 `public static class DataTables` - Loads and caches data tables.
 
-- `public static DataTable<T> Load<T>(string path)` - The table bound to T rows, cached per (path, T).
-- `public static DataTable Open(string path)` - The untyped table, cached per path.
-- `public static void Pump()` - Rebuilds typed tables whose file reloaded and, for tables with text columns, the ones a culture change affects; raises Reloaded.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Load` | `public static DataTable<T> Load<T>(string path)` | The table bound to T rows, cached per (path, T). |
+| `Open` | `public static DataTable Open(string path)` | The untyped table, cached per path. |
+| `Pump` | `public static void Pump()` | Rebuilds typed tables whose file reloaded and, for tables with text columns, the ones a culture change affects; raises Reloaded. |
+
+<a id="deadzonetype"></a>
 
 ### DeadZoneType
 
 `public enum DeadZoneType` - How a DeadZone measures the input.
 
-Values: `Radial`, `Axial`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Axial` | `Axial` |  |
+| `Radial` | `Radial` |  |
+
+<a id="debugdraw"></a>
 
 ### DebugDraw
 
 `public static class DebugDraw` - World-space debug lines drawn on top of the frame.
 
-- `public static void Line(Vec3 from, Vec3 to, Vec3? rgb = null, float seconds = 0f)` - A line from from to to.
-- `public static void Box(Vec3 center, Vec3 halfExtents, Vec3? rgb = null, float seconds = 0f)` - An axis-aligned box: its twelve edges.
-- `public static void Sphere(Vec3 center, float radius, Vec3? rgb = null, float seconds = 0f, int segments = 24)` - A sphere as three great circles of segments lines each.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Box` | `public static void Box(Vec3 center, Vec3 halfExtents, Vec3? rgb = null, float seconds = 0f)` | An axis-aligned box: its twelve edges. |
+| `Line` | `public static void Line(Vec3 from, Vec3 to, Vec3? rgb = null, float seconds = 0f)` | A line from from to to. |
+| `Sphere` | `public static void Sphere(Vec3 center, float radius, Vec3? rgb = null, float seconds = 0f, int segments = 24)` | A sphere as three great circles of segments lines each. |
+
+<a id="deferred"></a>
 
 ### Deferred
 
 `public static class Deferred` - Work for the game thread at the end of the current tick pass.
 
-- `public static void Call(Action action)` - Runs action on the game thread when the current tick pass ends.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Call` | `public static void Call(Action action)` | Runs action on the game thread when the current tick pass ends. |
+
+<a id="display"></a>
 
 ### Display
 
 `public static class Display` - The display, for what a script may change at runtime.
 
-- `public static void SetVSync(bool on)` - Asks the shipped game to turn vsync on or off; it applies it next frame where the device allows turning it off.
-- `public static PresentMode? PresentMode { get; set; }` - How a finished frame reaches the display.
-- `public static int MaxFps { get; set; }` - The cap on frames per second, 0 for none.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `MaxFps` | `public static int MaxFps { get; set; }` | The cap on frames per second, 0 for none. |
+| `PresentMode` | `public static PresentMode? PresentMode { get; set; }` | How a finished frame reaches the display. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `SetVSync` | `public static void SetVSync(bool on)` | Asks the shipped game to turn vsync on or off; it applies it next frame where the device allows turning it off. |
+
+<a id="displaywindow"></a>
 
 ### DisplayWindow
 
 `public static class DisplayWindow` - The game window: what it is now (as the host last published it) and what a script asks it to become.
 
-- `public static WindowMode Mode { get; set; }` - The mode now.
-- `public static (int Width, int Height) Size` - The client area in physical pixels (0 by 0 before the host has published).
-- `public static void SetSize(int width, int height)` - Asks for a client area of this many pixels (a windowed window takes it).
-- `public static (int X, int Y) Position` - The outer window's top-left in screen pixels.
-- `public static void SetPosition(int x, int y)`
-- `public static WindowFlags Flags { get; }` - The flags that are on now.
-- `public static void SetFlag(WindowFlags flag, bool on)`
-- `public static void SetTitle(string title)`
-- `public static (int Width, int Height) MonitorSize` - The monitor the window is on, in pixels (0 by 0 when it cannot be told).
-- `public static float DpiScale { get; }` - The display scale: 1 is 96 DPI.
-- `public static bool Focused { get; }` - Whether the window has the keyboard focus.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `DpiScale` | `public static float DpiScale { get; }` | The display scale: 1 is 96 DPI. |
+| `Flags` | `public static WindowFlags Flags { get; }` | The flags that are on now. |
+| `Focused` | `public static bool Focused { get; }` | Whether the window has the keyboard focus. |
+| `Mode` | `public static WindowMode Mode { get; set; }` | The mode now. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `SetFlag` | `public static void SetFlag(WindowFlags flag, bool on)` |  |
+| `SetPosition` | `public static void SetPosition(int x, int y)` |  |
+| `SetSize` | `public static void SetSize(int width, int height)` | Asks for a client area of this many pixels (a windowed window takes it). |
+| `SetTitle` | `public static void SetTitle(string title)` |  |
+| `static` | `public static (int Width, int Height) MonitorSize` | The monitor the window is on, in pixels (0 by 0 when it cannot be told). |
+| `static` | `public static (int Width, int Height) Size` | The client area in physical pixels (0 by 0 before the host has published). |
+| `static` | `public static (int X, int Y) Position` | The outer window's top-left in screen pixels. |
+
+<a id="double3"></a>
 
 ### Double3
 
 `public readonly struct Double3 : IEquatable<Double3>` - A double-precision vector in centimetres: an absolute position (or a distance between two) where a Vec3 would lose precision.
 
-- `public readonly double X` - X, centimetres.
-- `public readonly double Y` - Y, centimetres.
-- `public readonly double Z` - Z, centimetres.
-- `public Double3(double x, double y, double z)` - Makes a vector from its three components.
-- `public static Double3 Zero { get; }` - The zero vector.
-- `public static Double3 operator +(Double3 a, Double3 b)` - Componentwise sum.
-- `public static Double3 operator -(Double3 a, Double3 b)` - Componentwise difference.
-- `public static Double3 operator *(Double3 a, double s)` - Scales by a number.
-- `public static Double3 operator *(double s, Double3 a)` - Scales by a number.
-- `public static Double3 operator /(Double3 a, double s)` - Divides by a number.
-- `public static Double3 operator -(Double3 a)` - Negation.
-- `public static bool operator ==(Double3 a, Double3 b)` - Exact equality.
-- `public static bool operator !=(Double3 a, Double3 b)` - Exact inequality.
-- `public double Length { get; }` - Length in centimetres.
-- `public Vec3 ToVec3()` - The nearest Vec3: one rounding to single precision, so only meaningful for a vector near the origin.
-- `public static Double3 From(Vec3 v)` - Widens a Vec3; exact.
-- `public bool Equals(Double3 o)` - Inherited documentation.
-- `public override bool Equals(object? obj)` - Inherited documentation.
-- `public override int GetHashCode()` - Inherited documentation.
-- `public override string ToString()` - Inherited documentation.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Double3` | `public Double3(double x, double y, double z)` | Makes a vector from its three components. |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Length` | `public double Length { get; }` | Length in centimetres. |
+| `Zero` | `public static Double3 Zero { get; }` | The zero vector. |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `X` | `public readonly double X` | X, centimetres. |
+| `Y` | `public readonly double Y` | Y, centimetres. |
+| `Z` | `public readonly double Z` | Z, centimetres. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Equals` | `public bool Equals(Double3 o)` | Inherited documentation. |
+| `Equals` | `public override bool Equals(object? obj)` | Inherited documentation. |
+| `From` | `public static Double3 From(Vec3 v)` | Widens a Vec3; exact. |
+| `GetHashCode` | `public override int GetHashCode()` | Inherited documentation. |
+| `operator !=` | `public static bool operator !=(Double3 a, Double3 b)` | Exact inequality. |
+| `operator *` | `public static Double3 operator *(Double3 a, double s)` | Scales by a number. |
+| `operator *` | `public static Double3 operator *(double s, Double3 a)` | Scales by a number. |
+| `operator +` | `public static Double3 operator +(Double3 a, Double3 b)` | Componentwise sum. |
+| `operator -` | `public static Double3 operator -(Double3 a)` | Negation. |
+| `operator -` | `public static Double3 operator -(Double3 a, Double3 b)` | Componentwise difference. |
+| `operator /` | `public static Double3 operator /(Double3 a, double s)` | Divides by a number. |
+| `operator ==` | `public static bool operator ==(Double3 a, Double3 b)` | Exact equality. |
+| `ToString` | `public override string ToString()` | Inherited documentation. |
+| `ToVec3` | `public Vec3 ToVec3()` | The nearest Vec3: one rounding to single precision, so only meaningful for a vector near the origin. |
+
+<a id="driveactionnames"></a>
 
 ### DriveActionNames
 
 `public static class DriveActionNames` - The names of the input actions a vehicle with a driver reads.
 
-- `public const string Throttle = "Drive.Throttle"` - Axis, -1..1: forward throttle (negative asks for reverse or brake, see the driver aids).
-- `public const string Brake = "Drive.Brake"` - Axis, 0..1: the brake pedal.
-- `public const string Steer = "Drive.Steer"` - Axis, -1..1: steering, +1 to the right.
-- `public const string Handbrake = "Drive.Handbrake"` - Button: the handbrake, held.
-- `public const string ShiftUp = "Drive.ShiftUp"` - Button: one gear up (manual gearbox only).
-- `public const string ShiftDown = "Drive.ShiftDown"` - Button: one gear down (manual gearbox only).
-- `public const string Reset = "Drive.Reset"` - Button: put the vehicle upright.
-- `public const string Exit = "Drive.Exit"` - Button: get out.
-- `public const string CameraNext = "Drive.CameraNext"` - Button: the next camera.
-- `public static IReadOnlyList<string> All { get; }` - Every name, in the order the system reads them.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `All` | `public static IReadOnlyList<string> All { get; }` | Every name, in the order the system reads them. |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Brake` | `public const string Brake = "Drive.Brake"` | Axis, 0..1: the brake pedal. |
+| `CameraNext` | `public const string CameraNext = "Drive.CameraNext"` | Button: the next camera. |
+| `Exit` | `public const string Exit = "Drive.Exit"` | Button: get out. |
+| `Handbrake` | `public const string Handbrake = "Drive.Handbrake"` | Button: the handbrake, held. |
+| `Reset` | `public const string Reset = "Drive.Reset"` | Button: put the vehicle upright. |
+| `ShiftDown` | `public const string ShiftDown = "Drive.ShiftDown"` | Button: one gear down (manual gearbox only). |
+| `ShiftUp` | `public const string ShiftUp = "Drive.ShiftUp"` | Button: one gear up (manual gearbox only). |
+| `Steer` | `public const string Steer = "Drive.Steer"` | Axis, -1..1: steering, +1 to the right. |
+| `Throttle` | `public const string Throttle = "Drive.Throttle"` | Axis, -1..1: forward throttle (negative asks for reverse or brake, see the driver aids). |
+
+<a id="drivebinding"></a>
 
 ### DriveBinding
 
 `public readonly record struct DriveBinding(string Action, InputSource Source, string KeyName, float Scale = 1f, int Component = 0)` - One default binding as data: the action, where it reads from, the key or axis name (a member of Key, GamepadButton or GamepadAxis) and the scale and component.
 
+<a id="drivingcontext"></a>
+
 ### DrivingContext
 
 `public sealed class DrivingContext : InputMappingContext` - The default driving bindings: W, Up and the right trigger throttle; S, Down and the left trigger brake; A, D and the left stick steer; Space or the A button the handbrake; E and Q shift; R resets; F exits; C changes camera.
 
-- `public const int Priority = 100` - The priority Push adds the context at: above a project's on-foot context.
-- `public static IReadOnlyList<DriveBinding> DefaultBindings { get; }` - The bindings as plain data (no native calls), which is what the constructor replays and what a test can read in a bare process.
-- `public DrivingContext()` - Creates the context: declares the nine actions (idempotent by name) and binds DefaultBindings.
-- `public override string Name { get; }` - Inherited documentation.
-- `public static void Push()` - Adds the default driving context at Priority (once; a second push is a no-op).
-- `public static void Pop()` - Removes what Push added.
-- `public static InputAction Throttle { get; }` - The action for throttle ("Drive.Throttle").
-- `public static InputAction Brake { get; }` - The action for the brake pedal ("Drive.Brake").
-- `public static InputAction Steer { get; }` - The action for steering ("Drive.Steer").
-- `public static InputAction Handbrake { get; }` - The action for the handbrake ("Drive.Handbrake").
-- `public static InputAction ShiftUp { get; }` - The action for shifting up ("Drive.ShiftUp").
-- `public static InputAction ShiftDown { get; }` - The action for shifting down ("Drive.ShiftDown").
-- `public static InputAction Reset { get; }` - The action for putting the vehicle upright ("Drive.Reset").
-- `public static InputAction Exit { get; }` - The action for getting out ("Drive.Exit").
-- `public static InputAction CameraNext { get; }` - The action for the next camera ("Drive.CameraNext").
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `DrivingContext` | `public DrivingContext()` | Creates the context: declares the nine actions (idempotent by name) and binds DefaultBindings. |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Brake` | `public static InputAction Brake { get; }` | The action for the brake pedal ("Drive.Brake"). |
+| `CameraNext` | `public static InputAction CameraNext { get; }` | The action for the next camera ("Drive.CameraNext"). |
+| `DefaultBindings` | `public static IReadOnlyList<DriveBinding> DefaultBindings { get; }` | The bindings as plain data (no native calls), which is what the constructor replays and what a test can read in a bare process. |
+| `Exit` | `public static InputAction Exit { get; }` | The action for getting out ("Drive.Exit"). |
+| `Handbrake` | `public static InputAction Handbrake { get; }` | The action for the handbrake ("Drive.Handbrake"). |
+| `Name` | `public override string Name { get; }` | Inherited documentation. |
+| `Reset` | `public static InputAction Reset { get; }` | The action for putting the vehicle upright ("Drive.Reset"). |
+| `ShiftDown` | `public static InputAction ShiftDown { get; }` | The action for shifting down ("Drive.ShiftDown"). |
+| `ShiftUp` | `public static InputAction ShiftUp { get; }` | The action for shifting up ("Drive.ShiftUp"). |
+| `Steer` | `public static InputAction Steer { get; }` | The action for steering ("Drive.Steer"). |
+| `Throttle` | `public static InputAction Throttle { get; }` | The action for throttle ("Drive.Throttle"). |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Priority` | `public const int Priority = 100` | The priority Push adds the context at: above a project's on-foot context. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Pop` | `public static void Pop()` | Removes what Push added. |
+| `Push` | `public static void Push()` | Adds the default driving context at Priority (once; a second push is a no-op). |
+
+<a id="editableattribute"></a>
 
 ### EditableAttribute
 
 `public sealed class EditableAttribute : Attribute` - Marks a field as a class default with a per-instance override, stored natively and serialised.
 
-- `public float Min { get; init; }` - Lower clamp in the inspector and on deserialisation.
-- `public float Max { get; init; }` - Upper clamp in the inspector and on deserialisation.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Max` | `public float Max { get; init; }` | Upper clamp in the inspector and on deserialisation. |
+| `Min` | `public float Min { get; init; }` | Lower clamp in the inspector and on deserialisation. |
+
+<a id="effectbuilder"></a>
 
 ### EffectBuilder
 
 `public sealed class EffectBuilder` - Fluent EffectDef builder: GameplayDefs.Effect("Effect.Heal").Instant().Modify("Health", ModOp.Add, 25f).Register().
 
-- `public EffectBuilder Instant()` - Applies once to Base values (the default).
-- `public EffectBuilder Duration(float seconds)` - Lasts seconds.
-- `public EffectBuilder Infinite()` - Lasts until removed.
-- `public EffectBuilder Periodic(float seconds, bool executeOnApply = false)` - Executes its modifiers on Base every seconds (needs a duration or infinite policy).
-- `public EffectBuilder Modify(string attribute, ModOp op, float value)` - A constant modifier.
-- `public EffectBuilder ModifyByCaller(string attribute, ModOp op, string callerTag, float scale = 1f)` - A modifier whose magnitude the spec supplies under callerTag, times scale.
-- `public EffectBuilder ModifyFromAttribute(string attribute, ModOp op, string fromAttribute, bool fromSource, float scale = 1f, float add = 0f)` - A modifier that reads another attribute (snapshotted at application): value * scale + add.
-- `public EffectBuilder AssetTags(params string[] tags)` - Tags that describe the effect.
-- `public EffectBuilder GrantsTags(params string[] tags)` - Tags held while the effect is active.
-- `public EffectBuilder RequiresTags(params string[] tags)` - The target must have all of these.
-- `public EffectBuilder BlockedByTags(params string[] tags)` - The target must have none of these.
-- `public EffectBuilder OngoingRequiresTags(params string[] tags)` - While one is missing the effect is inhibited.
-- `public EffectBuilder OngoingBlockedByTags(params string[] tags)` - While one is present the effect is inhibited.
-- `public EffectBuilder RemovesTags(params string[] tags)` - Applying removes active effects whose asset or granted tags match any of these.
-- `public EffectBuilder Stacking(StackScope scope, int limit, bool refresh = true, StackExpire expire = StackExpire.ClearAll)` - Stacking rules.
-- `public EffectBuilder Cue(string tag)` - The cue tag announced on the GAS.Cue event.
-- `public EffectDef Build()` - The definition, not yet registered.
-- `public EffectDef? Register()` - Registers the definition.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AssetTags` | `public EffectBuilder AssetTags(params string[] tags)` | Tags that describe the effect. |
+| `BlockedByTags` | `public EffectBuilder BlockedByTags(params string[] tags)` | The target must have none of these. |
+| `Build` | `public EffectDef Build()` | The definition, not yet registered. |
+| `Cue` | `public EffectBuilder Cue(string tag)` | The cue tag announced on the GAS.Cue event. |
+| `Duration` | `public EffectBuilder Duration(float seconds)` | Lasts seconds. |
+| `GrantsTags` | `public EffectBuilder GrantsTags(params string[] tags)` | Tags held while the effect is active. |
+| `Infinite` | `public EffectBuilder Infinite()` | Lasts until removed. |
+| `Instant` | `public EffectBuilder Instant()` | Applies once to Base values (the default). |
+| `Modify` | `public EffectBuilder Modify(string attribute, ModOp op, float value)` | A constant modifier. |
+| `ModifyByCaller` | `public EffectBuilder ModifyByCaller(string attribute, ModOp op, string callerTag, float scale = 1f)` | A modifier whose magnitude the spec supplies under callerTag, times scale. |
+| `ModifyFromAttribute` | `public EffectBuilder ModifyFromAttribute(string attribute, ModOp op, string fromAttribute, bool fromSource, float scale = 1f, float add = 0f)` | A modifier that reads another attribute (snapshotted at application): value * scale + add. |
+| `OngoingBlockedByTags` | `public EffectBuilder OngoingBlockedByTags(params string[] tags)` | While one is present the effect is inhibited. |
+| `OngoingRequiresTags` | `public EffectBuilder OngoingRequiresTags(params string[] tags)` | While one is missing the effect is inhibited. |
+| `Periodic` | `public EffectBuilder Periodic(float seconds, bool executeOnApply = false)` | Executes its modifiers on Base every seconds (needs a duration or infinite policy). |
+| `Register` | `public EffectDef? Register()` | Registers the definition. |
+| `RemovesTags` | `public EffectBuilder RemovesTags(params string[] tags)` | Applying removes active effects whose asset or granted tags match any of these. |
+| `RequiresTags` | `public EffectBuilder RequiresTags(params string[] tags)` | The target must have all of these. |
+| `Stacking` | `public EffectBuilder Stacking(StackScope scope, int limit, bool refresh = true, StackExpire expire = StackExpire.ClearAll)` | Stacking rules. |
+
+<a id="effectdef"></a>
 
 ### EffectDef
 
 `public sealed class EffectDef` - An immutable-by-convention gameplay effect definition (immutable once registered).
 
-- `public string Name` - Unique name.
-- `public int Id` - Registry id, assigned at registration (0 until then).
-- `public EffectPolicy Policy` - Instant, duration or infinite.
-- `public float Duration` - Seconds, for Duration.
-- `public float Period` - Seconds between periodic executions; 0 = not periodic.
-- `public bool ExecuteOnApply` - A periodic effect also executes once when applied.
-- `public bool StackRefresh` - A stacking application resets the expiry (default true).
-- `public StackScope Stack` - Stacking scope.
-- `public int StackLimit` - Maximum stacks.
-- `public StackExpire StackExpire` - What expiry does to the stacks.
-- `public IReadOnlyList<ModifierDef> Modifiers` - The attribute changes.
-- `public GameplayTagContainer AssetTags` - Tags that describe the effect (matched by cleanses).
-- `public GameplayTagContainer GrantedTags` - Tags the target holds while the effect is active.
-- `public GameplayTagContainer AppRequired` - The target must have all of these to be affected.
-- `public GameplayTagContainer AppBlocked` - The target must have none of these to be affected.
-- `public GameplayTagContainer OngoingRequired` - While any of these is missing the effect is inhibited.
-- `public GameplayTagContainer OngoingBlocked` - While any of these is present the effect is inhibited.
-- `public GameplayTagContainer RemovesWithTags` - Applying removes active effects whose asset or granted tags match any of these.
-- `public GameplayTag Cue` - Optional cue tag announced on the GAS.Cue event.
-- `public override string ToString()` - Inherited documentation.
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AppBlocked` | `public GameplayTagContainer AppBlocked` | The target must have none of these to be affected. |
+| `AppRequired` | `public GameplayTagContainer AppRequired` | The target must have all of these to be affected. |
+| `AssetTags` | `public GameplayTagContainer AssetTags` | Tags that describe the effect (matched by cleanses). |
+| `Cue` | `public GameplayTag Cue` | Optional cue tag announced on the GAS.Cue event. |
+| `Duration` | `public float Duration` | Seconds, for Duration. |
+| `ExecuteOnApply` | `public bool ExecuteOnApply` | A periodic effect also executes once when applied. |
+| `GrantedTags` | `public GameplayTagContainer GrantedTags` | Tags the target holds while the effect is active. |
+| `Id` | `public int Id` | Registry id, assigned at registration (0 until then). |
+| `Modifiers` | `public IReadOnlyList<ModifierDef> Modifiers` | The attribute changes. |
+| `Name` | `public string Name` | Unique name. |
+| `OngoingBlocked` | `public GameplayTagContainer OngoingBlocked` | While any of these is present the effect is inhibited. |
+| `OngoingRequired` | `public GameplayTagContainer OngoingRequired` | While any of these is missing the effect is inhibited. |
+| `Period` | `public float Period` | Seconds between periodic executions; 0 = not periodic. |
+| `Policy` | `public EffectPolicy Policy` | Instant, duration or infinite. |
+| `RemovesWithTags` | `public GameplayTagContainer RemovesWithTags` | Applying removes active effects whose asset or granted tags match any of these. |
+| `Stack` | `public StackScope Stack` | Stacking scope. |
+| `StackExpire` | `public StackExpire StackExpire` | What expiry does to the stacks. |
+| `StackLimit` | `public int StackLimit` | Maximum stacks. |
+| `StackRefresh` | `public bool StackRefresh` | A stacking application resets the expiry (default true). |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ToString` | `public override string ToString()` | Inherited documentation. |
+
+<a id="effectfailure"></a>
 
 ### EffectFailure
 
 `public enum EffectFailure` - Why an effect was not applied.
 
-Values: `None`, `NoSystem`, `NoAuthority`, `UnknownEffect`, `TagRequirement`, `StackLimit`, `LimitReached`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `LimitReached` | `LimitReached` |  |
+| `NoAuthority` | `NoAuthority` |  |
+| `None` | `None` |  |
+| `NoSystem` | `NoSystem` |  |
+| `StackLimit` | `StackLimit` |  |
+| `TagRequirement` | `TagRequirement` |  |
+| `UnknownEffect` | `UnknownEffect` |  |
+
+<a id="effectpolicy"></a>
 
 ### EffectPolicy
 
 `public enum EffectPolicy` - How long an effect lasts.
 
-Values: `Instant`, `Duration`, `Infinite`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Duration` | `Duration` |  |
+| `Infinite` | `Infinite` |  |
+| `Instant` | `Instant` |  |
+
+<a id="effectspec"></a>
 
 ### EffectSpec
 
 `public sealed class EffectSpec` - One application of an effect: which effect, who applies it, and any per-application values.
 
-- `public static EffectSpec Of(string effectName)` - A spec for the registered effect called effectName (looked up at application).
-- `public static EffectSpec Of(EffectDef def)` - A spec for a definition object.
-- `public EffectSpec From(Entity source)` - The entity applying the effect.
-- `public EffectSpec SetByCaller(GameplayTag tag, float value)` - Supplies the value for a SetByCaller modifier keyed by tag.
-- `public EffectSpec WithDuration(float seconds)` - Overrides the duration for this application.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `From` | `public EffectSpec From(Entity source)` | The entity applying the effect. |
+| `Of` | `public static EffectSpec Of(EffectDef def)` | A spec for a definition object. |
+| `Of` | `public static EffectSpec Of(string effectName)` | A spec for the registered effect called effectName (looked up at application). |
+| `SetByCaller` | `public EffectSpec SetByCaller(GameplayTag tag, float value)` | Supplies the value for a SetByCaller modifier keyed by tag. |
+| `WithDuration` | `public EffectSpec WithDuration(float seconds)` | Overrides the duration for this application. |
+
+<a id="endreason"></a>
 
 ### EndReason
 
 `public enum EndReason` - Why OnEndPlay is running.
 
-Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Destroy` | `Destroy = 0` |  |
+| `Reload` | `Reload = 2` |  |
+| `Stop` | `Stop = 1` |  |
+| `Travel` | `Travel = 3` |  |
+
+<a id="engine"></a>
 
 ### Engine
 
 `public static class Engine` - The engine's frame counters (frames per second, process frames and physics frames).
 
-- `public static float FramesPerSecond { get; }` - Frames per second, measured over the last whole second of real time.
-- `public static long ProcessFrames { get; }` - How many OnTick passes have run.
-- `public static long PhysicsFrames { get; }` - How many OnPhysicsTick passes have run.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `FramesPerSecond` | `public static float FramesPerSecond { get; }` | Frames per second, measured over the last whole second of real time. |
+| `PhysicsFrames` | `public static long PhysicsFrames { get; }` | How many OnPhysicsTick passes have run. |
+| `ProcessFrames` | `public static long ProcessFrames { get; }` | How many OnTick passes have run. |
+
+<a id="enhancedinput"></a>
 
 ### EnhancedInput
 
 `public static class EnhancedInput` - The input router: mapping contexts go in, action values come out.
 
-- `public static void AddContext(InputMappingContext context, int priority = 0)` - Pushes a context.
-- `public static void RemoveContext(InputMappingContext context)` - Pops a context.
-- `public static void ClearContexts()` - Drops every context.
-- `public static int ContextCount { get; }` - How many contexts are active.
-- `public static void PumpEvents()` - Delivers the events the last gameplay update raised: each InputAction's C# events, then (only when something listens) the bus event Input.&lt;Action&gt;.&lt;Event&gt; with payload x, y, elapsed seconds, triggered seconds.
-- `public static bool SaveAllBindings()` - Writes every pushed context's bindings to Settings, then flushes the store to disk -- the trailing Flush call a caller looping SaveBindings itself would otherwise have to remember, made exactly once for the whole stack rather than once per context.
-- `public static void LoadAllBindings()` - Reads every pushed context's bindings back from Settings, then re-pushes the whole stack ONCE so the native action-binding table picks up every context's change together -- not once per context, which is what a caller looping LoadBindings()+AddContext() itself would otherwise pay for every layer.
-- `public static void ResetAllBindings()` - Restores every pushed context to the bindings its own constructor set up, in memory only -- see ResetToDefaults's own comment for why this does not touch Settings or persist by itself; a caller wanting the reset to stick calls SaveAllBindings afterwards.
-- `public static bool RebindAction(string actionName, int slot, int rawKey)` - Rebinds the slot-th binding of actionName, walking pushed contexts HIGHEST PRIORITY FIRST and, within each context, its bindings in the order SaveBindings would number them -- the slot count RESETS at each context, the same as SaveBindings's own per-context slotByAction dictionary does, so a slot this method rebinds is the exact slot a save/load round-trip would persist under that context's own settings key.
-- `public static bool TryGetBindingKey(string actionName, int slot, out int rawKey, out InputSource source)` - The slot-th binding of actionName's CURRENT Source and raw key, using the identical per-context slot walk RebindAction uses (see its own comment).
-- `public static bool TryGetBinding(string actionName, int slot, out int rawKey, out InputSource source, out float scale)` - TryGetBindingKey and the binding's scale too (a negative scale on an axis binding is the other direction of the axis).
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ContextCount` | `public static int ContextCount { get; }` | How many contexts are active. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AddContext` | `public static void AddContext(InputMappingContext context, int priority = 0)` | Pushes a context. |
+| `ClearContexts` | `public static void ClearContexts()` | Drops every context. |
+| `LoadAllBindings` | `public static void LoadAllBindings()` | Reads every pushed context's bindings back from Settings, then re-pushes the whole stack ONCE so the native action-binding table picks up every context's change together -- not once per context, which is what a caller looping LoadBindings()+AddContext() itself would otherwise pay for every layer. |
+| `PumpEvents` | `public static void PumpEvents()` | Delivers the events the last gameplay update raised: each InputAction's C# events, then (only when something listens) the bus event Input.&lt;Action&gt;.&lt;Event&gt; with payload x, y, elapsed seconds, triggered seconds. |
+| `RebindAction` | `public static bool RebindAction(string actionName, int slot, int rawKey)` | Rebinds the slot-th binding of actionName, walking pushed contexts HIGHEST PRIORITY FIRST and, within each context, its bindings in the order SaveBindings would number them -- the slot count RESETS at each context, the same as SaveBindings's own per-context slotByAction dictionary does, so a slot this method rebinds is the exact slot a save/load round-trip would persist under that context's own settings key. |
+| `RemoveContext` | `public static void RemoveContext(InputMappingContext context)` | Pops a context. |
+| `ResetAllBindings` | `public static void ResetAllBindings()` | Restores every pushed context to the bindings its own constructor set up, in memory only -- see ResetToDefaults's own comment for why this does not touch Settings or persist by itself; a caller wanting the reset to stick calls SaveAllBindings afterwards. |
+| `SaveAllBindings` | `public static bool SaveAllBindings()` | Writes every pushed context's bindings to Settings, then flushes the store to disk -- the trailing Flush call a caller looping SaveBindings itself would otherwise have to remember, made exactly once for the whole stack rather than once per context. |
+| `TryGetBinding` | `public static bool TryGetBinding(string actionName, int slot, out int rawKey, out InputSource source, out float scale)` | TryGetBindingKey and the binding's scale too (a negative scale on an axis binding is the other direction of the axis). |
+| `TryGetBindingKey` | `public static bool TryGetBindingKey(string actionName, int slot, out int rawKey, out InputSource source)` | The slot-th binding of actionName's CURRENT Source and raw key, using the identical per-context slot walk RebindAction uses (see its own comment). |
+
+<a id="entity"></a>
 
 ### Entity
 
 `public readonly struct Entity : IEquatable<Entity>` - A handle to one entity in the world.
 
-- `public bool SetAnimGraph(string machineAsset, float playRate = 1.0f)` - Runs the state machine at machineAsset on this entity, adding the component if needed.
-- `public bool SetAnimParam(string name, float value)` - Writes a machine parameter by name.
-- `public bool SetAnimParam(string name, bool value)` - Sets a bool machine parameter.
-- `public bool SetAnimParam(string name, int value)` - Sets an int machine parameter.
-- `public bool TriggerAnim(string name)` - Fires a trigger parameter.
-- `public float? GetAnimParam(string name)` - Reads a machine parameter back, or null when the name was never written.
-- `public bool IsInAnimState(string stateName)` - True while the machine's active leaf state has this name.
-- `public float AnimStateTime { get; }` - Cumulative normalised time of the active leaf state: 1.0 is one pass through its clip (or blend-space cycle), and it keeps counting across loops.
-- `public float AnimGraphRate { get; set; }` - Playback rate of the machine: 1 is normal, 0 is read as 1 (use PauseAnimGraph to stop).
-- `public bool PauseAnimGraph()` - Freezes the machine's clock and transitions; the pose holds.
-- `public bool ResumeAnimGraph()` - Continues a paused machine.
-- `public bool SetSkeleton(string skeletonAsset)` - Binds a skeleton asset to this entity, so its mesh can be posed.
-- `public bool SetControlRig(string rigAsset, float weight = 1.0f)` - Binds a control rig to this entity, so its sampled pose is modified procedurally before it is skinned — IK, aim constraints, anything the .ocrig names.
-- `public bool PlayAnimation(string clipAsset, bool loop = true)` - Plays a clip from the start, adding an animator if there is not one.
-- `public bool PauseAnimation()` - Holds the clip where it is.
-- `public bool ResumeAnimation()` - Continues a paused clip.
-- `public bool StopAnimation()` - Stops the clip and rewinds it.
-- `public bool IsAnimating { get; }` - True while a clip is advancing.
-- `public float AnimationTime { get; set; }` - Seconds into the current clip.
-- `public float AnimationSpeed { get; set; }` - Playback rate: 1 is normal, negative runs the clip backwards, 0 is read as 1.
-- `public float AnimationWeight { get; set; }` - How much of the clip reaches the pose, 0..1.
-- `public int BoneCount { get; }` - Bones in the bound skeleton, or 0 until the asset has resolved.
-- `public bool AttachToSocket(Entity parent, string socket)` - Hangs this entity on a named socket of parent's rig, so it rides the posed bone every frame -- a weapon in a hand, a scabbard on a hip.
-- `public float GetAnimationCurve(string curve, float fallback = 0.0f)` - Reads a named float curve off the clip this entity is playing, at its current playhead -- "how far through the reload am I", "how hard is the foot planted".
-- `public bool TryGetAnimationCurve(string curve, out float value)` - As GetAnimationCurve, but says whether the curve was there at all.
-- `public bool DetachFromSocket()` - Stops riding a socket.
-- `public long AttachedSocketId { get; }` - The socket this entity is riding, as the fnv1a64 the component stores, or 0.
-- `public bool SetReverbZoneImpulse(Sound impulse, float predelayMs = 0f)` - Gives this reverb zone a convolution reverb: while the zone has a send reverb slot it convolves with the loaded impulse instead of the algorithmic reverb.
-- `public bool SetAudioZoneSends(bool enabled = true, float reverbSendBase = 1f)` - Makes the voice of this entity's occlusion emitter (SetAudioOcclusion) send to the reverb zone(s) it is inside, through the mixer's send reverbs, instead of only hearing the listener's.
-- `public bool SetAudioDiffraction(bool enabled = true, int directions = 8, int maxRays = 256, float maxOffsetCm = 3200f, float maxOcclusion = 0.85f)` - Turns diffraction on for this entity's occlusion emitter: when the direct path is blocked the probe looks for the shortest path around an edge or through an opening and uses its gain and low-pass instead of the fully occluded value.
-- `public bool SetReverbZone(Vec3 halfExtentsCm, float blendDistanceCm = 200f, float wet = 0.35f, float decaySeconds = 1.8f, float damping = 0.4f, int priority = 0, int shape = 0)` - Makes this entity a reverb volume.
-- `public bool SetAudioOcclusion(Voice voice, int rayCount = 5, float probeRadiusCm = 50f)` - Drives voice's occlusion from line-of-sight rays between the listener and this entity, and moves the voice with the entity.
-- `public Blackboard Blackboard { get; }` - This entity's AI blackboard (see Blackboard).
-- `public int Handle { get; }` - The raw ABI handle.
-- `public static Entity None { get; }` - The invalid handle.
-- `public static Entity Create(string name)` - Creates a fresh scene entity with no parent.
-- `public bool IsValid { get; }`
-- `public Vec3 LocalPosition { get; }` - Local position in centimetres.
-- `public void SetLocalPosition(Vec3 v)` - Sets local position, in centimetres.
-- `public void Translate(Vec3 delta)` - Moves by delta centimetres, relative to the current local position.
-- `public Quat LocalRotation { get; }` - Local rotation as the stored quaternion.
-- `public void SetLocalRotation(Quat q)` - Sets local rotation.
-- `public Vec3 LocalScale { get; }` - Local scale (unitless multipliers).
-- `public void SetLocalScale(Vec3 v)` - Sets local scale (unitless multipliers).
-- `public Vec3 Forward { get; }` - The entity's forward axis (+X) rotated by its local rotation.
-- `public Vec3 Right { get; }` - The entity's right axis (+Y), rotated by its local rotation.
-- `public Vec3 Up { get; }` - The entity's up axis (+Z), rotated by its local rotation.
-- `public Vec3 WorldPosition { get; }` - World-space position in centimetres, composed through any parents.
-- `public Vec3 WorldForward { get; }` - World-space forward (+X), composed through parents and normalised.
-- `public Vec3 WorldRight { get; }` - World-space right (+Y).
-- `public Vec3 WorldUp { get; }` - World-space up (+Z).
-- `public string Name { get; }` - The display name.
-- `public void SetName(string name)` - Renames the entity, rewriting its CName blob slice.
-- `public ulong ObjectId { get; }` - The persisted identity — CName.objectId, the fnv1a64 that survives serialisation.
-- `public bool IsAlive { get; }` - True while this handle still addresses a live entity.
-- `public bool IsActor { get; }` - True if a gameplay class owns this entity — i.e.
-- `public ActorClass Class { get; }` - The gameplay class this entity is an instance of; invalid for a plain entity.
-- `public AverActor? Actor { get; }` - The live managed actor bound to this entity, or null.
-- `public T? As<T>() where T : AverActor` - The managed actor bound to this entity as T, or null.
-- `public void Destroy()` - Destroys this entity and its subtree; every actor in it runs the full framework teardown, children first.
-- `public bool Equals(Entity o)`
-- `public override bool Equals(object? o)`
-- `public override int GetHashCode()`
-- `public override string ToString()`
-- `public bool AddCameraRig(CameraRigPreset preset = CameraRigPreset.Chase, Entity target = default)` - Adds a CCameraRig seeded from preset (and a CCamera).
-- `public bool HasCameraRig { get; }` - True when the entity carries a rig that is not disabled.
-- `public bool RemoveCameraRig()` - Takes the rig out of play: it is never selected again (the component stays, as there is no scene call that removes a dynamically registered one).
-- `public bool SetCameraRigMode(CameraMode mode)` - Changes the mode; the rig blends into it over its blend time.
-- `public bool SetCameraRigTarget(Entity target)` - The entity the arm follows (none = the rig's parent, else the rig's own entity).
-- `public bool SetCameraRigArm(float lengthCm, float probeRadiusCm = 12f, bool collide = true)` - Arm length, probe radius and whether the arm collides (centimetres).
-- `public bool SetCameraRigSocket(Vec3 cameraFrameOffset)` - Offset at the arm's end in the camera frame: forward, right, up.
-- `public bool SetCameraRigPivot(Vec3 worldOffset)` - Offset of the arm origin in world axes (eye height).
-- `public bool SetCameraRigLag(float positionSpeed, float rotationSpeed = 0f, float maxDistanceCm = 0f)` - Position lag speed (1/s, 0 = none), rotation lag speed (0 = none) and the farthest the camera may trail behind its pivot (0 = unlimited).
-- `public bool SetCameraRigLookAhead(float seconds, float maxCm = 150f)` - The pivot leads by the planar velocity times seconds (0 = off), at most maxCm.
-- `public bool SetCameraRigPitchLimits(float minDegrees, float maxDegrees)` - How far the view may look down and up, degrees (both 0 reads -80 / +80).
-- `public bool AddCameraRigLook(float yawDegrees, float pitchDegrees)` - Adds look input in degrees to the rig's own yaw and pitch (Orbit, TopDown, Seat head look).
-- `public bool SetCameraRigFade(float startCm, float endCm)` - The collision fade: the target's meshes stop drawing once the camera is nearer than endCm to the pivot (they return at 1.15 times that).
-- `public bool SetCameraRigBlend(float seconds, CameraBlendCurve curve = CameraBlendCurve.EaseInOut)` - Seconds to blend into this rig (0 = cut) and the curve.
-- `public bool SetCameraRigIgnoreBody(int bodyHandle)` - A physics body the camera probe skips (the chassis of a vehicle).
-- `public bool SetCameraRigFlags(CameraRigFlags flags)` - Replaces the rig's switches (collision, per-axis inherit, fade, look-at, disabled).
-- `public bool TryGetCameraRigState(out CameraRigState state)` - What the camera system last computed for this rig.
-- `public WorldPos AbsolutePosition { get; }` - Where this entity is in the whole world, exact at any distance.
-- `public Double3 AbsolutePositionCm { get; }` - The same place as absolute centimetres in double precision (exact to 2^53 cm).
-- `public void SetAbsolutePosition(WorldPos position)` - Moves the entity so its world position is position: converted through the current origin in double, then written like SetLocalPosition (through the parent's transform for a child).
-- `public void SetAbsolutePositionCm(Double3 cm)` - Moves the entity so its world position is the absolute point cm (centimetres from the world's zero).
-- `public bool SetParticleFloat(string name, float value)` - Sets a float user parameter the entity's effect declares with PARAM name float.
-- `public bool SetParticleVector(string name, Vec3 value)` - Sets a vector user parameter (PARAM name vec3): a wind direction, an attractor position.
-- `public bool SetParticleColor(string name, float r, float g, float b, float a = 1f)` - Sets a colour user parameter (PARAM name color).
-- `public bool BurstEmitter(int count)` - Spawns count extra particles from every emitter of the entity's effect, once.
-- `public bool StopEmitter(bool killParticles = false)` - Stops emission (like SetEmitterEnabled(false)); with killParticles the live particles go too, otherwise they finish their lives.
-- `public bool SetEmitterModifiers(float rateScale = 1f, float sizeScale = 1f, float speedScale = 1f)` - Scales the emitter's rate, new particles' size and initial speed (1 = authored).
-- `public bool TryGetEmitterState(out int aliveParticles, out bool onGpu)` - Reads how many particles the entity's emitters hold and which tier simulates them.
-- `public bool SetShadowMode(MeshShadowMode mode)` - Sets whether the mesh casts shadows, or only shadows.
-- `public MeshShadowMode GetShadowMode()` - The mesh's shadow mode (On when it has no mesh).
-- `public bool SetGiMode(MeshGiMode mode)` - Sets how the mesh takes part in the voxel GI.
-- `public MeshGiMode GetGiMode()` - The mesh's GI mode (Static when it has no mesh).
-- `public bool SetCullMargin(float marginCm)` - Grows the box the frustum and occlusion tests use by this many centimetres, so a mesh whose vertices a shader moves is not culled early.
-- `public float GetCullMargin()` - The cull margin in centimetres (0 when the entity has no mesh).
-- `public bool SetIgnoreOcclusion(bool ignore)` - Opts the mesh out of the occlusion test (editor Play; the shipped runtime has no occlusion culling).
-- `public bool GetIgnoreOcclusion()` - True when the mesh skips the occlusion test.
-- `public bool SetLodBias(float stops)` - Biases the mesh's LOD choice, in stops: +1 halves the pixel-error threshold (a finer level is picked sooner), -1 doubles it.
-- `public float GetLodBias()` - The LOD bias in stops (0 when the entity has no mesh).
-- `public bool HasLight { get; }` - True when this entity carries a light.
-- `public bool SetLightIntensity(float lux)` - Sets the light's intensity in lux (candela for a point or spot light).
-- `public bool TryGetLightIntensity(out float lux)` - Reads the light's intensity in lux.
-- `public bool SetLightColour(Vec3 rgb)` - Sets the light's linear colour.
-- `public bool SetLightRange(float rangeCm)` - Sets the light's reach in centimetres; 0 leaves it to the renderer.
-- `public static void LightConeCosines(float innerDegrees, float outerDegrees, out float innerCos, out float outerCos)` - Turns a spot light's cone angles (half-angles, degrees) into the cosines the light stores.
-- `public bool SetLightCone(float innerDegrees, float outerDegrees)` - Sets a spot light's cone (half-angles in degrees; see LightConeCosines).
-- `public bool SetLightShadows(bool enabled)` - Whether the light casts shadows.
-- `public bool HasCamera { get; }` - True when this entity carries a camera.
-- `public bool SetCameraFov(float fovDegrees)` - Sets the vertical field of view in degrees, clamped to 1..170 (the component stores radians).
-- `public bool TryGetCameraFov(out float fovDegrees)` - Reads the vertical field of view in degrees.
-- `public bool SetCameraClip(float nearCm, float farCm)` - Sets the near and far clip distances in centimetres.
-- `public bool SetCameraPriority(int priority)` - Sets the camera's priority; the highest-priority camera is the one the view follows.
-- `public bool HasEmitter { get; }` - True when this entity carries a particle emitter.
-- `public bool SetEmitterEnabled(bool enabled)` - Starts or stops emission.
-- `public bool SetEmitterEffect(string effectPath)` - Points the emitter at a particle effect (.ocparticle) by its content path.
-- `public bool RestartEmitter()` - Restarts the emitter: clock back to 0 and emission on.
-- `public static Entity SpawnEmitterAt(Vec3 position, string effectPath, float lifetimeSeconds = 3f)` - Creates an entity at position that plays effectPath, and destroys it after lifetimeSeconds (0 or less: never).
-- `public Entity Parent { get; }` - Immediate parent, or None for a root or a stale handle.
-- `public Entity FirstChild { get; }` - First child, or None.
-- `public Entity NextSibling { get; }` - Next sibling under the same parent, or None.
-- `public int ChildCount { get; }` - Number of immediate children.
-- `public IEnumerable<Entity> Children { get; }` - The immediate children, in link order.
-- `public bool SetParent(Entity parent)` - Reparents under parent.
-- `public bool Detach()` - Detaches from any parent, making this a root.
-- `public bool SetTransformAbsolute(bool on)` - On: the entity keeps its parent (its children, lookups, destruction with the parent) but its world transform is its local transform alone, not composed with its parents' (Godot's top_level).
-- `public bool IsTransformAbsolute { get; }` - True while SetTransformAbsolute is on.
-- `public bool HasComponent(Component component)` - True if this entity currently carries component.
-- `public bool AddComponent(Component component)` - Attaches component (idempotent).
-- `public bool HasComponent(string name)` - True if this entity carries the component registered under name (e.g.
-- `public bool AddComponent(string name)` - Attaches the component registered under name (idempotent).
-- `public float GetFloat(string field)` - Reads a float field by qualified name, or 0 if absent.
-- `public bool SetFloat(string field, float value)` - Writes a float field.
-- `public int GetInt(string field)` - Reads an int (or bool) field, or 0 if absent.
-- `public bool SetInt(string field, int value)` - Writes an int (or bool) field.
-- `public long GetInt64(string field)` - Reads a 64-bit field, or 0 if absent.
-- `public bool SetInt64(string field, long value)` - Writes a 64-bit field.
-- `public Vec3 GetVec3(string field)` - Reads a Vec3 field, or Zero if absent or not a Vec3.
-- `public bool SetVec3(string field, Vec3 value)` - Writes a Vec3 field.
-- `public string GetString(string field)` - Reads a string field, or "" if absent.
-- `public bool SetString(string field, string value)` - Writes a string field.
-- `public bool Visible { get; }` - Whether this entity's mesh is drawn.
-- `public bool SetVisible(bool visible)` - Shows or hides the mesh, adding a mesh renderer if the entity lacks one.
-- `public bool HiddenFromOwner { get; }` - Whether this entity's mesh is hidden from ITS OWN entity's camera -- still drawn for every other view, and still submitted to the shadow/GI passes.
-- `public bool SetHiddenFromOwner(bool hidden)` - Sets or clears the owner-hide bit, adding a mesh renderer if absent.
-- `public bool SetMesh(string meshPath)` - Sets the drawn mesh by asset path, adding a mesh renderer if absent.
-- `public bool SetMaterial(string materialName)` - Sets the material by name, adding a mesh renderer if absent.
-- `public const int SurfaceOverrideSlots = 16` - How many mesh material slots an entity can override (CSurfaceMaterials.slot0..slot15).
-- `public bool SetSurfaceMaterial(int slot, string materialName)` - Draws mesh material slot slot of this entity with materialName instead of the material the mesh names.
-- `public string GetSurfaceMaterial(int slot)` - The material name overriding mesh slot slot, or "" when it has no override.
-- `public bool ClearSurfaceMaterial(int slot)` - Takes the override off one mesh slot (it draws the mesh's own material again).
-- `public uint Tags { get; }` - The raw 32-bit tag mask (CTags.bits), or 0 if the entity has no tags.
-- `public bool SetTags(uint mask)` - Replaces the whole tag mask, adding a Tags component if absent.
-- `public bool HasTag(uint mask)` - True if every bit in mask is set, and the mask is non-zero.
-- `public bool HasAnyTag(uint mask)` - True if any bit in mask is set.
-- `public bool AddTag(uint mask)` - Sets the bits in mask.
-- `public bool RemoveTag(uint mask)` - Clears the bits in mask.
-- `public int PhysicalSurface { get; }` - The surface label of this entity's rigid body (0 = none): identity for queries such as footsteps, not contact friction.
-- `public bool SetPhysicalSurface(int surfaceId, bool copyPhysics = false)` - Labels this entity's rigid body with a surface id (IdOf; 0 clears it).
-- `public bool SetBodyScale(Vec3 scale, bool keepMass = false)` - Sets the scale of this entity's rigid body collision shape, ABSOLUTE (relative to the unscaled shape, not to the current scale).
-- `public bool AddVehicle(string asset = "", VehiclePreset preset = VehiclePreset.Car)` - Adds a Vehicle component: from an .ocvehicle asset path, or, with no asset, from the built-in preset sized by this entity's mesh (so it needs a mesh then).
-- `public bool IsVehicle { get; }` - True when the entity carries a Vehicle component.
-- `public bool SetVehicleInput(float throttle, float steer, float brake = 0f, float handbrake = 0f)` - The driver's pedals: throttle -1..1 (negative reverses or brakes, see the aids), steer -1..1 (+1 right), brake and handbrake 0..1.
-- `public bool TryGetVehicleTelemetry(out VehicleTelemetry telemetry)` - The vehicle's state as of the last fixed physics step.
-- `public bool TryGetWheelTelemetry(int wheel, out WheelTelemetry telemetry)` - One wheel's state as of the last fixed physics step.
-- `public int VehicleWheelCount { get; }` - How many wheels the vehicle has; 0 when it is not built.
-- `public bool SetVehicleManualGearbox(bool manual)` - Switches between an automatic and a manual gearbox.
-- `public bool SetVehicleGear(int gear)` - Manual gearbox: -1 reverse, 0 neutral, 1 and up.
-- `public bool ShiftVehicle(int delta)` - Manual gearbox: one gear up (+1) or down (-1), through a timed clutch.
-- `public bool EnterVehicle(Entity driver)` - Puts driver in the seat: the Drive.* actions drive the vehicle, the driver is hidden and parked, and the camera rigs are made and the view moves to the first.
-- `public bool ExitVehicle()` - Gets the driver out beside the vehicle and gives the view back.
-- `public Entity VehicleDriver { get; }` - Who is in the seat; default when nobody is.
-- `public bool FlipVehicle(float liftCm = 50f)` - Puts the vehicle upright about its heading, stops it dead and sets it down liftCm higher.
-- `public bool RepairVehicle()` - Restores full health and gives the engine back.
-- `public bool DamageVehicle(float amount01)` - Takes amount01 of the vehicle's health (1 destroys it, which cuts the engine); a negative amount gives health back.
-- `public bool TuneVehicle(string key, float value)` - Live tuning by key (case-insensitive): power, brake, grip, suspension, steer, drag, downforce (scales, 1 = as authored), abs, tcs, manual (0 or 1) and collisionperiod (1 to 8).
-- `public bool AddHair(string asset)` - Gives this character strand hair from an .ochair groom.
-- `public bool SetHairLook(string materialAsset)` - Draws the hair with this .ocmat (a material whose shading model is hair) instead of the groom's own look.
-- `public bool SetHairWidthScale(float scale)` - Multiplies the width of every strand (the groom's look width times this).
-- `public bool SetHairDensityScale(float scale)` - The fraction of the render strands drawn on top of the distance levels, 0 to 1 (1 = all; the renderer clamps higher values).
-- `public bool SetHairStiffness(float scale)` - Divides the bend and stretch compliance of every material of the groom, so 2 is twice as stiff.
-- `public bool SetHairWindScale(float scale)` - Multiplies the world wind this hair feels.
-- `public bool SetHairWindEnabled(bool on)` - Whether the world wind moves this hair.
-- `public bool SetHairCollides(bool on)` - Whether the hair collides with the character's head, neck and shoulder proxies and with colliders added by AddHairCollider.
-- `public bool SetHairCastsShadow(bool on)` - Whether the strands cast shadow-map shadows.
-- `public bool SetHairEnabled(bool on)` - Shows or hides the hair.
-- `public bool TeleportHair()` - Puts the hair back in its default pose with no velocity at the next update, wherever the head now is (after a cut or a respawn).
-- `public bool AddHairCollider(HairColliderShape shape, Vec3 size, string bone, Vec3 offset = default)` - Adds a hull that follows bone of this character's skeleton and that hair collides with: a held prop, a hat, a shoulder pad.
-- `public bool ClearHairColliders()` - Removes every collider AddHairCollider added to this character.
-- `public bool TryGetHair(out HairState state)` - What this character's hair is doing as of the last tick.
-- `public bool SetIkRig(string rigAsset, float weight = 1f)` - Attaches an IK Rig (.ocikrig) to this entity, ensuring it has an animator.
-- `public bool SetIkRigFlags(bool feet = true, bool goals = true, bool body = true)` - Turns parts of the attached IK Rig on or off: foot placement, script goals, the pelvis solve.
-- `public bool SetIkGoal(string goal, Vec3 position, IkSpace space = IkSpace.World)` - Places a goal the rig declares (by name) at position.
-- `public bool SetIkGoal(string goal, Vec3 position, Quat rotation, IkSpace space = IkSpace.World)` - As SetIkGoal(string, Vec3, IkSpace), with the rotation the chain's tip should take (when the chain has tipRotation on).
-- `public bool BindIkGoal(string goal, Entity target, string? socket = null, Vec3 offset = default)` - Makes the goal follow target's socket (null or empty = its origin) every tick, plus offset in the socket's frame.
-- `public bool SetIkGoalWeight(string goal, float weight, float blendSeconds = 0.15f)` - Blends the goal toward weight (1 engages, 0 releases) over blendSeconds; negative uses 0.15 s, 0 cuts.
-- `public bool ClearIkGoal(string? goal = null)` - Releases a goal (null or empty = every goal): its weight blends to 0.
-- `public bool TryGetIkGoalState(string goal, out float alpha, out float errorCm, out bool reached)` - The goal's blend weight, how far the chain's tip was from it after the last solve (cm), and whether the solve reached it.
-- `public bool SetFootIkWeight(float weight, float blendSeconds = 0.2f, string? foot = null)` - Blends foot placement toward weight (null or empty foot = every foot; a foot is named by its leg chain).
-- `public bool TryGetFootIkState(string? foot, out float offsetCm, out float plant, out Vec3 groundNormal)` - The foot's current vertical offset in cm, its plant weight (1 planted) and the ground normal it stands on.
-- `public bool SetRigInput(string input, float value)` - Sets a named float input of this entity's OCRIG 2 control rig (drives an op's weight, say).
-- `public bool SetRigInput(string input, Vec3 value)` - Sets a named vec3 input: a goal, a pole, a look-at point.
-- `public bool SetRigInput(string input, Quat value)` - Sets a named quaternion input (a tip rotation).
-- `public bool ClearRigInput(string? input = null)` - Forgets an input so the rig's declared default applies again; null or empty clears every input.
-- `public bool PlayMontage(string montage, float rate = 1f, string? section = null, string? slot = null, float blendIn = -1f)` - Plays montage (a .ocmontage asset path) on this entity, adding an animator if there is none.
-- `public bool StopMontage(string? montage = null, float blendOut = -1f)` - Blends the montage out; null or empty stops every montage on this entity.
-- `public bool StopMontageSlot(string slot, float blendOut = -1f)` - Blends out every montage playing in slot.
-- `public bool JumpToMontageSection(string montage, string section)` - Jumps a playing montage to a named section at once; its blend weight is kept.
-- `public bool SetMontageNextSection(string montage, string fromSection, string? toSection)` - Overrides where fromSection goes when it ends.
-- `public bool SetMontageRate(string montage, float rate)` - Changes a playing montage's speed (instance rate); 0 pauses it.
-- `public bool IsMontagePlaying(string? montage = null)` - True while the montage (null or empty = any montage) is playing or blending out.
-- `public bool TryGetMontageState(string? montage, out float position, out float length, out float weight, out float rate)` - Where a playing montage is: position and length in montage seconds, blend weight 0..1 and instance rate.
-- `public bool IsInMontageSection(string montage, string section)` - True while the montage is inside the named section (compared by hash).
-- `public bool SetMorphWeight(string target, float weight, float blendSeconds = 0f)` - Sets a blend-shape weight by the target's name in the mesh (-4..4; 0 is neutral, 1 the full shape), ramping to it over blendSeconds (0 = at once).
-- `public bool SetFacePose(string pose, float weight, float blendSeconds = 0f)` - Sets a FACE POSE weight: a pose of the face rig, an ARKit shape name or a viseme name (see FaceShapes and Visemes).
-- `public bool ClearMorphWeights(string? name = null, float blendSeconds = 0f)` - Releases script weights: one target or pose by name, or (null) every script override, targets and poses alike.
-- `public bool TryGetMorphWeight(string target, out float weight)` - The FINAL weight of a blend shape this frame, after animation, script, lip-sync and the master weight (0 when it is not active).
-- `public bool SetFaceRig(string? rigAsset)` - Chooses the face rig (.ocface) by asset path; null goes back to the built-in ARKit / viseme defaults.
-- `public bool SetMorphMaster(float weight)` - The master scale of every blend shape on this entity (Morph Targets.weight; 0 reads as 1).
-- `public bool PlayLipSync(string trackAsset, float rate = 1f, float startSeconds = 0f, float strength = 1f)` - Plays an authored lip-sync track (.ocvis) at rate from startSeconds, scaled by strength.
-- `public bool StopLipSync(float blendSeconds = 0.1f)` - Stops lip-sync, fading the mouth out over blendSeconds.
-- `public bool SetLipSyncTime(float seconds)` - Slaves the lip-sync clock to an audio voice: call it every frame with the voice's playhead and the track follows the sound exactly (no drift).
-- `public bool QueueViseme(string symbol, float startSeconds, float durationSeconds, float intensity = 1f)` - Queues one viseme or phoneme (a name from Visemes, or an ARPAbet symbol such as "HH") to start startSeconds from now and last durationSeconds.
-- `public bool TryGetLipSyncState(out float time, out float length, out float strength)` - The lip-sync clock (seconds), the track's length (0 = only queued visemes) and the strength.
-- `public bool IsLipSyncPlaying { get; }` - True while a lip-sync track or queued viseme is playing.
-- `public int MorphTargetCount { get; }` - How many blend shapes the entity's mesh declares (0 until the renderer has seen the mesh, or when it has none).
-- `public bool SetMotionMatching(string database, MotionFacing facing = MotionFacing.Velocity, MotionDrive drive = MotionDrive.Simulation, float playRate = 1f)` - Runs motion matching on this entity with the database at database (an .ocmotion asset path), adding the component if needed.
-- `public bool SetMotionInput(Vec3 worldVelocity, float facingYawDegrees = 0f)` - The world-space velocity (cm/s) the character is trying to reach and, for Yaw, the facing in degrees (the AverCharacter.Yaw convention).
-- `public bool SetMotionInput(float velocityX, float velocityY, float facingYawDegrees = 0f)` - The same with the planar velocity as two numbers.
-- `public bool SetMotionTags(string[]? required, string[]? excluded)` - Tags the search must land on (required) and must not (excluded), by the names declared in the .ocmotion.
-- `public bool RequestMotionSearch()` - Asks for a search on the next tick, whatever the interval (the system clears the request).
-- `public bool SetMotionTuning(float searchInterval = 0f, float velocityHalfLife = 0f, float turnHalfLife = 0f)` - Per-entity tuning; 0 keeps the database's own default.
-- `public bool PauseMotionMatching(bool paused)` - Freezes (or resumes) the matcher: no clock, no search; the pose holds.
-- `public bool TryGetMotionState(out string? clipHashHex, out float clipTime, out float cost, out int switches)` - What the matcher is playing: the id of the clip (hex of its asset hash, "" when nothing plays), the time in that clip, how well it fits the wanted trajectory (lower is better) and how many times it has switched.
-- `public bool IsMotionClip(string clipPath)` - True while the matcher plays this clip (the path as written in the .ocmotion's clip list).
-- `public float MotionCost { get; }` - Cost of the playing frame against the wanted trajectory at the last search.
-- `public int MotionSwitches { get; }` - How many times the matcher has switched frames.
-- `public bool ApplyHit(HitEvent hit)` - Reacts to a hit: the hit bone and its neighbours along the skeleton blend into the physics along their envelopes (attack, hold, decay from the profile), the hit part takes the impulse, and the ragdoll that was started for it removes itself when the reaction has run out.
-- `public bool ApplyHitReaction(string? bone, Vec3 impulse, float damage = 0f)` - As ApplyHit for a point hit on this entity.
-- `public bool SetPhysicalAnimationProfile(string? profileAsset)` - Sets the physical animation profile (an .ocphysanim asset) that shapes this entity's reactions, drive and death; null or empty goes back to the defaults.
-- `public bool BlendPhysicalAnimation(float weight, float seconds = 0.2f)` - Ramps the whole-body physical animation weight to weight (0 the animation, 1 the powered simulation) over seconds, starting a powered ragdoll when there is none.
-- `public bool SimulateBoneSubtree(string? bone)` - Simulates bone and everything below it; the rest of the body follows the animation exactly.
-- `public bool SetBoneStrength(string bone, float strength)` - Powered motor strength of one bone's joint, 0..1; negative goes back to the ragdoll-wide strength.
-- `public bool SetBoneDamping(string bone, float damping)` - Motor damping ratio of one bone's joint (default 1); negative goes back to the default.
-- `public bool SetBoneTorqueScale(string bone, float scale)` - Multiplier on the torque ceiling of one bone's motor (default 1).
-- `public bool SetBoneBlend(string bone, float blend)` - How much of the simulated pose shows for one bone, 0..1 (default 1), whatever the ragdoll-wide weight is.
-- `public bool PinBone(string bone, bool pinned = true)` - A pinned bone follows the animation exactly while the rest of the body simulates.
-- `public bool DieAsRagdoll()` - Starts dying: the whole body goes powered and the motors let go over the profile's death time, then the body is limp (Dead).
-- `public bool GetUpFromRagdoll()` - Gets a Dead body up: picks the profile's montage by how it lies (supine, prone, side), plays it, and blends the simulation out under it.
-- `public bool TryGetPhysicalAnimationState(out LifeState life, out BodyFacing facing, out int reactingBones)` - The life state, how the body lies and how many bones are still reacting to hits.
-- `public int PosedBoneCount { get; }` - How many bones the entity's skeleton has once it has been posed (0 before the first animation tick, or with no skeleton).
-- `public int FindBone(string name)` - The bone with that name, or -1.
-- `public BoneInfo? GetBoneInfo(int bone)` - A bone's name, parent (-1 for a root) and rest transform (parent-local), or null for an index the skeleton does not have.
-- `public BonePose? GetBonePose(int bone, bool beforeOverrides = false)` - The bone's pose after the whole chain of the last tick (animation, rig, IK, script overrides, ragdoll), parent-local, or null.
-- `public BonePose? GetBoneModelPose(int bone, bool beforeOverrides = false)` - The same in the skeleton's model space (the entity's own frame).
-- `public bool SetBonePose(int bone, BonePose pose, float amount = 1f, BoneChannels channels = BoneChannels.All, bool oneTick = false)` - Sets a bone's pose (parent-local) from the next animation tick on and until cleared, over the animation and the rig.
-- `public bool SetBoneModelPose(int bone, BonePose pose, float amount = 1f, BoneChannels channels = BoneChannels.All, bool oneTick = false)` - Sets a bone's pose in the skeleton's model space; its children keep their local transforms and follow.
-- `public bool SetBonePoses(int firstBone, IReadOnlyList<BonePose> poses)` - Sets consecutive bones from firstBone in one call (parent-local, every channel, amount 1).
-- `public bool ClearBonePose(int bone = -1)` - Drops one bone's override, or every bone's for -1.
-- `public bool SetBonePoseWeight(float weight)` - The master weight of this entity's overrides (default 1).
-- `public bool SetBonePosesEnabled(bool enabled)` - Switches the entity's overrides off and on without clearing them.
-- `public int BonePoseOverrideCount { get; }` - How many bones currently carry an override.
-- `public bool StartRagdoll(RagdollMode mode = RagdollMode.Limp, float blendSeconds = 0.1f)` - Turns this entity's skeleton into a physics ragdoll, built from its current animated pose, and blends the simulated pose over the animation across blendSeconds.
-- `public bool StopRagdoll(float blendSeconds = 0.4f)` - Blends back to the animation over blendSeconds, then removes the ragdoll (RagdollState reads null from then on).
-- `public RagdollMode? RagdollState { get; }` - The ragdoll's mode, or null when this entity has none (including after a StopRagdoll blend has finished).
-- `public bool HasRagdoll { get; }` - True while this entity has a ragdoll, in any mode.
-- `public bool SetRagdollStrength(float strength)` - How hard Powered motors pull toward the animation, 0..1 (default 0.5).
-- `public bool AddRagdollImpulse(string bone, Vec3 impulse)` - Pushes the part of bone with a world-space impulse in kg·cm/s, applied at the part's centre.
-- `public bool AddRagdollImpulse(Vec3 impulse)` - As AddRagdollImpulse(string, Vec3), on the root part (the pelvis or whatever the skeleton's first part is): a shove of the whole body.
-- `public bool SetRootMotion(RootMotionMode mode, RootMotionAxes axes = RootMotionAxes.Planar, float scale = 1f, bool fromMontages = true, bool fromGraph = true)` - Turns root motion on, off, or changes how it is used, adding the component if needed.
-- `public RootMotionMode RootMotion { get; }` - The root motion mode; None when the component is absent.
-- `public bool PeekRootMotion(out Vec3 translation, out float yawRadians, out float seconds)` - Reads the accumulator without clearing it: centimetres in this entity's own frame at the start of the period (X forward, Y right, Z up), radians of yaw, and the seconds it covers.
-- `public bool ConsumeRootMotion(out Vec3 translation, out float yawRadians, out float seconds)` - Reads the accumulator and zeroes it, so the next call covers only what happened since.
-- `public bool AddCloth(SoftPreset preset = SoftPreset.ClothLight, string asset = "")` - Simulates this entity's mesh as cloth (pinned, painted or ruled), skinned to its skeleton if it has one.
-- `public bool AddDestructible(SoftPreset preset = SoftPreset.Metal, string asset = "")` - Makes this entity breakable: dents under hits, tears into pieces past its material's limits.
-- `public bool SetSoftPreset(SoftPreset preset)` - Changes the material preset of this entity's Cloth or Destructible (it rebuilds on the next tick).
-- `public bool ApplySoftDamage(Vec3 point, float radiusCm, float energyJoules, Vec3 direction = default, SoftDamageKind kind = SoftDamageKind.Gameplay)` - Deposits energyJoules in a sphere at point: damage that breaks edges past their toughness and a kick that dents what yields.
-- `public bool TearSoftBody(Vec3 point, float radiusCm)` - A scripted cut: breaks the edges whose middle is within radiusCm of the point.
-- `public bool RepairSoftBody()` - Back to intact: pieces gone, dents out, tears closed.
-- `public bool ReleaseCloth()` - Unpins a cloth: a cape falls off its shoulders.
-- `public bool TryGetSoftBodyState(out SoftBodyState state)` - The soft body's damage, strain and piece count as of the last tick.
-- `public bool AddSoftField(SoftFieldKind kind, SoftFieldShape shape, Vec3 extents, float strength = 0f, float energyJoulesPerSecond = 0f)` - Adds a CSoftField to this entity (its transform is the field's frame).
-- `public bool SetSoftFieldEnabled(bool enabled)` - Enables or disables this entity's soft field.
-- `public bool TryGetSoftFieldTouched(out int pieces)` - The pieces this entity's field reached on the last tick.
-- `public bool ClearSoftDebris()` - Destroys this soft body's debris pieces now.
-- `public bool SetSoftBodyAsleep(bool asleep)` - Holds (true) or releases (false) this soft body's pieces asleep.
-- `public bool TryGetSoftBodyDents(out int dentedEdges, out float maxSetCm, out int debrisPieces)` - Permanent set: dented edges, the largest set in cm, and live debris pieces.
-- `public bool AddJelly(string asset = "", SoftPreset preset = SoftPreset.Jelly)` - Simulates this entity's closed mesh as a jelly: a tetrahedral lattice inside it that wobbles and keeps its volume, the mesh following.
-- `public bool AddRope(Vec3 start, Vec3 end, string asset = "", float lengthCm = 0f, float radiusCm = 0f)` - Makes this entity a rope or cable between two world points, both ends pinned.
-- `public bool SetRopeEnd(RopeEnd end, Entity anchor, Vec3 offset)` - Pins a rope end to a point of an entity (offset is in that entity's space), so the rope follows a moving door, a vehicle or an animated hand.
-- `public bool SetRopeEndFree(RopeEnd end, Vec3 worldPoint, bool pinned)` - Puts a rope end at a world point: pinned there, or (pinned false) let go to hang or fall.
-- `public bool CutRope(Vec3 point, out Entity other)` - Cuts this rope at its node nearest point (an interior node within about a segment of it).
-- `public bool TryGetRope(out RopeState state)` - The rope's length, strain and segment count as of the last tick.
-- `public bool TryGetJelly(out JellyState state)` - The jelly's volume ratio, stretch and node count as of the last tick.
-- `public bool SetSoftPressure(float kPa)` - The inflation pressure of a closed cloth or a jelly, in kilopascal at its rest volume (0 deflates).
-- `public bool TryGetSoftVolume(out float restCm3, out float nowCm3)` - Rest and current volume of the soft body in cm^3 (the current one is negative when it is turned inside out).
-- `public int GrabSoftVertex(Vec3 point, float maxDistanceCm, Vec3 target)` - Grabs the vertex of this soft body (cloth, jelly or rope) nearest point within maxDistanceCm and carries it toward target every physics step.
-- `public bool MoveSoftGrab(int grab, Vec3 target)` - Moves a grab's target.
-- `public bool ReleaseSoftGrab(int grab)` - Lets the grabbed vertex go (it gets back the mass it had).
-- `public bool SetSoftBuoyancy(float fluidDensityKgM3, float drag = 1f)` - Makes the soft body float in the world's water: hydrostatic pressure on a closed body plus quadratic drag.
-- `public bool TryGetSoftSubmerged(out float fraction, out float volumeCm3)` - How much of the soft body was under water on the last step (0..1) and the displaced volume in cm^3.
-- `public bool SetSoftContact(float softScale, float otherScale)` - How the soft body trades momentum with rigid bodies: 0 = infinite mass, 1 = unchanged.
-- `public bool SetSoftPairMode(Entity other, SoftContactMode mode)` - What happens between this soft body and one other (a rigid body, or another soft body): normal, sensor events only, or ignored.
-- `public Brain Brain { get; }` - This entity's AI brain (see Brain).
-- `public EqsRun RunQuery(string contentPath, Entity target = default, Vec3? point = null, bool sync = true, GameplayTagContainer? userTags = null)` - Runs an environment query with this entity as the querier.
-- `public int ClaimSmartObject(SlotRef slot, GameplayTagContainer? userTags = null)` - Claims a smart-object slot for this entity; the claim handle, or 0 when refused (see LastRefusal).
-- `public SlotRef? FindSmartObject(float radius, string? slotTags = null, GameplayTagContainer? userTags = null)` - The nearest free slot within radius of this entity that this entity may claim.
-- `public AbilitySystem? Abilities { get; }` - This entity's gameplay ability system, or null if it has none (see AbilitySystem).
-- `public AbilitySystem GetOrAddAbilities()` - This entity's gameplay ability system, created if it has none.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Abilities` | `public AbilitySystem? Abilities { get; }` | This entity's gameplay ability system, or null if it has none (see AbilitySystem). |
+| `AbsolutePosition` | `public WorldPos AbsolutePosition { get; }` | Where this entity is in the whole world, exact at any distance. |
+| `AbsolutePositionCm` | `public Double3 AbsolutePositionCm { get; }` | The same place as absolute centimetres in double precision (exact to 2^53 cm). |
+| `Actor` | `public AverActor? Actor { get; }` | The live managed actor bound to this entity, or null. |
+| `AnimationSpeed` | `public float AnimationSpeed { get; set; }` | Playback rate: 1 is normal, negative runs the clip backwards, 0 is read as 1. |
+| `AnimationTime` | `public float AnimationTime { get; set; }` | Seconds into the current clip. |
+| `AnimationWeight` | `public float AnimationWeight { get; set; }` | How much of the clip reaches the pose, 0..1. |
+| `AnimGraphRate` | `public float AnimGraphRate { get; set; }` | Playback rate of the machine: 1 is normal, 0 is read as 1 (use PauseAnimGraph to stop). |
+| `AnimStateTime` | `public float AnimStateTime { get; }` | Cumulative normalised time of the active leaf state: 1.0 is one pass through its clip (or blend-space cycle), and it keeps counting across loops. |
+| `AttachedSocketId` | `public long AttachedSocketId { get; }` | The socket this entity is riding, as the fnv1a64 the component stores, or 0. |
+| `Blackboard` | `public Blackboard Blackboard { get; }` | This entity's AI blackboard (see Blackboard). |
+| `BoneCount` | `public int BoneCount { get; }` | Bones in the bound skeleton, or 0 until the asset has resolved. |
+| `BonePoseOverrideCount` | `public int BonePoseOverrideCount { get; }` | How many bones currently carry an override. |
+| `Brain` | `public Brain Brain { get; }` | This entity's AI brain (see Brain). |
+| `ChildCount` | `public int ChildCount { get; }` | Number of immediate children. |
+| `Children` | `public IEnumerable<Entity> Children { get; }` | The immediate children, in link order. |
+| `Class` | `public ActorClass Class { get; }` | The gameplay class this entity is an instance of; invalid for a plain entity. |
+| `FirstChild` | `public Entity FirstChild { get; }` | First child, or None. |
+| `Forward` | `public Vec3 Forward { get; }` | The entity's forward axis (+X) rotated by its local rotation. |
+| `Handle` | `public int Handle { get; }` | The raw ABI handle. |
+| `HasCamera` | `public bool HasCamera { get; }` | True when this entity carries a camera. |
+| `HasCameraRig` | `public bool HasCameraRig { get; }` | True when the entity carries a rig that is not disabled. |
+| `HasEmitter` | `public bool HasEmitter { get; }` | True when this entity carries a particle emitter. |
+| `HasLight` | `public bool HasLight { get; }` | True when this entity carries a light. |
+| `HasRagdoll` | `public bool HasRagdoll { get; }` | True while this entity has a ragdoll, in any mode. |
+| `HiddenFromOwner` | `public bool HiddenFromOwner { get; }` | Whether this entity's mesh is hidden from ITS OWN entity's camera -- still drawn for every other view, and still submitted to the shadow/GI passes. |
+| `IsActor` | `public bool IsActor { get; }` | True if a gameplay class owns this entity — i.e. |
+| `IsAlive` | `public bool IsAlive { get; }` | True while this handle still addresses a live entity. |
+| `IsAnimating` | `public bool IsAnimating { get; }` | True while a clip is advancing. |
+| `IsLipSyncPlaying` | `public bool IsLipSyncPlaying { get; }` | True while a lip-sync track or queued viseme is playing. |
+| `IsTransformAbsolute` | `public bool IsTransformAbsolute { get; }` | True while SetTransformAbsolute is on. |
+| `IsValid` | `public bool IsValid { get; }` |  |
+| `IsVehicle` | `public bool IsVehicle { get; }` | True when the entity carries a Vehicle component. |
+| `LocalPosition` | `public Vec3 LocalPosition { get; }` | Local position in centimetres. |
+| `LocalRotation` | `public Quat LocalRotation { get; }` | Local rotation as the stored quaternion. |
+| `LocalScale` | `public Vec3 LocalScale { get; }` | Local scale (unitless multipliers). |
+| `MorphTargetCount` | `public int MorphTargetCount { get; }` | How many blend shapes the entity's mesh declares (0 until the renderer has seen the mesh, or when it has none). |
+| `MotionCost` | `public float MotionCost { get; }` | Cost of the playing frame against the wanted trajectory at the last search. |
+| `MotionSwitches` | `public int MotionSwitches { get; }` | How many times the matcher has switched frames. |
+| `Name` | `public string Name { get; }` | The display name. |
+| `NextSibling` | `public Entity NextSibling { get; }` | Next sibling under the same parent, or None. |
+| `None` | `public static Entity None { get; }` | The invalid handle. |
+| `ObjectId` | `public ulong ObjectId { get; }` | The persisted identity — CName.objectId, the fnv1a64 that survives serialisation. |
+| `Parent` | `public Entity Parent { get; }` | Immediate parent, or None for a root or a stale handle. |
+| `PhysicalSurface` | `public int PhysicalSurface { get; }` | The surface label of this entity's rigid body (0 = none): identity for queries such as footsteps, not contact friction. |
+| `PosedBoneCount` | `public int PosedBoneCount { get; }` | How many bones the entity's skeleton has once it has been posed (0 before the first animation tick, or with no skeleton). |
+| `RagdollState` | `public RagdollMode? RagdollState { get; }` | The ragdoll's mode, or null when this entity has none (including after a StopRagdoll blend has finished). |
+| `Right` | `public Vec3 Right { get; }` | The entity's right axis (+Y), rotated by its local rotation. |
+| `RootMotion` | `public RootMotionMode RootMotion { get; }` | The root motion mode; None when the component is absent. |
+| `Tags` | `public uint Tags { get; }` | The raw 32-bit tag mask (CTags.bits), or 0 if the entity has no tags. |
+| `Up` | `public Vec3 Up { get; }` | The entity's up axis (+Z), rotated by its local rotation. |
+| `VehicleDriver` | `public Entity VehicleDriver { get; }` | Who is in the seat; default when nobody is. |
+| `VehicleWheelCount` | `public int VehicleWheelCount { get; }` | How many wheels the vehicle has; 0 when it is not built. |
+| `Visible` | `public bool Visible { get; }` | Whether this entity's mesh is drawn. |
+| `WorldForward` | `public Vec3 WorldForward { get; }` | World-space forward (+X), composed through parents and normalised. |
+| `WorldPosition` | `public Vec3 WorldPosition { get; }` | World-space position in centimetres, composed through any parents. |
+| `WorldRight` | `public Vec3 WorldRight { get; }` | World-space right (+Y). |
+| `WorldUp` | `public Vec3 WorldUp { get; }` | World-space up (+Z). |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `SurfaceOverrideSlots` | `public const int SurfaceOverrideSlots = 16` | How many mesh material slots an entity can override (CSurfaceMaterials.slot0..slot15). |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AddCameraRig` | `public bool AddCameraRig(CameraRigPreset preset = CameraRigPreset.Chase, Entity target = default)` | Adds a CCameraRig seeded from preset (and a CCamera). |
+| `AddCameraRigLook` | `public bool AddCameraRigLook(float yawDegrees, float pitchDegrees)` | Adds look input in degrees to the rig's own yaw and pitch (Orbit, TopDown, Seat head look). |
+| `AddCloth` | `public bool AddCloth(SoftPreset preset = SoftPreset.ClothLight, string asset = "")` | Simulates this entity's mesh as cloth (pinned, painted or ruled), skinned to its skeleton if it has one. |
+| `AddComponent` | `public bool AddComponent(Component component)` | Attaches component (idempotent). |
+| `AddComponent` | `public bool AddComponent(string name)` | Attaches the component registered under name (idempotent). |
+| `AddDestructible` | `public bool AddDestructible(SoftPreset preset = SoftPreset.Metal, string asset = "")` | Makes this entity breakable: dents under hits, tears into pieces past its material's limits. |
+| `AddHair` | `public bool AddHair(string asset)` | Gives this character strand hair from an .ochair groom. |
+| `AddHairCollider` | `public bool AddHairCollider(HairColliderShape shape, Vec3 size, string bone, Vec3 offset = default)` | Adds a hull that follows bone of this character's skeleton and that hair collides with: a held prop, a hat, a shoulder pad. |
+| `AddJelly` | `public bool AddJelly(string asset = "", SoftPreset preset = SoftPreset.Jelly)` | Simulates this entity's closed mesh as a jelly: a tetrahedral lattice inside it that wobbles and keeps its volume, the mesh following. |
+| `AddRagdollImpulse` | `public bool AddRagdollImpulse(Vec3 impulse)` | As AddRagdollImpulse(string, Vec3), on the root part (the pelvis or whatever the skeleton's first part is): a shove of the whole body. |
+| `AddRagdollImpulse` | `public bool AddRagdollImpulse(string bone, Vec3 impulse)` | Pushes the part of bone with a world-space impulse in kg·cm/s, applied at the part's centre. |
+| `AddRope` | `public bool AddRope(Vec3 start, Vec3 end, string asset = "", float lengthCm = 0f, float radiusCm = 0f)` | Makes this entity a rope or cable between two world points, both ends pinned. |
+| `AddSoftField` | `public bool AddSoftField(SoftFieldKind kind, SoftFieldShape shape, Vec3 extents, float strength = 0f, float energyJoulesPerSecond = 0f)` | Adds a CSoftField to this entity (its transform is the field's frame). |
+| `AddTag` | `public bool AddTag(uint mask)` | Sets the bits in mask. |
+| `AddVehicle` | `public bool AddVehicle(string asset = "", VehiclePreset preset = VehiclePreset.Car)` | Adds a Vehicle component: from an .ocvehicle asset path, or, with no asset, from the built-in preset sized by this entity's mesh (so it needs a mesh then). |
+| `ApplyHit` | `public bool ApplyHit(HitEvent hit)` | Reacts to a hit: the hit bone and its neighbours along the skeleton blend into the physics along their envelopes (attack, hold, decay from the profile), the hit part takes the impulse, and the ragdoll that was started for it removes itself when the reaction has run out. |
+| `ApplyHitReaction` | `public bool ApplyHitReaction(string? bone, Vec3 impulse, float damage = 0f)` | As ApplyHit for a point hit on this entity. |
+| `ApplySoftDamage` | `public bool ApplySoftDamage(Vec3 point, float radiusCm, float energyJoules, Vec3 direction = default, SoftDamageKind kind = SoftDamageKind.Gameplay)` | Deposits energyJoules in a sphere at point: damage that breaks edges past their toughness and a kick that dents what yields. |
+| `As` | `public T? As<T>() where T : AverActor` | The managed actor bound to this entity as T, or null. |
+| `AttachToSocket` | `public bool AttachToSocket(Entity parent, string socket)` | Hangs this entity on a named socket of parent's rig, so it rides the posed bone every frame -- a weapon in a hand, a scabbard on a hip. |
+| `BindIkGoal` | `public bool BindIkGoal(string goal, Entity target, string? socket = null, Vec3 offset = default)` | Makes the goal follow target's socket (null or empty = its origin) every tick, plus offset in the socket's frame. |
+| `BlendPhysicalAnimation` | `public bool BlendPhysicalAnimation(float weight, float seconds = 0.2f)` | Ramps the whole-body physical animation weight to weight (0 the animation, 1 the powered simulation) over seconds, starting a powered ragdoll when there is none. |
+| `BurstEmitter` | `public bool BurstEmitter(int count)` | Spawns count extra particles from every emitter of the entity's effect, once. |
+| `ClaimSmartObject` | `public int ClaimSmartObject(SlotRef slot, GameplayTagContainer? userTags = null)` | Claims a smart-object slot for this entity; the claim handle, or 0 when refused (see LastRefusal). |
+| `ClearBonePose` | `public bool ClearBonePose(int bone = -1)` | Drops one bone's override, or every bone's for -1. |
+| `ClearHairColliders` | `public bool ClearHairColliders()` | Removes every collider AddHairCollider added to this character. |
+| `ClearIkGoal` | `public bool ClearIkGoal(string? goal = null)` | Releases a goal (null or empty = every goal): its weight blends to 0. |
+| `ClearMorphWeights` | `public bool ClearMorphWeights(string? name = null, float blendSeconds = 0f)` | Releases script weights: one target or pose by name, or (null) every script override, targets and poses alike. |
+| `ClearRigInput` | `public bool ClearRigInput(string? input = null)` | Forgets an input so the rig's declared default applies again; null or empty clears every input. |
+| `ClearSoftDebris` | `public bool ClearSoftDebris()` | Destroys this soft body's debris pieces now. |
+| `ClearSurfaceMaterial` | `public bool ClearSurfaceMaterial(int slot)` | Takes the override off one mesh slot (it draws the mesh's own material again). |
+| `ConsumeRootMotion` | `public bool ConsumeRootMotion(out Vec3 translation, out float yawRadians, out float seconds)` | Reads the accumulator and zeroes it, so the next call covers only what happened since. |
+| `Create` | `public static Entity Create(string name)` | Creates a fresh scene entity with no parent. |
+| `CutRope` | `public bool CutRope(Vec3 point, out Entity other)` | Cuts this rope at its node nearest point (an interior node within about a segment of it). |
+| `DamageVehicle` | `public bool DamageVehicle(float amount01)` | Takes amount01 of the vehicle's health (1 destroys it, which cuts the engine); a negative amount gives health back. |
+| `Destroy` | `public void Destroy()` | Destroys this entity and its subtree; every actor in it runs the full framework teardown, children first. |
+| `Detach` | `public bool Detach()` | Detaches from any parent, making this a root. |
+| `DetachFromSocket` | `public bool DetachFromSocket()` | Stops riding a socket. |
+| `DieAsRagdoll` | `public bool DieAsRagdoll()` | Starts dying: the whole body goes powered and the motors let go over the profile's death time, then the body is limp (Dead). |
+| `EnterVehicle` | `public bool EnterVehicle(Entity driver)` | Puts driver in the seat: the Drive.* actions drive the vehicle, the driver is hidden and parked, and the camera rigs are made and the view moves to the first. |
+| `Equals` | `public bool Equals(Entity o)` |  |
+| `Equals` | `public override bool Equals(object? o)` |  |
+| `ExitVehicle` | `public bool ExitVehicle()` | Gets the driver out beside the vehicle and gives the view back. |
+| `FindBone` | `public int FindBone(string name)` | The bone with that name, or -1. |
+| `FindSmartObject` | `public SlotRef? FindSmartObject(float radius, string? slotTags = null, GameplayTagContainer? userTags = null)` | The nearest free slot within radius of this entity that this entity may claim. |
+| `FlipVehicle` | `public bool FlipVehicle(float liftCm = 50f)` | Puts the vehicle upright about its heading, stops it dead and sets it down liftCm higher. |
+| `GetAnimationCurve` | `public float GetAnimationCurve(string curve, float fallback = 0.0f)` | Reads a named float curve off the clip this entity is playing, at its current playhead -- "how far through the reload am I", "how hard is the foot planted". |
+| `GetAnimParam` | `public float? GetAnimParam(string name)` | Reads a machine parameter back, or null when the name was never written. |
+| `GetBoneInfo` | `public BoneInfo? GetBoneInfo(int bone)` | A bone's name, parent (-1 for a root) and rest transform (parent-local), or null for an index the skeleton does not have. |
+| `GetBoneModelPose` | `public BonePose? GetBoneModelPose(int bone, bool beforeOverrides = false)` | The same in the skeleton's model space (the entity's own frame). |
+| `GetBonePose` | `public BonePose? GetBonePose(int bone, bool beforeOverrides = false)` | The bone's pose after the whole chain of the last tick (animation, rig, IK, script overrides, ragdoll), parent-local, or null. |
+| `GetCullMargin` | `public float GetCullMargin()` | The cull margin in centimetres (0 when the entity has no mesh). |
+| `GetFloat` | `public float GetFloat(string field)` | Reads a float field by qualified name, or 0 if absent. |
+| `GetGiMode` | `public MeshGiMode GetGiMode()` | The mesh's GI mode (Static when it has no mesh). |
+| `GetHashCode` | `public override int GetHashCode()` |  |
+| `GetIgnoreOcclusion` | `public bool GetIgnoreOcclusion()` | True when the mesh skips the occlusion test. |
+| `GetInt` | `public int GetInt(string field)` | Reads an int (or bool) field, or 0 if absent. |
+| `GetInt64` | `public long GetInt64(string field)` | Reads a 64-bit field, or 0 if absent. |
+| `GetLodBias` | `public float GetLodBias()` | The LOD bias in stops (0 when the entity has no mesh). |
+| `GetOrAddAbilities` | `public AbilitySystem GetOrAddAbilities()` | This entity's gameplay ability system, created if it has none. |
+| `GetShadowMode` | `public MeshShadowMode GetShadowMode()` | The mesh's shadow mode (On when it has no mesh). |
+| `GetString` | `public string GetString(string field)` | Reads a string field, or "" if absent. |
+| `GetSurfaceMaterial` | `public string GetSurfaceMaterial(int slot)` | The material name overriding mesh slot slot, or "" when it has no override. |
+| `GetUpFromRagdoll` | `public bool GetUpFromRagdoll()` | Gets a Dead body up: picks the profile's montage by how it lies (supine, prone, side), plays it, and blends the simulation out under it. |
+| `GetVec3` | `public Vec3 GetVec3(string field)` | Reads a Vec3 field, or Zero if absent or not a Vec3. |
+| `GrabSoftVertex` | `public int GrabSoftVertex(Vec3 point, float maxDistanceCm, Vec3 target)` | Grabs the vertex of this soft body (cloth, jelly or rope) nearest point within maxDistanceCm and carries it toward target every physics step. |
+| `HasAnyTag` | `public bool HasAnyTag(uint mask)` | True if any bit in mask is set. |
+| `HasComponent` | `public bool HasComponent(Component component)` | True if this entity currently carries component. |
+| `HasComponent` | `public bool HasComponent(string name)` | True if this entity carries the component registered under name (e.g. |
+| `HasTag` | `public bool HasTag(uint mask)` | True if every bit in mask is set, and the mask is non-zero. |
+| `IsInAnimState` | `public bool IsInAnimState(string stateName)` | True while the machine's active leaf state has this name. |
+| `IsInMontageSection` | `public bool IsInMontageSection(string montage, string section)` | True while the montage is inside the named section (compared by hash). |
+| `IsMontagePlaying` | `public bool IsMontagePlaying(string? montage = null)` | True while the montage (null or empty = any montage) is playing or blending out. |
+| `IsMotionClip` | `public bool IsMotionClip(string clipPath)` | True while the matcher plays this clip (the path as written in the .ocmotion's clip list). |
+| `JumpToMontageSection` | `public bool JumpToMontageSection(string montage, string section)` | Jumps a playing montage to a named section at once; its blend weight is kept. |
+| `LightConeCosines` | `public static void LightConeCosines(float innerDegrees, float outerDegrees, out float innerCos, out float outerCos)` | Turns a spot light's cone angles (half-angles, degrees) into the cosines the light stores. |
+| `MoveSoftGrab` | `public bool MoveSoftGrab(int grab, Vec3 target)` | Moves a grab's target. |
+| `PauseAnimation` | `public bool PauseAnimation()` | Holds the clip where it is. |
+| `PauseAnimGraph` | `public bool PauseAnimGraph()` | Freezes the machine's clock and transitions; the pose holds. |
+| `PauseMotionMatching` | `public bool PauseMotionMatching(bool paused)` | Freezes (or resumes) the matcher: no clock, no search; the pose holds. |
+| `PeekRootMotion` | `public bool PeekRootMotion(out Vec3 translation, out float yawRadians, out float seconds)` | Reads the accumulator without clearing it: centimetres in this entity's own frame at the start of the period (X forward, Y right, Z up), radians of yaw, and the seconds it covers. |
+| `PinBone` | `public bool PinBone(string bone, bool pinned = true)` | A pinned bone follows the animation exactly while the rest of the body simulates. |
+| `PlayAnimation` | `public bool PlayAnimation(string clipAsset, bool loop = true)` | Plays a clip from the start, adding an animator if there is not one. |
+| `PlayLipSync` | `public bool PlayLipSync(string trackAsset, float rate = 1f, float startSeconds = 0f, float strength = 1f)` | Plays an authored lip-sync track (.ocvis) at rate from startSeconds, scaled by strength. |
+| `PlayMontage` | `public bool PlayMontage(string montage, float rate = 1f, string? section = null, string? slot = null, float blendIn = -1f)` | Plays montage (a .ocmontage asset path) on this entity, adding an animator if there is none. |
+| `QueueViseme` | `public bool QueueViseme(string symbol, float startSeconds, float durationSeconds, float intensity = 1f)` | Queues one viseme or phoneme (a name from Visemes, or an ARPAbet symbol such as "HH") to start startSeconds from now and last durationSeconds. |
+| `ReleaseCloth` | `public bool ReleaseCloth()` | Unpins a cloth: a cape falls off its shoulders. |
+| `ReleaseSoftGrab` | `public bool ReleaseSoftGrab(int grab)` | Lets the grabbed vertex go (it gets back the mass it had). |
+| `RemoveCameraRig` | `public bool RemoveCameraRig()` | Takes the rig out of play: it is never selected again (the component stays, as there is no scene call that removes a dynamically registered one). |
+| `RemoveTag` | `public bool RemoveTag(uint mask)` | Clears the bits in mask. |
+| `RepairSoftBody` | `public bool RepairSoftBody()` | Back to intact: pieces gone, dents out, tears closed. |
+| `RepairVehicle` | `public bool RepairVehicle()` | Restores full health and gives the engine back. |
+| `RequestMotionSearch` | `public bool RequestMotionSearch()` | Asks for a search on the next tick, whatever the interval (the system clears the request). |
+| `RestartEmitter` | `public bool RestartEmitter()` | Restarts the emitter: clock back to 0 and emission on. |
+| `ResumeAnimation` | `public bool ResumeAnimation()` | Continues a paused clip. |
+| `ResumeAnimGraph` | `public bool ResumeAnimGraph()` | Continues a paused machine. |
+| `RunQuery` | `public EqsRun RunQuery(string contentPath, Entity target = default, Vec3? point = null, bool sync = true, GameplayTagContainer? userTags = null)` | Runs an environment query with this entity as the querier. |
+| `SetAbsolutePosition` | `public void SetAbsolutePosition(WorldPos position)` | Moves the entity so its world position is position: converted through the current origin in double, then written like SetLocalPosition (through the parent's transform for a child). |
+| `SetAbsolutePositionCm` | `public void SetAbsolutePositionCm(Double3 cm)` | Moves the entity so its world position is the absolute point cm (centimetres from the world's zero). |
+| `SetAnimGraph` | `public bool SetAnimGraph(string machineAsset, float playRate = 1.0f)` | Runs the state machine at machineAsset on this entity, adding the component if needed. |
+| `SetAnimParam` | `public bool SetAnimParam(string name, bool value)` | Sets a bool machine parameter. |
+| `SetAnimParam` | `public bool SetAnimParam(string name, float value)` | Writes a machine parameter by name. |
+| `SetAnimParam` | `public bool SetAnimParam(string name, int value)` | Sets an int machine parameter. |
+| `SetAudioDiffraction` | `public bool SetAudioDiffraction(bool enabled = true, int directions = 8, int maxRays = 256, float maxOffsetCm = 3200f, float maxOcclusion = 0.85f)` | Turns diffraction on for this entity's occlusion emitter: when the direct path is blocked the probe looks for the shortest path around an edge or through an opening and uses its gain and low-pass instead of the fully occluded value. |
+| `SetAudioOcclusion` | `public bool SetAudioOcclusion(Voice voice, int rayCount = 5, float probeRadiusCm = 50f)` | Drives voice's occlusion from line-of-sight rays between the listener and this entity, and moves the voice with the entity. |
+| `SetAudioZoneSends` | `public bool SetAudioZoneSends(bool enabled = true, float reverbSendBase = 1f)` | Makes the voice of this entity's occlusion emitter (SetAudioOcclusion) send to the reverb zone(s) it is inside, through the mixer's send reverbs, instead of only hearing the listener's. |
+| `SetBodyScale` | `public bool SetBodyScale(Vec3 scale, bool keepMass = false)` | Sets the scale of this entity's rigid body collision shape, ABSOLUTE (relative to the unscaled shape, not to the current scale). |
+| `SetBoneBlend` | `public bool SetBoneBlend(string bone, float blend)` | How much of the simulated pose shows for one bone, 0..1 (default 1), whatever the ragdoll-wide weight is. |
+| `SetBoneDamping` | `public bool SetBoneDamping(string bone, float damping)` | Motor damping ratio of one bone's joint (default 1); negative goes back to the default. |
+| `SetBoneModelPose` | `public bool SetBoneModelPose(int bone, BonePose pose, float amount = 1f, BoneChannels channels = BoneChannels.All, bool oneTick = false)` | Sets a bone's pose in the skeleton's model space; its children keep their local transforms and follow. |
+| `SetBonePose` | `public bool SetBonePose(int bone, BonePose pose, float amount = 1f, BoneChannels channels = BoneChannels.All, bool oneTick = false)` | Sets a bone's pose (parent-local) from the next animation tick on and until cleared, over the animation and the rig. |
+| `SetBonePoses` | `public bool SetBonePoses(int firstBone, IReadOnlyList<BonePose> poses)` | Sets consecutive bones from firstBone in one call (parent-local, every channel, amount 1). |
+| `SetBonePosesEnabled` | `public bool SetBonePosesEnabled(bool enabled)` | Switches the entity's overrides off and on without clearing them. |
+| `SetBonePoseWeight` | `public bool SetBonePoseWeight(float weight)` | The master weight of this entity's overrides (default 1). |
+| `SetBoneStrength` | `public bool SetBoneStrength(string bone, float strength)` | Powered motor strength of one bone's joint, 0..1; negative goes back to the ragdoll-wide strength. |
+| `SetBoneTorqueScale` | `public bool SetBoneTorqueScale(string bone, float scale)` | Multiplier on the torque ceiling of one bone's motor (default 1). |
+| `SetCameraClip` | `public bool SetCameraClip(float nearCm, float farCm)` | Sets the near and far clip distances in centimetres. |
+| `SetCameraFov` | `public bool SetCameraFov(float fovDegrees)` | Sets the vertical field of view in degrees, clamped to 1..170 (the component stores radians). |
+| `SetCameraPriority` | `public bool SetCameraPriority(int priority)` | Sets the camera's priority; the highest-priority camera is the one the view follows. |
+| `SetCameraRigArm` | `public bool SetCameraRigArm(float lengthCm, float probeRadiusCm = 12f, bool collide = true)` | Arm length, probe radius and whether the arm collides (centimetres). |
+| `SetCameraRigBlend` | `public bool SetCameraRigBlend(float seconds, CameraBlendCurve curve = CameraBlendCurve.EaseInOut)` | Seconds to blend into this rig (0 = cut) and the curve. |
+| `SetCameraRigFade` | `public bool SetCameraRigFade(float startCm, float endCm)` | The collision fade: the target's meshes stop drawing once the camera is nearer than endCm to the pivot (they return at 1.15 times that). |
+| `SetCameraRigFlags` | `public bool SetCameraRigFlags(CameraRigFlags flags)` | Replaces the rig's switches (collision, per-axis inherit, fade, look-at, disabled). |
+| `SetCameraRigIgnoreBody` | `public bool SetCameraRigIgnoreBody(int bodyHandle)` | A physics body the camera probe skips (the chassis of a vehicle). |
+| `SetCameraRigLag` | `public bool SetCameraRigLag(float positionSpeed, float rotationSpeed = 0f, float maxDistanceCm = 0f)` | Position lag speed (1/s, 0 = none), rotation lag speed (0 = none) and the farthest the camera may trail behind its pivot (0 = unlimited). |
+| `SetCameraRigLookAhead` | `public bool SetCameraRigLookAhead(float seconds, float maxCm = 150f)` | The pivot leads by the planar velocity times seconds (0 = off), at most maxCm. |
+| `SetCameraRigMode` | `public bool SetCameraRigMode(CameraMode mode)` | Changes the mode; the rig blends into it over its blend time. |
+| `SetCameraRigPitchLimits` | `public bool SetCameraRigPitchLimits(float minDegrees, float maxDegrees)` | How far the view may look down and up, degrees (both 0 reads -80 / +80). |
+| `SetCameraRigPivot` | `public bool SetCameraRigPivot(Vec3 worldOffset)` | Offset of the arm origin in world axes (eye height). |
+| `SetCameraRigSocket` | `public bool SetCameraRigSocket(Vec3 cameraFrameOffset)` | Offset at the arm's end in the camera frame: forward, right, up. |
+| `SetCameraRigTarget` | `public bool SetCameraRigTarget(Entity target)` | The entity the arm follows (none = the rig's parent, else the rig's own entity). |
+| `SetControlRig` | `public bool SetControlRig(string rigAsset, float weight = 1.0f)` | Binds a control rig to this entity, so its sampled pose is modified procedurally before it is skinned — IK, aim constraints, anything the .ocrig names. |
+| `SetCullMargin` | `public bool SetCullMargin(float marginCm)` | Grows the box the frustum and occlusion tests use by this many centimetres, so a mesh whose vertices a shader moves is not culled early. |
+| `SetEmitterEffect` | `public bool SetEmitterEffect(string effectPath)` | Points the emitter at a particle effect (.ocparticle) by its content path. |
+| `SetEmitterEnabled` | `public bool SetEmitterEnabled(bool enabled)` | Starts or stops emission. |
+| `SetEmitterModifiers` | `public bool SetEmitterModifiers(float rateScale = 1f, float sizeScale = 1f, float speedScale = 1f)` | Scales the emitter's rate, new particles' size and initial speed (1 = authored). |
+| `SetFacePose` | `public bool SetFacePose(string pose, float weight, float blendSeconds = 0f)` | Sets a FACE POSE weight: a pose of the face rig, an ARKit shape name or a viseme name (see FaceShapes and Visemes). |
+| `SetFaceRig` | `public bool SetFaceRig(string? rigAsset)` | Chooses the face rig (.ocface) by asset path; null goes back to the built-in ARKit / viseme defaults. |
+| `SetFloat` | `public bool SetFloat(string field, float value)` | Writes a float field. |
+| `SetFootIkWeight` | `public bool SetFootIkWeight(float weight, float blendSeconds = 0.2f, string? foot = null)` | Blends foot placement toward weight (null or empty foot = every foot; a foot is named by its leg chain). |
+| `SetGiMode` | `public bool SetGiMode(MeshGiMode mode)` | Sets how the mesh takes part in the voxel GI. |
+| `SetHairCastsShadow` | `public bool SetHairCastsShadow(bool on)` | Whether the strands cast shadow-map shadows. |
+| `SetHairCollides` | `public bool SetHairCollides(bool on)` | Whether the hair collides with the character's head, neck and shoulder proxies and with colliders added by AddHairCollider. |
+| `SetHairDensityScale` | `public bool SetHairDensityScale(float scale)` | The fraction of the render strands drawn on top of the distance levels, 0 to 1 (1 = all; the renderer clamps higher values). |
+| `SetHairEnabled` | `public bool SetHairEnabled(bool on)` | Shows or hides the hair. |
+| `SetHairLook` | `public bool SetHairLook(string materialAsset)` | Draws the hair with this .ocmat (a material whose shading model is hair) instead of the groom's own look. |
+| `SetHairStiffness` | `public bool SetHairStiffness(float scale)` | Divides the bend and stretch compliance of every material of the groom, so 2 is twice as stiff. |
+| `SetHairWidthScale` | `public bool SetHairWidthScale(float scale)` | Multiplies the width of every strand (the groom's look width times this). |
+| `SetHairWindEnabled` | `public bool SetHairWindEnabled(bool on)` | Whether the world wind moves this hair. |
+| `SetHairWindScale` | `public bool SetHairWindScale(float scale)` | Multiplies the world wind this hair feels. |
+| `SetHiddenFromOwner` | `public bool SetHiddenFromOwner(bool hidden)` | Sets or clears the owner-hide bit, adding a mesh renderer if absent. |
+| `SetIgnoreOcclusion` | `public bool SetIgnoreOcclusion(bool ignore)` | Opts the mesh out of the occlusion test (editor Play; the shipped runtime has no occlusion culling). |
+| `SetIkGoal` | `public bool SetIkGoal(string goal, Vec3 position, IkSpace space = IkSpace.World)` | Places a goal the rig declares (by name) at position. |
+| `SetIkGoal` | `public bool SetIkGoal(string goal, Vec3 position, Quat rotation, IkSpace space = IkSpace.World)` | As SetIkGoal(string, Vec3, IkSpace), with the rotation the chain's tip should take (when the chain has tipRotation on). |
+| `SetIkGoalWeight` | `public bool SetIkGoalWeight(string goal, float weight, float blendSeconds = 0.15f)` | Blends the goal toward weight (1 engages, 0 releases) over blendSeconds; negative uses 0.15 s, 0 cuts. |
+| `SetIkRig` | `public bool SetIkRig(string rigAsset, float weight = 1f)` | Attaches an IK Rig (.ocikrig) to this entity, ensuring it has an animator. |
+| `SetIkRigFlags` | `public bool SetIkRigFlags(bool feet = true, bool goals = true, bool body = true)` | Turns parts of the attached IK Rig on or off: foot placement, script goals, the pelvis solve. |
+| `SetInt` | `public bool SetInt(string field, int value)` | Writes an int (or bool) field. |
+| `SetInt64` | `public bool SetInt64(string field, long value)` | Writes a 64-bit field. |
+| `SetLightColour` | `public bool SetLightColour(Vec3 rgb)` | Sets the light's linear colour. |
+| `SetLightCone` | `public bool SetLightCone(float innerDegrees, float outerDegrees)` | Sets a spot light's cone (half-angles in degrees; see LightConeCosines). |
+| `SetLightIntensity` | `public bool SetLightIntensity(float lux)` | Sets the light's intensity in lux (candela for a point or spot light). |
+| `SetLightRange` | `public bool SetLightRange(float rangeCm)` | Sets the light's reach in centimetres; 0 leaves it to the renderer. |
+| `SetLightShadows` | `public bool SetLightShadows(bool enabled)` | Whether the light casts shadows. |
+| `SetLipSyncTime` | `public bool SetLipSyncTime(float seconds)` | Slaves the lip-sync clock to an audio voice: call it every frame with the voice's playhead and the track follows the sound exactly (no drift). |
+| `SetLocalPosition` | `public void SetLocalPosition(Vec3 v)` | Sets local position, in centimetres. |
+| `SetLocalRotation` | `public void SetLocalRotation(Quat q)` | Sets local rotation. |
+| `SetLocalScale` | `public void SetLocalScale(Vec3 v)` | Sets local scale (unitless multipliers). |
+| `SetLodBias` | `public bool SetLodBias(float stops)` | Biases the mesh's LOD choice, in stops: +1 halves the pixel-error threshold (a finer level is picked sooner), -1 doubles it. |
+| `SetMaterial` | `public bool SetMaterial(string materialName)` | Sets the material by name, adding a mesh renderer if absent. |
+| `SetMesh` | `public bool SetMesh(string meshPath)` | Sets the drawn mesh by asset path, adding a mesh renderer if absent. |
+| `SetMontageNextSection` | `public bool SetMontageNextSection(string montage, string fromSection, string? toSection)` | Overrides where fromSection goes when it ends. |
+| `SetMontageRate` | `public bool SetMontageRate(string montage, float rate)` | Changes a playing montage's speed (instance rate); 0 pauses it. |
+| `SetMorphMaster` | `public bool SetMorphMaster(float weight)` | The master scale of every blend shape on this entity (Morph Targets.weight; 0 reads as 1). |
+| `SetMorphWeight` | `public bool SetMorphWeight(string target, float weight, float blendSeconds = 0f)` | Sets a blend-shape weight by the target's name in the mesh (-4..4; 0 is neutral, 1 the full shape), ramping to it over blendSeconds (0 = at once). |
+| `SetMotionInput` | `public bool SetMotionInput(Vec3 worldVelocity, float facingYawDegrees = 0f)` | The world-space velocity (cm/s) the character is trying to reach and, for Yaw, the facing in degrees (the AverCharacter.Yaw convention). |
+| `SetMotionInput` | `public bool SetMotionInput(float velocityX, float velocityY, float facingYawDegrees = 0f)` | The same with the planar velocity as two numbers. |
+| `SetMotionMatching` | `public bool SetMotionMatching(string database, MotionFacing facing = MotionFacing.Velocity, MotionDrive drive = MotionDrive.Simulation, float playRate = 1f)` | Runs motion matching on this entity with the database at database (an .ocmotion asset path), adding the component if needed. |
+| `SetMotionTags` | `public bool SetMotionTags(string[]? required, string[]? excluded)` | Tags the search must land on (required) and must not (excluded), by the names declared in the .ocmotion. |
+| `SetMotionTuning` | `public bool SetMotionTuning(float searchInterval = 0f, float velocityHalfLife = 0f, float turnHalfLife = 0f)` | Per-entity tuning; 0 keeps the database's own default. |
+| `SetName` | `public void SetName(string name)` | Renames the entity, rewriting its CName blob slice. |
+| `SetParent` | `public bool SetParent(Entity parent)` | Reparents under parent. |
+| `SetParticleColor` | `public bool SetParticleColor(string name, float r, float g, float b, float a = 1f)` | Sets a colour user parameter (PARAM name color). |
+| `SetParticleFloat` | `public bool SetParticleFloat(string name, float value)` | Sets a float user parameter the entity's effect declares with PARAM name float. |
+| `SetParticleVector` | `public bool SetParticleVector(string name, Vec3 value)` | Sets a vector user parameter (PARAM name vec3): a wind direction, an attractor position. |
+| `SetPhysicalAnimationProfile` | `public bool SetPhysicalAnimationProfile(string? profileAsset)` | Sets the physical animation profile (an .ocphysanim asset) that shapes this entity's reactions, drive and death; null or empty goes back to the defaults. |
+| `SetPhysicalSurface` | `public bool SetPhysicalSurface(int surfaceId, bool copyPhysics = false)` | Labels this entity's rigid body with a surface id (IdOf; 0 clears it). |
+| `SetRagdollStrength` | `public bool SetRagdollStrength(float strength)` | How hard Powered motors pull toward the animation, 0..1 (default 0.5). |
+| `SetReverbZone` | `public bool SetReverbZone(Vec3 halfExtentsCm, float blendDistanceCm = 200f, float wet = 0.35f, float decaySeconds = 1.8f, float damping = 0.4f, int priority = 0, int shape = 0)` | Makes this entity a reverb volume. |
+| `SetReverbZoneImpulse` | `public bool SetReverbZoneImpulse(Sound impulse, float predelayMs = 0f)` | Gives this reverb zone a convolution reverb: while the zone has a send reverb slot it convolves with the loaded impulse instead of the algorithmic reverb. |
+| `SetRigInput` | `public bool SetRigInput(string input, Quat value)` | Sets a named quaternion input (a tip rotation). |
+| `SetRigInput` | `public bool SetRigInput(string input, Vec3 value)` | Sets a named vec3 input: a goal, a pole, a look-at point. |
+| `SetRigInput` | `public bool SetRigInput(string input, float value)` | Sets a named float input of this entity's OCRIG 2 control rig (drives an op's weight, say). |
+| `SetRootMotion` | `public bool SetRootMotion(RootMotionMode mode, RootMotionAxes axes = RootMotionAxes.Planar, float scale = 1f, bool fromMontages = true, bool fromGraph = true)` | Turns root motion on, off, or changes how it is used, adding the component if needed. |
+| `SetRopeEnd` | `public bool SetRopeEnd(RopeEnd end, Entity anchor, Vec3 offset)` | Pins a rope end to a point of an entity (offset is in that entity's space), so the rope follows a moving door, a vehicle or an animated hand. |
+| `SetRopeEndFree` | `public bool SetRopeEndFree(RopeEnd end, Vec3 worldPoint, bool pinned)` | Puts a rope end at a world point: pinned there, or (pinned false) let go to hang or fall. |
+| `SetShadowMode` | `public bool SetShadowMode(MeshShadowMode mode)` | Sets whether the mesh casts shadows, or only shadows. |
+| `SetSkeleton` | `public bool SetSkeleton(string skeletonAsset)` | Binds a skeleton asset to this entity, so its mesh can be posed. |
+| `SetSoftBodyAsleep` | `public bool SetSoftBodyAsleep(bool asleep)` | Holds (true) or releases (false) this soft body's pieces asleep. |
+| `SetSoftBuoyancy` | `public bool SetSoftBuoyancy(float fluidDensityKgM3, float drag = 1f)` | Makes the soft body float in the world's water: hydrostatic pressure on a closed body plus quadratic drag. |
+| `SetSoftContact` | `public bool SetSoftContact(float softScale, float otherScale)` | How the soft body trades momentum with rigid bodies: 0 = infinite mass, 1 = unchanged. |
+| `SetSoftFieldEnabled` | `public bool SetSoftFieldEnabled(bool enabled)` | Enables or disables this entity's soft field. |
+| `SetSoftPairMode` | `public bool SetSoftPairMode(Entity other, SoftContactMode mode)` | What happens between this soft body and one other (a rigid body, or another soft body): normal, sensor events only, or ignored. |
+| `SetSoftPreset` | `public bool SetSoftPreset(SoftPreset preset)` | Changes the material preset of this entity's Cloth or Destructible (it rebuilds on the next tick). |
+| `SetSoftPressure` | `public bool SetSoftPressure(float kPa)` | The inflation pressure of a closed cloth or a jelly, in kilopascal at its rest volume (0 deflates). |
+| `SetString` | `public bool SetString(string field, string value)` | Writes a string field. |
+| `SetSurfaceMaterial` | `public bool SetSurfaceMaterial(int slot, string materialName)` | Draws mesh material slot slot of this entity with materialName instead of the material the mesh names. |
+| `SetTags` | `public bool SetTags(uint mask)` | Replaces the whole tag mask, adding a Tags component if absent. |
+| `SetTransformAbsolute` | `public bool SetTransformAbsolute(bool on)` | On: the entity keeps its parent (its children, lookups, destruction with the parent) but its world transform is its local transform alone, not composed with its parents' (Godot's top_level). |
+| `SetVec3` | `public bool SetVec3(string field, Vec3 value)` | Writes a Vec3 field. |
+| `SetVehicleGear` | `public bool SetVehicleGear(int gear)` | Manual gearbox: -1 reverse, 0 neutral, 1 and up. |
+| `SetVehicleInput` | `public bool SetVehicleInput(float throttle, float steer, float brake = 0f, float handbrake = 0f)` | The driver's pedals: throttle -1..1 (negative reverses or brakes, see the aids), steer -1..1 (+1 right), brake and handbrake 0..1. |
+| `SetVehicleManualGearbox` | `public bool SetVehicleManualGearbox(bool manual)` | Switches between an automatic and a manual gearbox. |
+| `SetVisible` | `public bool SetVisible(bool visible)` | Shows or hides the mesh, adding a mesh renderer if the entity lacks one. |
+| `ShiftVehicle` | `public bool ShiftVehicle(int delta)` | Manual gearbox: one gear up (+1) or down (-1), through a timed clutch. |
+| `SimulateBoneSubtree` | `public bool SimulateBoneSubtree(string? bone)` | Simulates bone and everything below it; the rest of the body follows the animation exactly. |
+| `SpawnEmitterAt` | `public static Entity SpawnEmitterAt(Vec3 position, string effectPath, float lifetimeSeconds = 3f)` | Creates an entity at position that plays effectPath, and destroys it after lifetimeSeconds (0 or less: never). |
+| `StartRagdoll` | `public bool StartRagdoll(RagdollMode mode = RagdollMode.Limp, float blendSeconds = 0.1f)` | Turns this entity's skeleton into a physics ragdoll, built from its current animated pose, and blends the simulated pose over the animation across blendSeconds. |
+| `StopAnimation` | `public bool StopAnimation()` | Stops the clip and rewinds it. |
+| `StopEmitter` | `public bool StopEmitter(bool killParticles = false)` | Stops emission (like SetEmitterEnabled(false)); with killParticles the live particles go too, otherwise they finish their lives. |
+| `StopLipSync` | `public bool StopLipSync(float blendSeconds = 0.1f)` | Stops lip-sync, fading the mouth out over blendSeconds. |
+| `StopMontage` | `public bool StopMontage(string? montage = null, float blendOut = -1f)` | Blends the montage out; null or empty stops every montage on this entity. |
+| `StopMontageSlot` | `public bool StopMontageSlot(string slot, float blendOut = -1f)` | Blends out every montage playing in slot. |
+| `StopRagdoll` | `public bool StopRagdoll(float blendSeconds = 0.4f)` | Blends back to the animation over blendSeconds, then removes the ragdoll (RagdollState reads null from then on). |
+| `TearSoftBody` | `public bool TearSoftBody(Vec3 point, float radiusCm)` | A scripted cut: breaks the edges whose middle is within radiusCm of the point. |
+| `TeleportHair` | `public bool TeleportHair()` | Puts the hair back in its default pose with no velocity at the next update, wherever the head now is (after a cut or a respawn). |
+| `ToString` | `public override string ToString()` |  |
+| `Translate` | `public void Translate(Vec3 delta)` | Moves by delta centimetres, relative to the current local position. |
+| `TriggerAnim` | `public bool TriggerAnim(string name)` | Fires a trigger parameter. |
+| `TryGetAnimationCurve` | `public bool TryGetAnimationCurve(string curve, out float value)` | As GetAnimationCurve, but says whether the curve was there at all. |
+| `TryGetCameraFov` | `public bool TryGetCameraFov(out float fovDegrees)` | Reads the vertical field of view in degrees. |
+| `TryGetCameraRigState` | `public bool TryGetCameraRigState(out CameraRigState state)` | What the camera system last computed for this rig. |
+| `TryGetEmitterState` | `public bool TryGetEmitterState(out int aliveParticles, out bool onGpu)` | Reads how many particles the entity's emitters hold and which tier simulates them. |
+| `TryGetFootIkState` | `public bool TryGetFootIkState(string? foot, out float offsetCm, out float plant, out Vec3 groundNormal)` | The foot's current vertical offset in cm, its plant weight (1 planted) and the ground normal it stands on. |
+| `TryGetHair` | `public bool TryGetHair(out HairState state)` | What this character's hair is doing as of the last tick. |
+| `TryGetIkGoalState` | `public bool TryGetIkGoalState(string goal, out float alpha, out float errorCm, out bool reached)` | The goal's blend weight, how far the chain's tip was from it after the last solve (cm), and whether the solve reached it. |
+| `TryGetJelly` | `public bool TryGetJelly(out JellyState state)` | The jelly's volume ratio, stretch and node count as of the last tick. |
+| `TryGetLightIntensity` | `public bool TryGetLightIntensity(out float lux)` | Reads the light's intensity in lux. |
+| `TryGetLipSyncState` | `public bool TryGetLipSyncState(out float time, out float length, out float strength)` | The lip-sync clock (seconds), the track's length (0 = only queued visemes) and the strength. |
+| `TryGetMontageState` | `public bool TryGetMontageState(string? montage, out float position, out float length, out float weight, out float rate)` | Where a playing montage is: position and length in montage seconds, blend weight 0..1 and instance rate. |
+| `TryGetMorphWeight` | `public bool TryGetMorphWeight(string target, out float weight)` | The FINAL weight of a blend shape this frame, after animation, script, lip-sync and the master weight (0 when it is not active). |
+| `TryGetMotionState` | `public bool TryGetMotionState(out string? clipHashHex, out float clipTime, out float cost, out int switches)` | What the matcher is playing: the id of the clip (hex of its asset hash, "" when nothing plays), the time in that clip, how well it fits the wanted trajectory (lower is better) and how many times it has switched. |
+| `TryGetPhysicalAnimationState` | `public bool TryGetPhysicalAnimationState(out LifeState life, out BodyFacing facing, out int reactingBones)` | The life state, how the body lies and how many bones are still reacting to hits. |
+| `TryGetRope` | `public bool TryGetRope(out RopeState state)` | The rope's length, strain and segment count as of the last tick. |
+| `TryGetSoftBodyDents` | `public bool TryGetSoftBodyDents(out int dentedEdges, out float maxSetCm, out int debrisPieces)` | Permanent set: dented edges, the largest set in cm, and live debris pieces. |
+| `TryGetSoftBodyState` | `public bool TryGetSoftBodyState(out SoftBodyState state)` | The soft body's damage, strain and piece count as of the last tick. |
+| `TryGetSoftFieldTouched` | `public bool TryGetSoftFieldTouched(out int pieces)` | The pieces this entity's field reached on the last tick. |
+| `TryGetSoftSubmerged` | `public bool TryGetSoftSubmerged(out float fraction, out float volumeCm3)` | How much of the soft body was under water on the last step (0..1) and the displaced volume in cm^3. |
+| `TryGetSoftVolume` | `public bool TryGetSoftVolume(out float restCm3, out float nowCm3)` | Rest and current volume of the soft body in cm^3 (the current one is negative when it is turned inside out). |
+| `TryGetVehicleTelemetry` | `public bool TryGetVehicleTelemetry(out VehicleTelemetry telemetry)` | The vehicle's state as of the last fixed physics step. |
+| `TryGetWheelTelemetry` | `public bool TryGetWheelTelemetry(int wheel, out WheelTelemetry telemetry)` | One wheel's state as of the last fixed physics step. |
+| `TuneVehicle` | `public bool TuneVehicle(string key, float value)` | Live tuning by key (case-insensitive): power, brake, grip, suspension, steer, drag, downforce (scales, 1 = as authored), abs, tcs, manual (0 or 1) and collisionperiod (1 to 8). |
+
+<a id="envfx"></a>
 
 ### EnvFx
 
 `public static class EnvFx` - Local fog volumes and reflection probes.
 
-- `public const int MaxFogVolumes = 64`
-- `public const int MaxProbes = 32`
-- `public static int CreateFogVolume(string key)`
-- `public static bool DestroyFogVolume(int id)`
-- `public static int FindFogVolume(string key)`
-- `public static bool SetFogVolume(int id, FogVolumeShapeKind shape, float[] world12, float[] halfExtentCm3, float densityPerMetre, float[]? albedo3 = null, float[]? emission3 = null, float heightFalloff = 0f, float edgeFade = 0.1f)` - Everything about the volume in one call.
-- `public static bool SetFogVolumeEnabled(int id, bool on)`
-- `public static bool SetFogVolumeShader(int id, string? shaderName)` - A custom fog program (registered with Register as Fog) replaces the volume's density, albedo and emission.
-- `public static int FogVolumeCount { get; }`
-- `public static float FogDensityAt(float x, float y, float z)` - The summed signed extinction per centimetre of every enabled volume at an engine-space point.
-- `public static int CreateProbe(string key)`
-- `public static bool DestroyProbe(int id)`
-- `public static int FindProbe(string key)`
-- `public static bool SetProbeBox(int id, float[] world12, float[] halfExtentCm3, float[]? originOffsetCm3 = null)`
-- `public static bool SetProbeLook(int id, float intensity, float blendDistanceCm, float maxDistanceCm, bool boxProjection, bool interior, bool updateAlways, int resolution)`
-- `public static bool SetProbeAmbient(int id, int mode, float[]? colour3, float energy)` - Mode 0 disabled, 1 environment, 2 colour.
-- `public static bool SetProbeMasks(int id, uint cullMask, uint reflectionMask)`
-- `public static bool SetProbeEnabled(int id, bool on)`
-- `public static int ProbeCount { get; }`
-- `public static ProbeBlend SelectProbes(float x, float y, float z, float cameraX, float cameraY, float cameraZ)` - The probes that light an engine-space point seen from a camera position, with their shares of the blend.
-- `public static (float X, float Y, float Z) ProjectProbeDirection(int id, float x, float y, float z, float dx, float dy, float dz)` - The direction to look a probe's capture up with for a reflection ray from a point (box projection applied); the input direction for an unknown probe.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `FogVolumeCount` | `public static int FogVolumeCount { get; }` |  |
+| `ProbeCount` | `public static int ProbeCount { get; }` |  |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `MaxFogVolumes` | `public const int MaxFogVolumes = 64` |  |
+| `MaxProbes` | `public const int MaxProbes = 32` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `CreateFogVolume` | `public static int CreateFogVolume(string key)` |  |
+| `CreateProbe` | `public static int CreateProbe(string key)` |  |
+| `DestroyFogVolume` | `public static bool DestroyFogVolume(int id)` |  |
+| `DestroyProbe` | `public static bool DestroyProbe(int id)` |  |
+| `FindFogVolume` | `public static int FindFogVolume(string key)` |  |
+| `FindProbe` | `public static int FindProbe(string key)` |  |
+| `FogDensityAt` | `public static float FogDensityAt(float x, float y, float z)` | The summed signed extinction per centimetre of every enabled volume at an engine-space point. |
+| `SelectProbes` | `public static ProbeBlend SelectProbes(float x, float y, float z, float cameraX, float cameraY, float cameraZ)` | The probes that light an engine-space point seen from a camera position, with their shares of the blend. |
+| `SetFogVolume` | `public static bool SetFogVolume(int id, FogVolumeShapeKind shape, float[] world12, float[] halfExtentCm3, float densityPerMetre, float[]? albedo3 = null, float[]? emission3 = null, float heightFalloff = 0f, float edgeFade = 0.1f)` | Everything about the volume in one call. |
+| `SetFogVolumeEnabled` | `public static bool SetFogVolumeEnabled(int id, bool on)` |  |
+| `SetFogVolumeShader` | `public static bool SetFogVolumeShader(int id, string? shaderName)` | A custom fog program (registered with Register as Fog) replaces the volume's density, albedo and emission. |
+| `SetProbeAmbient` | `public static bool SetProbeAmbient(int id, int mode, float[]? colour3, float energy)` | Mode 0 disabled, 1 environment, 2 colour. |
+| `SetProbeBox` | `public static bool SetProbeBox(int id, float[] world12, float[] halfExtentCm3, float[]? originOffsetCm3 = null)` |  |
+| `SetProbeEnabled` | `public static bool SetProbeEnabled(int id, bool on)` |  |
+| `SetProbeLook` | `public static bool SetProbeLook(int id, float intensity, float blendDistanceCm, float maxDistanceCm, bool boxProjection, bool interior, bool updateAlways, int resolution)` |  |
+| `SetProbeMasks` | `public static bool SetProbeMasks(int id, uint cullMask, uint reflectionMask)` |  |
+| `static` | `public static (float X, float Y, float Z) ProjectProbeDirection(int id, float x, float y, float z, float dx, float dy, float dz)` | The direction to look a probe's capture up with for a reflection ray from a point (box projection applied); the input direction for an unknown probe. |
+
+<a id="eventdata"></a>
 
 ### EventData
 
 `public sealed class EventData` - The event being delivered: a snapshot, safe to keep after the handler returns.
 
-- `public string Name { get; init; }` - Event name.
-- `public int Sender { get; init; }` - Entity that raised it, or 0.
-- `public int Target { get; init; }` - Entity it was addressed to, or 0 for a broadcast.
-- `public IReadOnlyList<EventValue> Args { get; init; }` - Payload in push order.
-- `public long GetInt(int i)` - Argument i as an integer; 0 when absent.
-- `public float GetFloat(int i)` - Argument i as a float; 0 when absent.
-- `public bool GetBool(int i)` - Argument i as a bool; false when absent.
-- `public string GetString(int i)` - Argument i as a string; empty when absent.
-- `public Vec3 GetVec3(int i)` - Argument i as a vector; zero when absent.
-- `public Entity GetEntity(int i)` - Argument i as an entity; None when absent.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Args` | `public IReadOnlyList<EventValue> Args { get; init; }` | Payload in push order. |
+| `Name` | `public string Name { get; init; }` | Event name. |
+| `Sender` | `public int Sender { get; init; }` | Entity that raised it, or 0. |
+| `Target` | `public int Target { get; init; }` | Entity it was addressed to, or 0 for a broadcast. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `GetBool` | `public bool GetBool(int i)` | Argument i as a bool; false when absent. |
+| `GetEntity` | `public Entity GetEntity(int i)` | Argument i as an entity; None when absent. |
+| `GetFloat` | `public float GetFloat(int i)` | Argument i as a float; 0 when absent. |
+| `GetInt` | `public long GetInt(int i)` | Argument i as an integer; 0 when absent. |
+| `GetString` | `public string GetString(int i)` | Argument i as a string; empty when absent. |
+| `GetVec3` | `public Vec3 GetVec3(int i)` | Argument i as a vector; zero when absent. |
+
+<a id="events"></a>
 
 ### Events
 
 `public static class Events` - Named events with typed payloads.
 
-- `public static EventData? Current { get; }` - Snapshots the event being delivered.
-- `public static EventSubscription SubscribeConsuming(string name, Func<EventData, bool> handler, int owner = 0, int priority = 0, int senderFilter = 0)` - Subscribes.
-- `public static EventSubscription Subscribe(string name, Action<EventData> handler, int owner = 0, int priority = 0, int senderFilter = 0)` - Subscribes a handler that never consumes.
-- `public static bool Unsubscribe(EventSubscription s)` - Removes a subscription.
-- `public static int UnsubscribeOwner(int owner)` - Removes every subscription made with owner.
-- `public static int ListenerCount(string name)` - Number of live subscribers to name.
-- `public static int Dispatch(string name, int sender = 0, int target = 0, params object[] args)` - Delivers now.
-- `public static bool Post(string name, int sender = 0, int target = 0, params object[] args)` - Queues for delivery at the next Flush.
-- `public static int Flush()` - Host call at the frame-safe point.
-- `public static int Pending { get; }` - Events waiting for the next flush.
-- `public static int Overflowed { get; }` - How many dispatches were demoted to the queue by the nesting limit.
-- `public static void ClearPending()` - Drops queued events, keeping subscriptions.
-- `public static void ClearAll()` - Drops queued events and every subscription.
-- `public static void Shutdown()` - Detaches from the native bus.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Current` | `public static EventData? Current { get; }` | Snapshots the event being delivered. |
+| `Overflowed` | `public static int Overflowed { get; }` | How many dispatches were demoted to the queue by the nesting limit. |
+| `Pending` | `public static int Pending { get; }` | Events waiting for the next flush. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ClearAll` | `public static void ClearAll()` | Drops queued events and every subscription. |
+| `ClearPending` | `public static void ClearPending()` | Drops queued events, keeping subscriptions. |
+| `Dispatch` | `public static int Dispatch(string name, int sender = 0, int target = 0, params object[] args)` | Delivers now. |
+| `Flush` | `public static int Flush()` | Host call at the frame-safe point. |
+| `ListenerCount` | `public static int ListenerCount(string name)` | Number of live subscribers to name. |
+| `Post` | `public static bool Post(string name, int sender = 0, int target = 0, params object[] args)` | Queues for delivery at the next Flush. |
+| `Shutdown` | `public static void Shutdown()` | Detaches from the native bus. |
+| `Subscribe` | `public static EventSubscription Subscribe(string name, Action<EventData> handler, int owner = 0, int priority = 0, int senderFilter = 0)` | Subscribes a handler that never consumes. |
+| `SubscribeConsuming` | `public static EventSubscription SubscribeConsuming(string name, Func<EventData, bool> handler, int owner = 0, int priority = 0, int senderFilter = 0)` | Subscribes. |
+| `Unsubscribe` | `public static bool Unsubscribe(EventSubscription s)` | Removes a subscription. |
+| `UnsubscribeOwner` | `public static int UnsubscribeOwner(int owner)` | Removes every subscription made with owner. |
+
+<a id="eventsubscription"></a>
 
 ### EventSubscription
 
 `public readonly struct EventSubscription : IEquatable<EventSubscription>` - A subscription id.
 
-- `public int Id { get; }` - The raw id.
-- `public EventSubscription(int id)` - Wraps a raw id.
-- `public bool IsValid { get; }` - True for a non-zero id.
-- `public bool Equals(EventSubscription other)` - Inherited documentation.
-- `public override bool Equals(object? obj)` - Inherited documentation.
-- `public override int GetHashCode()` - Inherited documentation.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `EventSubscription` | `public EventSubscription(int id)` | Wraps a raw id. |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Id` | `public int Id { get; }` | The raw id. |
+| `IsValid` | `public bool IsValid { get; }` | True for a non-zero id. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Equals` | `public bool Equals(EventSubscription other)` | Inherited documentation. |
+| `Equals` | `public override bool Equals(object? obj)` | Inherited documentation. |
+| `GetHashCode` | `public override int GetHashCode()` | Inherited documentation. |
+
+<a id="eventvalue"></a>
 
 ### EventValue
 
 `public readonly struct EventValue` - One payload argument.
 
-- `public EventValueKind Kind { get; init; }` - What was stored.
-- `public long AsInt { get; }` - The value as an integer (floats truncate; non-numeric kinds read 0).
-- `public float AsFloat { get; }` - The value as a float.
-- `public bool AsBool { get; }` - The value as a bool (non-zero is true).
-- `public string AsString { get; }` - The string, or empty for any other kind.
-- `public Vec3 AsVec3 { get; }` - The vector, or zero for any other kind.
-- `public int AsEntity { get; }` - The entity handle, or 0.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AsBool` | `public bool AsBool { get; }` | The value as a bool (non-zero is true). |
+| `AsEntity` | `public int AsEntity { get; }` | The entity handle, or 0. |
+| `AsFloat` | `public float AsFloat { get; }` | The value as a float. |
+| `AsInt` | `public long AsInt { get; }` | The value as an integer (floats truncate; non-numeric kinds read 0). |
+| `AsString` | `public string AsString { get; }` | The string, or empty for any other kind. |
+| `AsVec3` | `public Vec3 AsVec3 { get; }` | The vector, or zero for any other kind. |
+| `Kind` | `public EventValueKind Kind { get; init; }` | What was stored. |
+
+<a id="eventvaluekind"></a>
 
 ### EventValueKind
 
 `public enum EventValueKind` - Payload value kinds.
 
-Values: `None = 0`, `Int = 1`, `Float = 2`, `Bool = 3`, `String = 4`, `Vec3 = 5`, `Entity = 6`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Bool` | `Bool = 3` |  |
+| `Entity` | `Entity = 6` |  |
+| `Float` | `Float = 2` |  |
+| `Int` | `Int = 1` |  |
+| `None` | `None = 0` |  |
+| `String` | `String = 4` |  |
+| `Vec3` | `Vec3 = 5` |  |
+
+<a id="faceshapes"></a>
 
 ### FaceShapes
 
 `public static class FaceShapes` - The 52 ARKit blend-shape names.
 
-- `public const string BrowDownLeft = "browDownLeft"`
-- `public const string BrowDownRight = "browDownRight"`
-- `public const string BrowInnerUp = "browInnerUp"`
-- `public const string BrowOuterUpLeft = "browOuterUpLeft"`
-- `public const string BrowOuterUpRight = "browOuterUpRight"`
-- `public const string CheekPuff = "cheekPuff"`
-- `public const string CheekSquintLeft = "cheekSquintLeft"`
-- `public const string CheekSquintRight = "cheekSquintRight"`
-- `public const string EyeBlinkLeft = "eyeBlinkLeft"`
-- `public const string EyeBlinkRight = "eyeBlinkRight"`
-- `public const string EyeLookDownLeft = "eyeLookDownLeft"`
-- `public const string EyeLookDownRight = "eyeLookDownRight"`
-- `public const string EyeLookInLeft = "eyeLookInLeft"`
-- `public const string EyeLookInRight = "eyeLookInRight"`
-- `public const string EyeLookOutLeft = "eyeLookOutLeft"`
-- `public const string EyeLookOutRight = "eyeLookOutRight"`
-- `public const string EyeLookUpLeft = "eyeLookUpLeft"`
-- `public const string EyeLookUpRight = "eyeLookUpRight"`
-- `public const string EyeSquintLeft = "eyeSquintLeft"`
-- `public const string EyeSquintRight = "eyeSquintRight"`
-- `public const string EyeWideLeft = "eyeWideLeft"`
-- `public const string EyeWideRight = "eyeWideRight"`
-- `public const string JawForward = "jawForward"`
-- `public const string JawLeft = "jawLeft"`
-- `public const string JawOpen = "jawOpen"`
-- `public const string JawRight = "jawRight"`
-- `public const string MouthClose = "mouthClose"`
-- `public const string MouthDimpleLeft = "mouthDimpleLeft"`
-- `public const string MouthDimpleRight = "mouthDimpleRight"`
-- `public const string MouthFrownLeft = "mouthFrownLeft"`
-- `public const string MouthFrownRight = "mouthFrownRight"`
-- `public const string MouthFunnel = "mouthFunnel"`
-- `public const string MouthLeft = "mouthLeft"`
-- `public const string MouthLowerDownLeft = "mouthLowerDownLeft"`
-- `public const string MouthLowerDownRight = "mouthLowerDownRight"`
-- `public const string MouthPressLeft = "mouthPressLeft"`
-- `public const string MouthPressRight = "mouthPressRight"`
-- `public const string MouthPucker = "mouthPucker"`
-- `public const string MouthRight = "mouthRight"`
-- `public const string MouthRollLower = "mouthRollLower"`
-- `public const string MouthRollUpper = "mouthRollUpper"`
-- `public const string MouthShrugLower = "mouthShrugLower"`
-- `public const string MouthShrugUpper = "mouthShrugUpper"`
-- `public const string MouthSmileLeft = "mouthSmileLeft"`
-- `public const string MouthSmileRight = "mouthSmileRight"`
-- `public const string MouthStretchLeft = "mouthStretchLeft"`
-- `public const string MouthStretchRight = "mouthStretchRight"`
-- `public const string MouthUpperUpLeft = "mouthUpperUpLeft"`
-- `public const string MouthUpperUpRight = "mouthUpperUpRight"`
-- `public const string NoseSneerLeft = "noseSneerLeft"`
-- `public const string NoseSneerRight = "noseSneerRight"`
-- `public const string TongueOut = "tongueOut"`
-- `public static readonly IReadOnlyList<string> All` - All 52, in ARKit's alphabetical order.
-- `public static IReadOnlyList<string> AllShapes { get; }` - Every ARKit shape (the same list as All).
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AllShapes` | `public static IReadOnlyList<string> AllShapes { get; }` | Every ARKit shape (the same list as All). |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `All` | `public static readonly IReadOnlyList<string> All` | All 52, in ARKit's alphabetical order. |
+| `BrowDownLeft` | `public const string BrowDownLeft = "browDownLeft"` |  |
+| `BrowDownRight` | `public const string BrowDownRight = "browDownRight"` |  |
+| `BrowInnerUp` | `public const string BrowInnerUp = "browInnerUp"` |  |
+| `BrowOuterUpLeft` | `public const string BrowOuterUpLeft = "browOuterUpLeft"` |  |
+| `BrowOuterUpRight` | `public const string BrowOuterUpRight = "browOuterUpRight"` |  |
+| `CheekPuff` | `public const string CheekPuff = "cheekPuff"` |  |
+| `CheekSquintLeft` | `public const string CheekSquintLeft = "cheekSquintLeft"` |  |
+| `CheekSquintRight` | `public const string CheekSquintRight = "cheekSquintRight"` |  |
+| `EyeBlinkLeft` | `public const string EyeBlinkLeft = "eyeBlinkLeft"` |  |
+| `EyeBlinkRight` | `public const string EyeBlinkRight = "eyeBlinkRight"` |  |
+| `EyeLookDownLeft` | `public const string EyeLookDownLeft = "eyeLookDownLeft"` |  |
+| `EyeLookDownRight` | `public const string EyeLookDownRight = "eyeLookDownRight"` |  |
+| `EyeLookInLeft` | `public const string EyeLookInLeft = "eyeLookInLeft"` |  |
+| `EyeLookInRight` | `public const string EyeLookInRight = "eyeLookInRight"` |  |
+| `EyeLookOutLeft` | `public const string EyeLookOutLeft = "eyeLookOutLeft"` |  |
+| `EyeLookOutRight` | `public const string EyeLookOutRight = "eyeLookOutRight"` |  |
+| `EyeLookUpLeft` | `public const string EyeLookUpLeft = "eyeLookUpLeft"` |  |
+| `EyeLookUpRight` | `public const string EyeLookUpRight = "eyeLookUpRight"` |  |
+| `EyeSquintLeft` | `public const string EyeSquintLeft = "eyeSquintLeft"` |  |
+| `EyeSquintRight` | `public const string EyeSquintRight = "eyeSquintRight"` |  |
+| `EyeWideLeft` | `public const string EyeWideLeft = "eyeWideLeft"` |  |
+| `EyeWideRight` | `public const string EyeWideRight = "eyeWideRight"` |  |
+| `JawForward` | `public const string JawForward = "jawForward"` |  |
+| `JawLeft` | `public const string JawLeft = "jawLeft"` |  |
+| `JawOpen` | `public const string JawOpen = "jawOpen"` |  |
+| `JawRight` | `public const string JawRight = "jawRight"` |  |
+| `MouthClose` | `public const string MouthClose = "mouthClose"` |  |
+| `MouthDimpleLeft` | `public const string MouthDimpleLeft = "mouthDimpleLeft"` |  |
+| `MouthDimpleRight` | `public const string MouthDimpleRight = "mouthDimpleRight"` |  |
+| `MouthFrownLeft` | `public const string MouthFrownLeft = "mouthFrownLeft"` |  |
+| `MouthFrownRight` | `public const string MouthFrownRight = "mouthFrownRight"` |  |
+| `MouthFunnel` | `public const string MouthFunnel = "mouthFunnel"` |  |
+| `MouthLeft` | `public const string MouthLeft = "mouthLeft"` |  |
+| `MouthLowerDownLeft` | `public const string MouthLowerDownLeft = "mouthLowerDownLeft"` |  |
+| `MouthLowerDownRight` | `public const string MouthLowerDownRight = "mouthLowerDownRight"` |  |
+| `MouthPressLeft` | `public const string MouthPressLeft = "mouthPressLeft"` |  |
+| `MouthPressRight` | `public const string MouthPressRight = "mouthPressRight"` |  |
+| `MouthPucker` | `public const string MouthPucker = "mouthPucker"` |  |
+| `MouthRight` | `public const string MouthRight = "mouthRight"` |  |
+| `MouthRollLower` | `public const string MouthRollLower = "mouthRollLower"` |  |
+| `MouthRollUpper` | `public const string MouthRollUpper = "mouthRollUpper"` |  |
+| `MouthShrugLower` | `public const string MouthShrugLower = "mouthShrugLower"` |  |
+| `MouthShrugUpper` | `public const string MouthShrugUpper = "mouthShrugUpper"` |  |
+| `MouthSmileLeft` | `public const string MouthSmileLeft = "mouthSmileLeft"` |  |
+| `MouthSmileRight` | `public const string MouthSmileRight = "mouthSmileRight"` |  |
+| `MouthStretchLeft` | `public const string MouthStretchLeft = "mouthStretchLeft"` |  |
+| `MouthStretchRight` | `public const string MouthStretchRight = "mouthStretchRight"` |  |
+| `MouthUpperUpLeft` | `public const string MouthUpperUpLeft = "mouthUpperUpLeft"` |  |
+| `MouthUpperUpRight` | `public const string MouthUpperUpRight = "mouthUpperUpRight"` |  |
+| `NoseSneerLeft` | `public const string NoseSneerLeft = "noseSneerLeft"` |  |
+| `NoseSneerRight` | `public const string NoseSneerRight = "noseSneerRight"` |  |
+| `TongueOut` | `public const string TongueOut = "tongueOut"` |  |
+
+<a id="fadecurve"></a>
 
 ### FadeCurve
 
 `public enum FadeCurve` - The shape of a fade, mirroring AVER_AUDIO_FADE_* in audio_abi.h.
 
-Values: `Linear = 0`, `EqualPower = 1`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `EqualPower` | `EqualPower = 1` |  |
+| `Linear` | `Linear = 0` |  |
+
+<a id="fogvolumeshapekind"></a>
 
 ### FogVolumeShapeKind
 
 `public enum FogVolumeShapeKind` - The fog volume shape numbers, the same as AVER_FW_FOGVOL_*.
 
-Values: `Ellipsoid = 0`, `Cone = 1`, `Cylinder = 2`, `Box = 3`, `World = 4`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Box` | `Box = 3` |  |
+| `Cone` | `Cone = 1` |  |
+| `Cylinder` | `Cylinder = 2` |  |
+| `Ellipsoid` | `Ellipsoid = 0` |  |
+| `World` | `World = 4` |  |
+
+<a id="frame"></a>
 
 ### Frame
 
 `public static class Frame` - Awaitable points in the frame.
 
-- `public static Task Next()` - Completes at the start of the next OnTick pass.
-- `public static Task NextPhysics()` - Completes at the start of the next OnPhysicsTick pass.
-- `public static Task Delay(float seconds)` - Completes after seconds of game time: scaled by the time scale and held while paused after a delay.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Delay` | `public static Task Delay(float seconds)` | Completes after seconds of game time: scaled by the time scale and held while paused after a delay. |
+| `Next` | `public static Task Next()` | Completes at the start of the next OnTick pass. |
+| `NextPhysics` | `public static Task NextPhysics()` | Completes at the start of the next OnPhysicsTick pass. |
+
+<a id="frameworkrebindprovider"></a>
 
 ### FrameworkRebindProvider
 
 `public sealed class FrameworkRebindProvider : IRebindProvider` - IRebindProvider over EnhancedInput: shows the actions a game lists and rebinds their keyboard and mouse slots.
 
-- `public FrameworkRebindProvider(IEnumerable<RebindRow> rows)` - Shows exactly these rows.
-- `public static FrameworkRebindProvider FromContext(InputMappingContext context)` - One row for every binding in context, in order.
-- `public IReadOnlyList<RebindRow> Rows { get; }` - Inherited documentation.
-- `public string BindingText(RebindRow row)` - Inherited documentation.
-- `public bool TryRebind(string action, int slot, int rawKey)` - Inherited documentation.
-- `public void ResetToDefaults()` - Inherited documentation.
-- `public void Save()` - Inherited documentation.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `FrameworkRebindProvider` | `public FrameworkRebindProvider(IEnumerable<RebindRow> rows)` | Shows exactly these rows. |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Rows` | `public IReadOnlyList<RebindRow> Rows { get; }` | Inherited documentation. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `BindingText` | `public string BindingText(RebindRow row)` | Inherited documentation. |
+| `FromContext` | `public static FrameworkRebindProvider FromContext(InputMappingContext context)` | One row for every binding in context, in order. |
+| `ResetToDefaults` | `public void ResetToDefaults()` | Inherited documentation. |
+| `Save` | `public void Save()` | Inherited documentation. |
+| `TryRebind` | `public bool TryRebind(string action, int slot, int rawKey)` | Inherited documentation. |
+
+<a id="frameworksettingsstore"></a>
 
 ### FrameworkSettingsStore
 
 `public sealed class FrameworkSettingsStore : ISettingsStore` - ISettingsStore over Settings: values are stored as floats under their setting key, flushed when the screen closes.
 
-- `public float Get(string key, float fallback)` - Inherited documentation.
-- `public void Set(string key, float value)` - Inherited documentation.
-- `public void Flush()` - Inherited documentation.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Flush` | `public void Flush()` | Inherited documentation. |
+| `Get` | `public float Get(string key, float fallback)` | Inherited documentation. |
+| `Set` | `public void Set(string key, float value)` | Inherited documentation. |
+
+<a id="game"></a>
 
 ### Game
 
 `public static class Game` - The running play session, reached statically from any script.
 
-- `public static PlayState State { get; }` - The world's play state — Editor, Playing or Paused.
-- `public static bool IsPlaying { get; }` - True while a session is actively ticking.
-- `public static bool IsPaused { get; }` - True while a session exists but is frozen.
-- `public static bool HasSession { get; }` - True while a session exists at all — Playing or Paused.
-- `public static bool SetPaused(bool paused)` - Freezes (true) or resumes (false) the play session's tick without tearing it down.
-- `public static float TimeScale { get; set; }` - Game time per real time, clamped to [0, 100]: scales OnTick and OnPhysicsTick's dt, each physics step, timers, animation, particles, AI and vehicles.
-- `public static bool Pause()` - Freezes the play session.
-- `public static bool Resume()` - Resumes a paused play session.
-- `public static void Quit()` - Requests that the host exit.
-- `public static void CancelQuit()` - Withdraws a quit request made by Quit, for a "really quit?" prompt whose answer was no.
-- `public static bool QuitRequested { get; }` - Whether a quit has been requested and not yet acted on.
-- `public static CursorScope FreeCursor()` - Frees the OS mouse cursor for as long as the returned scope is alive, then hands capture back to the host's ordinary policy.
-- `public static bool CursorFreeRequested { get; }` - Whether anything currently wants the cursor free -- see FreeCursor.
-- `public static Entity Mode { get; }` - The current GameMode's entity, or None in editor.
-- `public static Entity Instance { get; }` - The GameInstance entity, or None in editor.
-- `public static Entity LocalPlayerController { get; }` - Player 0's controller.
-- `public static Entity GetPlayerController(int playerIndex = 0)` - The controller for a 0-based player index, or None.
-- `public static Entity GetPlayerPawn(int playerIndex = 0)` - The pawn a given player currently possesses, or None.
-- `public static T? ModeAs<T>() where T : AverGameMode` - The current GameMode as T, or null.
-- `public static T? InstanceAs<T>() where T : AverGameInstance` - The GameInstance as T, or null.
-- `public static T? PlayerControllerAs<T>(int playerIndex = 0) where T : AverPlayerController` - A player's controller as T, or null.
-- `public static T? PlayerPawnAs<T>(int playerIndex = 0) where T : AverPawn` - A player's possessed pawn as T, or null.
-- `public static Entity Find(string name)` - The live entity named name (first match), or None.
-- `public static bool SaveGame(string path)` - Writes the whole world to path and returns whether it landed.
-- `public static bool LoadGame(string path)` - Replaces the whole world from path.
-- `public static T? FindActor<T>(string name) where T : AverActor` - The actor named name as T, or null.
-- `public static IEnumerable<Entity> AllActors()` - Every live actor in the world; plain scene entities excluded.
-- `public static IEnumerable<T> ActorsOf<T>() where T : AverActor` - Every live actor whose managed instance is a T.
-- `public static IEnumerable<Entity> ActorsOfClass(string className)` - Every live actor whose class is className or derives from it, matched by the declared class name.
-- `public static bool SpawnFluidVolume(Vec3 centreCm, Vec3 halfExtentCm, string name = "unnamed", float compliance = 1.0e-4f, float damping = 0.1f, int iterations = 5, float pressure = -1f)` - Requests a simulated fluid volume centred at centreCm (world-space centimetres) with the given half-extent, using the solver's OWN RAW knobs -- see FluidVolume.hpp's own FluidVolumeDesc comment for what each means and its unit.
-- `public static bool SpawnFluidVolumeMaterial(Vec3 centreCm, Vec3 halfExtentCm, string name = "unnamed", float compliance = 1.0e-4f, float damping = 0.1f, int iterations = 5, float pressure = -1f, float densityKgM3 = -1f, float viscosityPaS = -1f, string materialPreset = "")` - Same request as SpawnFluidVolume, plus the MATERIAL layer: real density (kg/m^3) and viscosity (Pa*s) instead of typing compliance/damping directly -- see fluids::FluidMaterial's own comment (FluidVolume.hpp) for the honest split between the two (density real, viscosity a calibrated fit onto `damping`, some things refused outright).
-- `public static IEnumerable<Entity> WithTag(uint mask)` - Every live entity carrying all of the tag bits in mask.
-- `public static void ChangeLevel(string levelPath)` - Replaces the level at the end of this frame: every actor ends with Travel except the GameInstance and Persistent ones, the new level loads and its actors begin, then a GameMode, controller and pawn begin as at the start of play.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `CursorFreeRequested` | `public static bool CursorFreeRequested { get; }` | Whether anything currently wants the cursor free -- see FreeCursor. |
+| `HasSession` | `public static bool HasSession { get; }` | True while a session exists at all — Playing or Paused. |
+| `Instance` | `public static Entity Instance { get; }` | The GameInstance entity, or None in editor. |
+| `IsPaused` | `public static bool IsPaused { get; }` | True while a session exists but is frozen. |
+| `IsPlaying` | `public static bool IsPlaying { get; }` | True while a session is actively ticking. |
+| `LocalPlayerController` | `public static Entity LocalPlayerController { get; }` | Player 0's controller. |
+| `Mode` | `public static Entity Mode { get; }` | The current GameMode's entity, or None in editor. |
+| `QuitRequested` | `public static bool QuitRequested { get; }` | Whether a quit has been requested and not yet acted on. |
+| `State` | `public static PlayState State { get; }` | The world's play state — Editor, Playing or Paused. |
+| `TimeScale` | `public static float TimeScale { get; set; }` | Game time per real time, clamped to [0, 100]: scales OnTick and OnPhysicsTick's dt, each physics step, timers, animation, particles, AI and vehicles. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ActorsOf` | `public static IEnumerable<T> ActorsOf<T>() where T : AverActor` | Every live actor whose managed instance is a T. |
+| `ActorsOfClass` | `public static IEnumerable<Entity> ActorsOfClass(string className)` | Every live actor whose class is className or derives from it, matched by the declared class name. |
+| `AllActors` | `public static IEnumerable<Entity> AllActors()` | Every live actor in the world; plain scene entities excluded. |
+| `CancelQuit` | `public static void CancelQuit()` | Withdraws a quit request made by Quit, for a "really quit?" prompt whose answer was no. |
+| `ChangeLevel` | `public static void ChangeLevel(string levelPath)` | Replaces the level at the end of this frame: every actor ends with Travel except the GameInstance and Persistent ones, the new level loads and its actors begin, then a GameMode, controller and pawn begin as at the start of play. |
+| `Find` | `public static Entity Find(string name)` | The live entity named name (first match), or None. |
+| `FindActor` | `public static T? FindActor<T>(string name) where T : AverActor` | The actor named name as T, or null. |
+| `FreeCursor` | `public static CursorScope FreeCursor()` | Frees the OS mouse cursor for as long as the returned scope is alive, then hands capture back to the host's ordinary policy. |
+| `GetPlayerController` | `public static Entity GetPlayerController(int playerIndex = 0)` | The controller for a 0-based player index, or None. |
+| `GetPlayerPawn` | `public static Entity GetPlayerPawn(int playerIndex = 0)` | The pawn a given player currently possesses, or None. |
+| `InstanceAs` | `public static T? InstanceAs<T>() where T : AverGameInstance` | The GameInstance as T, or null. |
+| `LoadGame` | `public static bool LoadGame(string path)` | Replaces the whole world from path. |
+| `ModeAs` | `public static T? ModeAs<T>() where T : AverGameMode` | The current GameMode as T, or null. |
+| `Pause` | `public static bool Pause()` | Freezes the play session. |
+| `PlayerControllerAs` | `public static T? PlayerControllerAs<T>(int playerIndex = 0) where T : AverPlayerController` | A player's controller as T, or null. |
+| `PlayerPawnAs` | `public static T? PlayerPawnAs<T>(int playerIndex = 0) where T : AverPawn` | A player's possessed pawn as T, or null. |
+| `Quit` | `public static void Quit()` | Requests that the host exit. |
+| `Resume` | `public static bool Resume()` | Resumes a paused play session. |
+| `SaveGame` | `public static bool SaveGame(string path)` | Writes the whole world to path and returns whether it landed. |
+| `SetPaused` | `public static bool SetPaused(bool paused)` | Freezes (true) or resumes (false) the play session's tick without tearing it down. |
+| `SpawnFluidVolume` | `public static bool SpawnFluidVolume(Vec3 centreCm, Vec3 halfExtentCm, string name = "unnamed", float compliance = 1.0e-4f, float damping = 0.1f, int iterations = 5, float pressure = -1f)` | Requests a simulated fluid volume centred at centreCm (world-space centimetres) with the given half-extent, using the solver's OWN RAW knobs -- see FluidVolume.hpp's own FluidVolumeDesc comment for what each means and its unit. |
+| `SpawnFluidVolumeMaterial` | `public static bool SpawnFluidVolumeMaterial(Vec3 centreCm, Vec3 halfExtentCm, string name = "unnamed", float compliance = 1.0e-4f, float damping = 0.1f, int iterations = 5, float pressure = -1f, float densityKgM3 = -1f, float viscosityPaS = -1f, string materialPreset = "")` | Same request as SpawnFluidVolume, plus the MATERIAL layer: real density (kg/m^3) and viscosity (Pa*s) instead of typing compliance/damping directly -- see fluids::FluidMaterial's own comment (FluidVolume.hpp) for the honest split between the two (density real, viscosity a calibrated fit onto `damping`, some things refused outright). |
+| `WithTag` | `public static IEnumerable<Entity> WithTag(uint mask)` | Every live entity carrying all of the tag bits in mask. |
+
+<a id="game-cursorscope"></a>
 
 ### Game.CursorScope
 
 `public readonly struct CursorScope : System.IDisposable` - The lifetime of one "let the player use the mouse" request.
 
-- `public CursorScope()` - Takes the request.
-- `public void Dispose()` - Releases this request; capture returns to the host's ordinary policy once no request is left outstanding.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `CursorScope` | `public CursorScope()` | Takes the request. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Dispose` | `public void Dispose()` | Releases this request; capture returns to the host's ordinary policy once no request is left outstanding. |
+
+<a id="gamepadaxis"></a>
 
 ### GamepadAxis
 
 `public enum GamepadAxis` - Gamepad axes.
 
-Values: `LeftX = 0`, `LeftY`, `RightX`, `RightY`, `LeftTrigger`, `RightTrigger`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `LeftTrigger` | `LeftTrigger` |  |
+| `LeftX` | `LeftX = 0` |  |
+| `LeftY` | `LeftY` |  |
+| `RightTrigger` | `RightTrigger` |  |
+| `RightX` | `RightX` |  |
+| `RightY` | `RightY` |  |
+
+<a id="gamepadbutton"></a>
 
 ### GamepadButton
 
 `public enum GamepadButton` - Gamepad buttons.
 
-Values: `DPadUp = 0`, `DPadDown`, `DPadLeft`, `DPadRight`, `Start`, `Back`, `LeftThumb`, `RightThumb`, `LeftShoulder`, `RightShoulder`, `A`, `B`, `X`, `Y`, `Guide`, `Misc1`, `Paddle1`, `Paddle2`, `Paddle3`, `Paddle4`, `Touchpad`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `A` | `A` |  |
+| `B` | `B` |  |
+| `Back` | `Back` |  |
+| `DPadDown` | `DPadDown` |  |
+| `DPadLeft` | `DPadLeft` |  |
+| `DPadRight` | `DPadRight` |  |
+| `DPadUp` | `DPadUp = 0` |  |
+| `Guide` | `Guide` |  |
+| `LeftShoulder` | `LeftShoulder` |  |
+| `LeftThumb` | `LeftThumb` |  |
+| `Misc1` | `Misc1` |  |
+| `Paddle1` | `Paddle1` |  |
+| `Paddle2` | `Paddle2` |  |
+| `Paddle3` | `Paddle3` |  |
+| `Paddle4` | `Paddle4` |  |
+| `RightShoulder` | `RightShoulder` |  |
+| `RightThumb` | `RightThumb` |  |
+| `Start` | `Start` |  |
+| `Touchpad` | `Touchpad` |  |
+| `X` | `X` |  |
+| `Y` | `Y` |  |
+
+<a id="gamepads"></a>
 
 ### Gamepads
 
 `public static class Gamepads` - Local gamepads: up to MaxPads, numbered from 0.
 
-- `public const int MaxPads = 4` - The most pads the engine reads.
-- `public static bool IsConnected(int pad)` - Whether pad pad is plugged in.
-- `public static string Name(int pad)` - The pad's name, "" when it is not connected.
-- `public static void Rumble(int pad, float weak, float strong, float seconds = 0f)` - Rumbles a pad: the weak (high-frequency) and strong (low-frequency) motors in 0..1, for seconds (0 or less: until stopped).
-- `public static void StopRumble(int pad)` - Stops a pad's rumble.
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `MaxPads` | `public const int MaxPads = 4` | The most pads the engine reads. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `IsConnected` | `public static bool IsConnected(int pad)` | Whether pad pad is plugged in. |
+| `Name` | `public static string Name(int pad)` | The pad's name, "" when it is not connected. |
+| `Rumble` | `public static void Rumble(int pad, float weak, float strong, float seconds = 0f)` | Rumbles a pad: the weak (high-frequency) and strong (low-frequency) motors in 0..1, for seconds (0 or less: until stopped). |
+| `StopRumble` | `public static void StopRumble(int pad)` | Stops a pad's rumble. |
+
+<a id="gameplayabilities"></a>
 
 ### GameplayAbilities
 
 `public static class GameplayAbilities` - The ability system's host entry points.
 
-- `public static IGasHost Host { get; set; }` - The engine services the system runs on.
-- `public static IGasReplicationSink? Replication { get; set; }` - The replication sink; null (the default) means nothing is networked.
-- `public static IGasClientRequests? ClientRequests { get; set; }` - Receives activation requests from non-authoritative systems; null means they fail.
-- `public static void Startup()` - Installs the managed-state provider so ability systems ride in saves.
-- `public static void SetContentRoot(string dir)` - Remembers the project content folder that BeginSession scans for *.ocgas files.
-- `public static void BeginSession()` - Starts a Play session: drops every system (their effect and cooldown state belongs to the ended session), forgets the definitions, reloads them from the content root and re-registers code-defined ones.
-- `public static void RegisterAssembly(Assembly asm)` - Registers an assembly's abilities ([AverAbility]), class defaults ([AverAbilitySystem]) and [AverGameplayDefs] definitions.
-- `public static void ActorBeginPlay(int entity)` - An actor began play: gives it its class defaults, unless it already has a system (created in code, or restored from a save).
-- `public static void EntityGone(int entity)` - The entity is going away: its running abilities end and its system is dropped without notifications.
-- `public static void Update()` - Once per frame at tick group 0: runs effect expiry, periodic executions and ability auto-ends that fell due, and drops systems whose entity no longer exists.
-- `public static void Shutdown()` - Script unload: drops every user callback, behaviour instance and remembered assembly so the load context can unload.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ClientRequests` | `public static IGasClientRequests? ClientRequests { get; set; }` | Receives activation requests from non-authoritative systems; null means they fail. |
+| `Host` | `public static IGasHost Host { get; set; }` | The engine services the system runs on. |
+| `Replication` | `public static IGasReplicationSink? Replication { get; set; }` | The replication sink; null (the default) means nothing is networked. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ActorBeginPlay` | `public static void ActorBeginPlay(int entity)` | An actor began play: gives it its class defaults, unless it already has a system (created in code, or restored from a save). |
+| `BeginSession` | `public static void BeginSession()` | Starts a Play session: drops every system (their effect and cooldown state belongs to the ended session), forgets the definitions, reloads them from the content root and re-registers code-defined ones. |
+| `EntityGone` | `public static void EntityGone(int entity)` | The entity is going away: its running abilities end and its system is dropped without notifications. |
+| `RegisterAssembly` | `public static void RegisterAssembly(Assembly asm)` | Registers an assembly's abilities ([AverAbility]), class defaults ([AverAbilitySystem]) and [AverGameplayDefs] definitions. |
+| `SetContentRoot` | `public static void SetContentRoot(string dir)` | Remembers the project content folder that BeginSession scans for *.ocgas files. |
+| `Shutdown` | `public static void Shutdown()` | Script unload: drops every user callback, behaviour instance and remembered assembly so the load context can unload. |
+| `Startup` | `public static void Startup()` | Installs the managed-state provider so ability systems ride in saves. |
+| `Update` | `public static void Update()` | Once per frame at tick group 0: runs effect expiry, periodic executions and ability auto-ends that fell due, and drops systems whose entity no longer exists. |
+
+<a id="gameplayability"></a>
 
 ### GameplayAbility
 
 `public abstract class GameplayAbility` - Base class for a C#-authored ability.
 
-- `public AbilitySystem Owner { get; }` - The system this ability is granted to.
-- `public AbilityDef Def { get; }` - The definition.
-- `public AbilityHandle Handle { get; }` - This grant's handle.
-- `public int Level { get; }` - The granted level (stored and exposed; scales nothing until curves exist).
-- `public Entity Target { get; }` - The target of the current (or most recent) activation.
-- `public virtual void OnGranted()` - The ability was granted.
-- `public virtual void OnRevoked()` - The ability was revoked (after it has been ended if it was running).
-- `public virtual bool CanActivate()` - A last say before activation; return false to refuse with BehaviourRefused.
-- `public virtual void OnActivate()` - The ability started.
-- `public virtual void OnEnd(bool cancelled)` - The ability ended; cancelled is true when something else stopped it.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Def` | `public AbilityDef Def { get; }` | The definition. |
+| `Handle` | `public AbilityHandle Handle { get; }` | This grant's handle. |
+| `Level` | `public int Level { get; }` | The granted level (stored and exposed; scales nothing until curves exist). |
+| `Owner` | `public AbilitySystem Owner { get; }` | The system this ability is granted to. |
+| `Target` | `public Entity Target { get; }` | The target of the current (or most recent) activation. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `CanActivate` | `public virtual bool CanActivate()` | A last say before activation; return false to refuse with BehaviourRefused. |
+| `OnActivate` | `public virtual void OnActivate()` | The ability started. |
+| `OnEnd` | `public virtual void OnEnd(bool cancelled)` | The ability ended; cancelled is true when something else stopped it. |
+| `OnGranted` | `public virtual void OnGranted()` | The ability was granted. |
+| `OnRevoked` | `public virtual void OnRevoked()` | The ability was revoked (after it has been ended if it was running). |
+
+<a id="gameplaydefs"></a>
 
 ### GameplayDefs
 
 `public static class GameplayDefs` - The registry of attribute sets, effects, abilities and class defaults.
 
-- `public static EffectDef? FindEffect(string name)` - The registered effect called name, or null.
-- `public static AbilityDef? FindAbility(string name)` - The registered ability called name, or null.
-- `public static AttributeSetDef? FindAttributeSet(string name)` - The registered attribute set called name, or null.
-- `public static void Register(EffectDef def)` - Registers an effect.
-- `public static void Register(AbilityDef def)` - Registers an ability.
-- `public static void Register(AttributeSetDef def)` - Registers an attribute set.
-- `public static void Clear()` - Forgets every definition (ids restart at 1).
-- `public static EffectBuilder Effect(string name)` - Starts a fluent effect definition: GameplayDefs.Effect("Effect.Heal").Instant().Modify("Health", ModOp.Add, 25f).Register().
-- `public static AbilityBuilder Ability(string name)` - Starts a fluent ability definition.
-- `public static AttributeSetBuilder AttributeSet(string name)` - Starts a fluent attribute set definition.
-- `public static bool LoadText(string text, string sourceName, out string error)` - Loads one .ocgas text.
-- `public static bool LoadTexts(IEnumerable<(string Name, string Text)> files, out string error)` - Loads several .ocgas texts as one set, so references may point forward across files.
-- `public static bool LoadDirectory(string contentRoot, out string error)` - Loads every *.ocgas under contentRoot (recursive, files sorted ordinally) as one set.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Ability` | `public static AbilityBuilder Ability(string name)` | Starts a fluent ability definition. |
+| `AttributeSet` | `public static AttributeSetBuilder AttributeSet(string name)` | Starts a fluent attribute set definition. |
+| `Clear` | `public static void Clear()` | Forgets every definition (ids restart at 1). |
+| `Effect` | `public static EffectBuilder Effect(string name)` | Starts a fluent effect definition: GameplayDefs.Effect("Effect.Heal").Instant().Modify("Health", ModOp.Add, 25f).Register(). |
+| `FindAbility` | `public static AbilityDef? FindAbility(string name)` | The registered ability called name, or null. |
+| `FindAttributeSet` | `public static AttributeSetDef? FindAttributeSet(string name)` | The registered attribute set called name, or null. |
+| `FindEffect` | `public static EffectDef? FindEffect(string name)` | The registered effect called name, or null. |
+| `LoadDirectory` | `public static bool LoadDirectory(string contentRoot, out string error)` | Loads every *.ocgas under contentRoot (recursive, files sorted ordinally) as one set. |
+| `LoadText` | `public static bool LoadText(string text, string sourceName, out string error)` | Loads one .ocgas text. |
+| `LoadTexts` | `public static bool LoadTexts(IEnumerable<(string Name, string Text)> files, out string error)` | Loads several .ocgas texts as one set, so references may point forward across files. |
+| `Register` | `public static void Register(AbilityDef def)` | Registers an ability. |
+| `Register` | `public static void Register(AttributeSetDef def)` | Registers an attribute set. |
+| `Register` | `public static void Register(EffectDef def)` | Registers an effect. |
+
+<a id="gameplaytag"></a>
 
 ### GameplayTag
 
 `public readonly struct GameplayTag : IEquatable<GameplayTag>` - A hierarchical gameplay tag such as State.Stunned.Hard.
 
-- `public int Id { get; }` - The interned id; 0 is none.
-- `public bool IsValid { get; }` - True for a real tag.
-- `public static GameplayTag None { get; }` - The invalid tag.
-- `public static GameplayTag Request(string name)` - Interns name (and its ancestors).
-- `public static bool TryFind(string name, out GameplayTag tag)` - Looks a tag up without interning it.
-- `public static GameplayTag FromId(int id)` - The tag with this id, or None when no such id is registered.
-- `public string Name { get; }` - The full dotted name; empty for none.
-- `public GameplayTag Parent { get; }` - The tag one segment up, or none for a root tag.
-- `public int Depth { get; }` - Number of segments (1 for a root tag, 0 for none).
-- `public bool Matches(GameplayTag other)` - True when this tag equals other or descends from it.
-- `public bool MatchesExact(GameplayTag other)` - True only for the same tag.
-- `public static IReadOnlyList<GameplayTag> All { get; }` - Every registered tag in id order.
-- `public bool Equals(GameplayTag other)` - Inherited documentation.
-- `public override bool Equals(object? obj)` - Inherited documentation.
-- `public override int GetHashCode()` - Inherited documentation.
-- `public static bool operator ==(GameplayTag a, GameplayTag b)` - Equality.
-- `public static bool operator !=(GameplayTag a, GameplayTag b)` - Inequality.
-- `public override string ToString()` - Inherited documentation.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `All` | `public static IReadOnlyList<GameplayTag> All { get; }` | Every registered tag in id order. |
+| `Depth` | `public int Depth { get; }` | Number of segments (1 for a root tag, 0 for none). |
+| `Id` | `public int Id { get; }` | The interned id; 0 is none. |
+| `IsValid` | `public bool IsValid { get; }` | True for a real tag. |
+| `Name` | `public string Name { get; }` | The full dotted name; empty for none. |
+| `None` | `public static GameplayTag None { get; }` | The invalid tag. |
+| `Parent` | `public GameplayTag Parent { get; }` | The tag one segment up, or none for a root tag. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Equals` | `public bool Equals(GameplayTag other)` | Inherited documentation. |
+| `Equals` | `public override bool Equals(object? obj)` | Inherited documentation. |
+| `FromId` | `public static GameplayTag FromId(int id)` | The tag with this id, or None when no such id is registered. |
+| `GetHashCode` | `public override int GetHashCode()` | Inherited documentation. |
+| `Matches` | `public bool Matches(GameplayTag other)` | True when this tag equals other or descends from it. |
+| `MatchesExact` | `public bool MatchesExact(GameplayTag other)` | True only for the same tag. |
+| `operator !=` | `public static bool operator !=(GameplayTag a, GameplayTag b)` | Inequality. |
+| `operator ==` | `public static bool operator ==(GameplayTag a, GameplayTag b)` | Equality. |
+| `Request` | `public static GameplayTag Request(string name)` | Interns name (and its ancestors). |
+| `ToString` | `public override string ToString()` | Inherited documentation. |
+| `TryFind` | `public static bool TryFind(string name, out GameplayTag tag)` | Looks a tag up without interning it. |
+
+<a id="gameplaytagcontainer"></a>
 
 ### GameplayTagContainer
 
 `public sealed class GameplayTagContainer : IEnumerable<GameplayTag>` - A ref-counted set of tags.
 
-- `public GameplayTagContainer()` - An empty container.
-- `public GameplayTagContainer(params GameplayTag[] tags)` - A container holding each tag once.
-- `public int Add(GameplayTag t, int count = 1)` - Adds count references to the tag.
-- `public int Remove(GameplayTag t, int count = 1)` - Removes up to count references (the count floors at 0).
-- `public int CountOf(GameplayTag t)` - Exact references held for this tag (descendants are not counted).
-- `public bool Has(GameplayTag t)` - True when any held tag matches t (equal or descendant).
-- `public bool HasExact(GameplayTag t)` - True only when this exact tag is held.
-- `public bool HasAny(GameplayTagContainer o)` - True when at least one tag of o is satisfied.
-- `public bool HasAll(GameplayTagContainer o)` - True when every tag of o is satisfied.
-- `public bool HasNone(GameplayTagContainer o)` - True when no tag of o is satisfied.
-- `public int Count { get; }` - Number of distinct exact tags held.
-- `public void Clear()` - Drops every tag.
-- `public IEnumerator<GameplayTag> GetEnumerator()` - Exact tags in id order.
-- `public override string ToString()` - Inherited documentation.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `GameplayTagContainer` | `public GameplayTagContainer()` | An empty container. |
+| `GameplayTagContainer` | `public GameplayTagContainer(params GameplayTag[] tags)` | A container holding each tag once. |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Count` | `public int Count { get; }` | Number of distinct exact tags held. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Add` | `public int Add(GameplayTag t, int count = 1)` | Adds count references to the tag. |
+| `Clear` | `public void Clear()` | Drops every tag. |
+| `CountOf` | `public int CountOf(GameplayTag t)` | Exact references held for this tag (descendants are not counted). |
+| `GetEnumerator` | `public IEnumerator<GameplayTag> GetEnumerator()` | Exact tags in id order. |
+| `Has` | `public bool Has(GameplayTag t)` | True when any held tag matches t (equal or descendant). |
+| `HasAll` | `public bool HasAll(GameplayTagContainer o)` | True when every tag of o is satisfied. |
+| `HasAny` | `public bool HasAny(GameplayTagContainer o)` | True when at least one tag of o is satisfied. |
+| `HasExact` | `public bool HasExact(GameplayTag t)` | True only when this exact tag is held. |
+| `HasNone` | `public bool HasNone(GameplayTagContainer o)` | True when no tag of o is satisfied. |
+| `Remove` | `public int Remove(GameplayTag t, int count = 1)` | Removes up to count references (the count floors at 0). |
+| `ToString` | `public override string ToString()` | Inherited documentation. |
+
+<a id="groundsample"></a>
 
 ### GroundSample
 
 `public readonly record struct GroundSample(bool Found, float Z, Vec3 Normal, int DominantLayer, string Surface, int SurfaceId, float Friction, float Restitution)` - What the landscape is at one point: height, slope, the dominant paint layer and its physical surface.
 
+<a id="groups"></a>
+
 ### Groups
 
 `public static class Groups` - Named groups of entities, actor or not, by case-sensitive name.
 
-- `public static bool Add(Entity e, string group)` - Puts the entity in the group.
-- `public static bool Remove(Entity e, string group)` - Takes the entity out of the group.
-- `public static bool Has(Entity e, string group)` - Whether the entity is in the group.
-- `public static Entity[] Members(string group)` - The group's members in scene-tree order (a parent before its children, siblings in the order added).
-- `public static string[] Of(Entity e)` - The groups the entity is in, in the order it joined them.
-- `public static int Call<T>(string group, Action<T> action) where T : AverActor` - Calls action on every actor of type T in the group, in tree order.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Add` | `public static bool Add(Entity e, string group)` | Puts the entity in the group. |
+| `Call` | `public static int Call<T>(string group, Action<T> action) where T : AverActor` | Calls action on every actor of type T in the group, in tree order. |
+| `Has` | `public static bool Has(Entity e, string group)` | Whether the entity is in the group. |
+| `Members` | `public static Entity[] Members(string group)` | The group's members in scene-tree order (a parent before its children, siblings in the order added). |
+| `Of` | `public static string[] Of(Entity e)` | The groups the entity is in, in the order it joined them. |
+| `Remove` | `public static bool Remove(Entity e, string group)` | Takes the entity out of the group. |
+
+<a id="hair"></a>
 
 ### Hair
 
 `public static class Hair` - Hair at world level.
 
-- `public static bool SetWind(Vec3 velocityCmPerS, float gustCmPerS = 0f, float gustHz = 0.3f, float turbulence = 0f)` - The world wind the hair feels: the soft bodies' wind (SetWind), so cloth, ropes and hair move together.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `SetWind` | `public static bool SetWind(Vec3 velocityCmPerS, float gustCmPerS = 0f, float gustHz = 0.3f, float turbulence = 0f)` | The world wind the hair feels: the soft bodies' wind (SetWind), so cloth, ropes and hair move together. |
+
+<a id="haircollidershape"></a>
 
 ### HairColliderShape
 
 `public enum HairColliderShape` - The shape of a hair collider (pinned to AVER_FW_HAIR_SHAPE_*, the .ochair PROXY shapes).
 
-Values: `Sphere = 0`, `Capsule = 1`, `Box = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Box` | `Box = 2` |  |
+| `Capsule` | `Capsule = 1` |  |
+| `Sphere` | `Sphere = 0` |  |
+
+<a id="hairstate"></a>
 
 ### HairState
 
 `public readonly record struct HairState(bool Simulating, bool Frozen, bool Inert, bool Building, bool Built, int Lod, int RenderStrands, int SimStrands, int Colliders)` - What an entity's hair is doing: simulating, frozen by distance, inert (the groom did not build, or there is no compute device), still building, the strand level it is drawn at (0 every strand ..
 
+<a id="hitevent"></a>
+
 ### HitEvent
 
 `public readonly record struct HitEvent(Entity Target, string? Bone, Vec3 Impulse, Vec3 Point = default, float Damage = 0f, float Radius = 0f)` - Something hit an entity.
+
+<a id="igasclientrequests"></a>
 
 ### IGasClientRequests
 
 `public interface IGasClientRequests` - Receives activation requests made on a non-authoritative system, in place of failing them.
 
-- `void RequestActivate(AbilitySystem system, AbilityHandle handle, Entity target)` - A client asked to activate an ability.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `RequestActivate` | `void RequestActivate(AbilitySystem system, AbilityHandle handle, Entity target)` | A client asked to activate an ability. |
+
+<a id="igashost"></a>
 
 ### IGasHost
 
 `public interface IGasHost` - What the ability system needs from the engine: the game clock, entity liveness, class names and the event bus.
 
-- `double Now { get; }` - Game time in seconds (pausable and dilatable in the engine).
-- `bool IsAlive(int entity)` - True while the entity exists.
-- `string? ClassNameOf(int entity)` - The actor class name of the entity, or null for a plain entity.
-- `int ListenerCount(string eventName)` - Number of subscribers to an event name.
-- `void Raise(string eventName, int sender, int target, params object[] args)` - Delivers an event to its subscribers now.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Now` | `double Now { get; }` | Game time in seconds (pausable and dilatable in the engine). |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ClassNameOf` | `string? ClassNameOf(int entity)` | The actor class name of the entity, or null for a plain entity. |
+| `IsAlive` | `bool IsAlive(int entity)` | True while the entity exists. |
+| `ListenerCount` | `int ListenerCount(string eventName)` | Number of subscribers to an event name. |
+| `Raise` | `void Raise(string eventName, int sender, int target, params object[] args)` | Delivers an event to its subscribers now. |
+
+<a id="igasreplicationsink"></a>
 
 ### IGasReplicationSink
 
 `public interface IGasReplicationSink` - Receives every authoritative change as plain data, so a networking layer can replicate it.
 
-- `void AttributeBase(AbilitySystem system, AttributeRef attribute, float newBase)` - An attribute's Base changed.
-- `void EffectAdded(AbilitySystem system, ActiveEffectInfo info, float[] magnitudes)` - An effect instance was added; magnitudes are its resolved modifier magnitudes.
-- `void EffectChanged(AbilitySystem system, ActiveEffectInfo info, float[] magnitudes)` - An effect instance changed (stacks or expiry).
-- `void EffectRemoved(AbilitySystem system, ActiveEffectInfo info, float[] magnitudes)` - An effect instance was removed.
-- `void LooseTag(AbilitySystem system, GameplayTag tag, int count)` - The loose reference count of a tag changed.
-- `void AbilityGranted(AbilitySystem system, AbilityHandle handle, string name, int level)` - An ability was granted.
-- `void AbilityRevoked(AbilitySystem system, AbilityHandle handle, string name, int level)` - An ability was revoked.
-- `void AbilityActivated(AbilitySystem system, AbilityHandle handle)` - An ability started.
-- `void AbilityEnded(AbilitySystem system, AbilityHandle handle, bool cancelled)` - An ability ended.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AbilityActivated` | `void AbilityActivated(AbilitySystem system, AbilityHandle handle)` | An ability started. |
+| `AbilityEnded` | `void AbilityEnded(AbilitySystem system, AbilityHandle handle, bool cancelled)` | An ability ended. |
+| `AbilityGranted` | `void AbilityGranted(AbilitySystem system, AbilityHandle handle, string name, int level)` | An ability was granted. |
+| `AbilityRevoked` | `void AbilityRevoked(AbilitySystem system, AbilityHandle handle, string name, int level)` | An ability was revoked. |
+| `AttributeBase` | `void AttributeBase(AbilitySystem system, AttributeRef attribute, float newBase)` | An attribute's Base changed. |
+| `EffectAdded` | `void EffectAdded(AbilitySystem system, ActiveEffectInfo info, float[] magnitudes)` | An effect instance was added; magnitudes are its resolved modifier magnitudes. |
+| `EffectChanged` | `void EffectChanged(AbilitySystem system, ActiveEffectInfo info, float[] magnitudes)` | An effect instance changed (stacks or expiry). |
+| `EffectRemoved` | `void EffectRemoved(AbilitySystem system, ActiveEffectInfo info, float[] magnitudes)` | An effect instance was removed. |
+| `LooseTag` | `void LooseTag(AbilitySystem system, GameplayTag tag, int count)` | The loose reference count of a tag changed. |
+
+<a id="ikspace"></a>
 
 ### IkSpace
 
 `public enum IkSpace` - The space an IK goal position is given in.
 
-Values: `World = 0`, `Model = 1`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Model` | `Model = 1` |  |
+| `World` | `World = 0` |  |
+
+<a id="image"></a>
 
 ### Image
 
 `public sealed class Image` - A width x height grid of pixels in one ImageFormat, held in managed memory.
 
-- `public const int MaxSide = 8192` - The largest side an image may have (the runtime texture limit, so an image always fits one).
-- `public int Width { get; }` - Width in pixels.
-- `public int Height { get; }` - Height in pixels.
-- `public ImageFormat Format { get; }` - The pixel format.
-- `public static int BytesPerPixel(ImageFormat format)` - Bytes in one pixel of format.
-- `public int PixelSize { get; }` - The bytes in one pixel of this image's format.
-- `public Image(int width, int height, ImageFormat format)` - A zero-filled image (every channel 0: transparent black for the formats that have alpha).
-- `public static Image FromData(int width, int height, ImageFormat format, byte[] data)` - An image over a copy of data (exactly width x height x BytesPerPixel bytes).
-- `public static Image? Load(string path)` - The engine's decoder reads path (PNG, JPEG, TGA, BMP, GIF, PSD, WebP, SVG, OpenEXR clamped to 0..1) into an RGBA8 image; null when the file is missing, unreadable or past the size limit.
-- `public Image Clone()` - A copy of this image.
-- `public byte[] GetData()` - A copy of the pixel bytes, rows top first, tightly packed.
-- `public void SetData(byte[] data)` - Replaces the pixel bytes (same size and format as the image).
-- `public Span<byte> AsSpan()` - The pixel bytes themselves (no copy): a view the caller may read and write.
-- `public bool Contains(int x, int y)` - Whether (x, y) is inside the image.
-- `public ImageColor GetPixel(int x, int y)` - The pixel at (x, y).
-- `public void SetPixel(int x, int y, ImageColor color)` - Writes the pixel at (x, y), converting the colour to the image's format (byte formats clamp to 0..1; L8 stores luminance).
-- `public void Fill(ImageColor color)` - Sets every pixel.
-- `public void FillRect(int x, int y, int width, int height, ImageColor color)` - Sets the pixels of a rectangle; the part outside the image is ignored.
-- `public void Blit(Image source, int srcX, int srcY, int srcWidth, int srcHeight, int dstX, int dstY)` - Copies the rectangle (srcX, srcY, srcWidth, srcHeight) of source to (dstX, dstY) of this image, converting each pixel to this format.
-- `public void Blit(Image source, int dstX, int dstY)` - Copies the whole of source to (dstX, dstY).
-- `public Image? GetRegion(int x, int y, int width, int height)` - A new image of the rectangle (clipped to the image) in the same format; null when the clipped rectangle is empty.
-- `public void Convert(ImageFormat format)` - Turns this image into format in place.
-- `public Image ConvertedTo(ImageFormat format)` - A copy of this image in format.
-- `public void Resize(int width, int height, ImageInterpolation interpolation = ImageInterpolation.Bilinear)` - Resamples this image to width x height in place.
-- `public void FlipX()` - Mirrors the image left to right.
-- `public void FlipY()` - Mirrors the image top to bottom.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Image` | `public Image(int width, int height, ImageFormat format)` | A zero-filled image (every channel 0: transparent black for the formats that have alpha). |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Format` | `public ImageFormat Format { get; }` | The pixel format. |
+| `Height` | `public int Height { get; }` | Height in pixels. |
+| `PixelSize` | `public int PixelSize { get; }` | The bytes in one pixel of this image's format. |
+| `Width` | `public int Width { get; }` | Width in pixels. |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `MaxSide` | `public const int MaxSide = 8192` | The largest side an image may have (the runtime texture limit, so an image always fits one). |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AsSpan` | `public Span<byte> AsSpan()` | The pixel bytes themselves (no copy): a view the caller may read and write. |
+| `Blit` | `public void Blit(Image source, int dstX, int dstY)` | Copies the whole of source to (dstX, dstY). |
+| `Blit` | `public void Blit(Image source, int srcX, int srcY, int srcWidth, int srcHeight, int dstX, int dstY)` | Copies the rectangle (srcX, srcY, srcWidth, srcHeight) of source to (dstX, dstY) of this image, converting each pixel to this format. |
+| `BytesPerPixel` | `public static int BytesPerPixel(ImageFormat format)` | Bytes in one pixel of format. |
+| `Clone` | `public Image Clone()` | A copy of this image. |
+| `Contains` | `public bool Contains(int x, int y)` | Whether (x, y) is inside the image. |
+| `Convert` | `public void Convert(ImageFormat format)` | Turns this image into format in place. |
+| `ConvertedTo` | `public Image ConvertedTo(ImageFormat format)` | A copy of this image in format. |
+| `Fill` | `public void Fill(ImageColor color)` | Sets every pixel. |
+| `FillRect` | `public void FillRect(int x, int y, int width, int height, ImageColor color)` | Sets the pixels of a rectangle; the part outside the image is ignored. |
+| `FlipX` | `public void FlipX()` | Mirrors the image left to right. |
+| `FlipY` | `public void FlipY()` | Mirrors the image top to bottom. |
+| `FromData` | `public static Image FromData(int width, int height, ImageFormat format, byte[] data)` | An image over a copy of data (exactly width x height x BytesPerPixel bytes). |
+| `GetData` | `public byte[] GetData()` | A copy of the pixel bytes, rows top first, tightly packed. |
+| `GetPixel` | `public ImageColor GetPixel(int x, int y)` | The pixel at (x, y). |
+| `GetRegion` | `public Image? GetRegion(int x, int y, int width, int height)` | A new image of the rectangle (clipped to the image) in the same format; null when the clipped rectangle is empty. |
+| `Load` | `public static Image? Load(string path)` | The engine's decoder reads path (PNG, JPEG, TGA, BMP, GIF, PSD, WebP, SVG, OpenEXR clamped to 0..1) into an RGBA8 image; null when the file is missing, unreadable or past the size limit. |
+| `Resize` | `public void Resize(int width, int height, ImageInterpolation interpolation = ImageInterpolation.Bilinear)` | Resamples this image to width x height in place. |
+| `SetData` | `public void SetData(byte[] data)` | Replaces the pixel bytes (same size and format as the image). |
+| `SetPixel` | `public void SetPixel(int x, int y, ImageColor color)` | Writes the pixel at (x, y), converting the colour to the image's format (byte formats clamp to 0..1; L8 stores luminance). |
+
+<a id="imagecolor"></a>
 
 ### ImageColor
 
 `public readonly struct ImageColor : IEquatable<ImageColor>` - A colour with float channels, 0..1 for the byte formats and unclamped for the float ones.
 
-- `public float R { get; }` - Red.
-- `public float G { get; }` - Green.
-- `public float B { get; }` - Blue.
-- `public float A { get; }` - Alpha (1 is opaque).
-- `public ImageColor(float r, float g, float b, float a = 1f)` - Makes a colour; alpha defaults to opaque.
-- `public static ImageColor Clear { get; }` - Transparent black.
-- `public bool Equals(ImageColor o)` - Inherited documentation.
-- `public override bool Equals(object? obj)` - Inherited documentation.
-- `public override int GetHashCode()` - Inherited documentation.
-- `public override string ToString()` - Inherited documentation.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ImageColor` | `public ImageColor(float r, float g, float b, float a = 1f)` | Makes a colour; alpha defaults to opaque. |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `A` | `public float A { get; }` | Alpha (1 is opaque). |
+| `B` | `public float B { get; }` | Blue. |
+| `Clear` | `public static ImageColor Clear { get; }` | Transparent black. |
+| `G` | `public float G { get; }` | Green. |
+| `R` | `public float R { get; }` | Red. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Equals` | `public bool Equals(ImageColor o)` | Inherited documentation. |
+| `Equals` | `public override bool Equals(object? obj)` | Inherited documentation. |
+| `GetHashCode` | `public override int GetHashCode()` | Inherited documentation. |
+| `ToString` | `public override string ToString()` | Inherited documentation. |
+
+<a id="imageformat"></a>
 
 ### ImageFormat
 
 `public enum ImageFormat` - How an Image stores a pixel.
 
-Values: `L8 = 0`, `LA8 = 1`, `RGB8 = 2`, `RGBA8 = 3`, `RF = 4`, `RGBAF = 5`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `L8` | `L8 = 0` |  |
+| `LA8` | `LA8 = 1` |  |
+| `RF` | `RF = 4` |  |
+| `RGB8` | `RGB8 = 2` |  |
+| `RGBA8` | `RGBA8 = 3` |  |
+| `RGBAF` | `RGBAF = 5` |  |
+
+<a id="imageinterpolation"></a>
 
 ### ImageInterpolation
 
 `public enum ImageInterpolation` - How Resize reads the source.
 
-Values: `Nearest = 0`, `Bilinear = 1`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Bilinear` | `Bilinear = 1` |  |
+| `Nearest` | `Nearest = 0` |  |
+
+<a id="input"></a>
 
 ### Input
 
 `public static class Input` - Polled keyboard and mouse.
 
-- `public static bool GetKey(Key k)` - True while k is held.
-- `public static void SetInputAsHandled()` - Stops the input event being routed from going any further.
-- `public static void ParseInputEvent(InputEvent ev)` - Routes a made-up event through the actors next frame, as if it were real input.
-- `public static bool GetKeyDown(Key k)` - True on the frame k went down.
-- `public static bool GetKeyUp(Key k)` - True on the frame k went up.
-- `public static float MouseDeltaX { get; }` - This frame's horizontal mouse movement, in pixels.
-- `public static float MouseDeltaY { get; }` - This frame's vertical mouse movement, in pixels.
-- `public static float MouseWheel { get; }` - This frame's mouse wheel notches.
-- `public static Vec3 MoveAxis { get; }` - WASD / arrows as a movement vector: X = forward, Y = right, Z = 0.
-- `public static bool GetVk(int vk)` - True while the raw Win32 VK code vk is held.
-- `public static bool GetVkDown(int vk)` - True on the frame the raw Win32 VK code vk went down.
-- `public static bool GetVkUp(int vk)` - True on the frame the raw Win32 VK code vk went up.
-- `public static bool GetGamepadButton(GamepadButton button, int pad = 0)` - True while button is held on gamepad pad.
-- `public static float GetGamepadAxis(GamepadAxis axis, int pad = 0)` - The last-set value of axis on gamepad pad.
-- `public static int FirstKeyPressedThisFrame()` - The LOWEST Key value whose GetKeyDown is true this frame, mouse buttons included -- MouseLeft/MouseRight/MouseMiddle are ordinary members of this same enum (see its own comment), so a "press any button to rebind" prompt needs only this one call, not a separate mouse poll beside it.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `MouseDeltaX` | `public static float MouseDeltaX { get; }` | This frame's horizontal mouse movement, in pixels. |
+| `MouseDeltaY` | `public static float MouseDeltaY { get; }` | This frame's vertical mouse movement, in pixels. |
+| `MouseWheel` | `public static float MouseWheel { get; }` | This frame's mouse wheel notches. |
+| `MoveAxis` | `public static Vec3 MoveAxis { get; }` | WASD / arrows as a movement vector: X = forward, Y = right, Z = 0. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `FirstKeyPressedThisFrame` | `public static int FirstKeyPressedThisFrame()` | The LOWEST Key value whose GetKeyDown is true this frame, mouse buttons included -- MouseLeft/MouseRight/MouseMiddle are ordinary members of this same enum (see its own comment), so a "press any button to rebind" prompt needs only this one call, not a separate mouse poll beside it. |
+| `GetGamepadAxis` | `public static float GetGamepadAxis(GamepadAxis axis, int pad = 0)` | The last-set value of axis on gamepad pad. |
+| `GetGamepadButton` | `public static bool GetGamepadButton(GamepadButton button, int pad = 0)` | True while button is held on gamepad pad. |
+| `GetKey` | `public static bool GetKey(Key k)` | True while k is held. |
+| `GetKeyDown` | `public static bool GetKeyDown(Key k)` | True on the frame k went down. |
+| `GetKeyUp` | `public static bool GetKeyUp(Key k)` | True on the frame k went up. |
+| `GetVk` | `public static bool GetVk(int vk)` | True while the raw Win32 VK code vk is held. |
+| `GetVkDown` | `public static bool GetVkDown(int vk)` | True on the frame the raw Win32 VK code vk went down. |
+| `GetVkUp` | `public static bool GetVkUp(int vk)` | True on the frame the raw Win32 VK code vk went up. |
+| `ParseInputEvent` | `public static void ParseInputEvent(InputEvent ev)` | Routes a made-up event through the actors next frame, as if it were real input. |
+| `SetInputAsHandled` | `public static void SetInputAsHandled()` | Stops the input event being routed from going any further. |
+
+<a id="inputaction"></a>
 
 ### InputAction
 
 `public sealed class InputAction` - A named thing the player can do — "Jump", "Fire", "Move" — independent of any key.
 
-- `public string Name { get; }` - Display name, used in logs and as the native registry key.
-- `public InputValueType ValueType { get; }` - The shape of this action's value.
-- `public static InputAction Digital(string name)` - Declares a button action.
-- `public static InputAction Axis1D(string name)` - Declares a single-axis action.
-- `public static InputAction Axis2D(string name)` - Declares a two-axis action, read through Value2D.
-- `public static InputAction? Find(string name)` - Looks up an action by name, or null if none is registered.
-- `public static bool ActionPressedThisFrame(string name)` - Whether the named action was pressed this frame; false for an unknown action.
-- `public static bool ActionReleasedThisFrame(string name)` - Whether the named action was released this frame; false for an unknown action.
-- `public Vec3 Value3D { get; }` - The current value after modifiers, all three channels: X for a 1D axis, X and Y for 2D, X = 0 or 1 for a button.
-- `public Vec3 Value2D { get; }` - The current value, same as Value3D (kept for existing callers).
-- `public float Value1D { get; }` - The single-axis value.
-- `public bool IsHeld { get; }` - True while the (modified) value is actuated: any channel's magnitude exceeds 0.15, pinned on the native side.
-- `public bool WasPressed { get; }` - True on the frame the action became active.
-- `public bool WasReleased { get; }` - True on the frame the action stopped being active.
-- `public InputAction AddTrigger(InputTrigger trigger)` - Adds an action-level trigger, evaluated on the summed value.
-- `public InputAction AddModifier(InputModifier modifier)` - Adds an action-level modifier, applied in the order added.
-- `public InputAction ClearConfig()` - Drops this action's own triggers and modifiers (not its bindings' own).
-- `public TriggerState State { get; }` - Where the action is in its trigger cycle as of the last gameplay update.
-- `public ActionEvent Events { get; }` - What changed in the last gameplay update.
-- `public float ElapsedSeconds { get; }` - Seconds the action has continuously been Ongoing or Triggered.
-- `public float TriggeredSeconds { get; }` - Seconds the action has continuously been Triggered.
-- `public bool WasStarted { get; }` - True on the update the action left None.
-- `public bool IsOngoing { get; }` - True while a trigger is waiting (a hold timer running).
-- `public bool IsTriggered { get; }` - True while the action's triggers are firing.
-- `public bool WasCompleted { get; }` - True on the update the action went from Triggered to None.
-- `public bool WasCanceled { get; }` - True on the update the action went from Ongoing to None without triggering.
-- `public event Action<InputAction>? Started` - Raised on the update the action left None.
-- `public event Action<InputAction>? Ongoing` - Raised on the update the action is, or becomes, Ongoing.
-- `public event Action<InputAction>? Triggered` - Raised every update the action is Triggered.
-- `public event Action<InputAction>? Completed` - Raised when the action goes from Triggered to None.
-- `public event Action<InputAction>? Canceled` - Raised when the action goes from Ongoing to None without triggering.
-- `public override string ToString()`
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ElapsedSeconds` | `public float ElapsedSeconds { get; }` | Seconds the action has continuously been Ongoing or Triggered. |
+| `Events` | `public ActionEvent Events { get; }` | What changed in the last gameplay update. |
+| `IsHeld` | `public bool IsHeld { get; }` | True while the (modified) value is actuated: any channel's magnitude exceeds 0.15, pinned on the native side. |
+| `IsOngoing` | `public bool IsOngoing { get; }` | True while a trigger is waiting (a hold timer running). |
+| `IsTriggered` | `public bool IsTriggered { get; }` | True while the action's triggers are firing. |
+| `Name` | `public string Name { get; }` | Display name, used in logs and as the native registry key. |
+| `State` | `public TriggerState State { get; }` | Where the action is in its trigger cycle as of the last gameplay update. |
+| `TriggeredSeconds` | `public float TriggeredSeconds { get; }` | Seconds the action has continuously been Triggered. |
+| `Value1D` | `public float Value1D { get; }` | The single-axis value. |
+| `Value2D` | `public Vec3 Value2D { get; }` | The current value, same as Value3D (kept for existing callers). |
+| `Value3D` | `public Vec3 Value3D { get; }` | The current value after modifiers, all three channels: X for a 1D axis, X and Y for 2D, X = 0 or 1 for a button. |
+| `ValueType` | `public InputValueType ValueType { get; }` | The shape of this action's value. |
+| `WasCanceled` | `public bool WasCanceled { get; }` | True on the update the action went from Ongoing to None without triggering. |
+| `WasCompleted` | `public bool WasCompleted { get; }` | True on the update the action went from Triggered to None. |
+| `WasPressed` | `public bool WasPressed { get; }` | True on the frame the action became active. |
+| `WasReleased` | `public bool WasReleased { get; }` | True on the frame the action stopped being active. |
+| `WasStarted` | `public bool WasStarted { get; }` | True on the update the action left None. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ActionPressedThisFrame` | `public static bool ActionPressedThisFrame(string name)` | Whether the named action was pressed this frame; false for an unknown action. |
+| `ActionReleasedThisFrame` | `public static bool ActionReleasedThisFrame(string name)` | Whether the named action was released this frame; false for an unknown action. |
+| `AddModifier` | `public InputAction AddModifier(InputModifier modifier)` | Adds an action-level modifier, applied in the order added. |
+| `AddTrigger` | `public InputAction AddTrigger(InputTrigger trigger)` | Adds an action-level trigger, evaluated on the summed value. |
+| `Axis1D` | `public static InputAction Axis1D(string name)` | Declares a single-axis action. |
+| `Axis2D` | `public static InputAction Axis2D(string name)` | Declares a two-axis action, read through Value2D. |
+| `ClearConfig` | `public InputAction ClearConfig()` | Drops this action's own triggers and modifiers (not its bindings' own). |
+| `Digital` | `public static InputAction Digital(string name)` | Declares a button action. |
+| `Find` | `public static InputAction? Find(string name)` | Looks up an action by name, or null if none is registered. |
+| `ToString` | `public override string ToString()` |  |
+
+**Events**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Canceled` | `public event Action<InputAction>? Canceled` | Raised when the action goes from Ongoing to None without triggering. |
+| `Completed` | `public event Action<InputAction>? Completed` | Raised when the action goes from Triggered to None. |
+| `Ongoing` | `public event Action<InputAction>? Ongoing` | Raised on the update the action is, or becomes, Ongoing. |
+| `Started` | `public event Action<InputAction>? Started` | Raised on the update the action left None. |
+| `Triggered` | `public event Action<InputAction>? Triggered` | Raised every update the action is Triggered. |
+
+<a id="inputevent"></a>
 
 ### InputEvent
 
 `public abstract class InputEvent` - One piece of input, routed to OnInput, then the game UI, then OnUnhandledInput, until something handles it.
 
-- `public bool Handled { get; }` - Set by SetInputAsHandled (or the UI): the event goes no further.
-- `public virtual bool Pressed { get; }` - Whether this is a press.
-- `public bool IsActionPressed(string action)` - Whether the action was pressed this frame and this event is a press (an action-pressed test on an event).
-- `public bool IsActionReleased(string action)` - Whether the action was released this frame and this event is a release.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Handled` | `public bool Handled { get; }` | Set by SetInputAsHandled (or the UI): the event goes no further. |
+| `Pressed` | `public virtual bool Pressed { get; }` | Whether this is a press. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `IsActionPressed` | `public bool IsActionPressed(string action)` | Whether the action was pressed this frame and this event is a press (an action-pressed test on an event). |
+| `IsActionReleased` | `public bool IsActionReleased(string action)` | Whether the action was released this frame and this event is a release. |
+
+<a id="inputeventjoypadbutton"></a>
 
 ### InputEventJoypadButton
 
 `public sealed class InputEventJoypadButton : InputEvent` - A gamepad button going down or up.
 
-- `public InputEventJoypadButton(GamepadButton button, bool pressed, int pad = 0)`
-- `public GamepadButton Button { get; }`
-- `public bool IsPressed { get; }`
-- `public int Pad { get; }`
-- `public override bool Pressed { get; }`
-- `public override string ToString()`
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `InputEventJoypadButton` | `public InputEventJoypadButton(GamepadButton button, bool pressed, int pad = 0)` |  |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Button` | `public GamepadButton Button { get; }` |  |
+| `IsPressed` | `public bool IsPressed { get; }` |  |
+| `Pad` | `public int Pad { get; }` |  |
+| `Pressed` | `public override bool Pressed { get; }` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ToString` | `public override string ToString()` |  |
+
+<a id="inputeventjoypadmotion"></a>
 
 ### InputEventJoypadMotion
 
 `public sealed class InputEventJoypadMotion : InputEvent` - A gamepad axis moving to a new value.
 
-- `public InputEventJoypadMotion(GamepadAxis axis, float value, int pad = 0)`
-- `public GamepadAxis Axis { get; }`
-- `public float Value { get; }`
-- `public int Pad { get; }`
-- `public override string ToString()`
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `InputEventJoypadMotion` | `public InputEventJoypadMotion(GamepadAxis axis, float value, int pad = 0)` |  |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Axis` | `public GamepadAxis Axis { get; }` |  |
+| `Pad` | `public int Pad { get; }` |  |
+| `Value` | `public float Value { get; }` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ToString` | `public override string ToString()` |  |
+
+<a id="inputeventkey"></a>
 
 ### InputEventKey
 
 `public sealed class InputEventKey : InputEvent` - A key going down or up.
 
-- `public InputEventKey(Key key, bool pressed)`
-- `public Key Key { get; }`
-- `public bool IsPressed { get; }`
-- `public override bool Pressed { get; }`
-- `public override string ToString()`
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `InputEventKey` | `public InputEventKey(Key key, bool pressed)` |  |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `IsPressed` | `public bool IsPressed { get; }` |  |
+| `Key` | `public Key Key { get; }` |  |
+| `Pressed` | `public override bool Pressed { get; }` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ToString` | `public override string ToString()` |  |
+
+<a id="inputeventmousebutton"></a>
 
 ### InputEventMouseButton
 
 `public sealed class InputEventMouseButton : InputEvent` - A mouse button going down or up (MouseLeft, MouseRight, MouseMiddle, and the two side buttons MouseX1 and MouseX2).
 
-- `public InputEventMouseButton(Key button, bool pressed)`
-- `public Key Button { get; }`
-- `public bool IsPressed { get; }`
-- `public override bool Pressed { get; }`
-- `public override string ToString()`
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `InputEventMouseButton` | `public InputEventMouseButton(Key button, bool pressed)` |  |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Button` | `public Key Button { get; }` |  |
+| `IsPressed` | `public bool IsPressed { get; }` |  |
+| `Pressed` | `public override bool Pressed { get; }` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ToString` | `public override string ToString()` |  |
+
+<a id="inputeventmousemotion"></a>
 
 ### InputEventMouseMotion
 
 `public sealed class InputEventMouseMotion : InputEvent` - The mouse moving, by this much since the last frame.
 
-- `public InputEventMouseMotion(float dx, float dy)`
-- `public float RelativeX { get; }`
-- `public float RelativeY { get; }`
-- `public override string ToString()`
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `InputEventMouseMotion` | `public InputEventMouseMotion(float dx, float dy)` |  |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `RelativeX` | `public float RelativeX { get; }` |  |
+| `RelativeY` | `public float RelativeY { get; }` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ToString` | `public override string ToString()` |  |
+
+<a id="inputeventmousewheel"></a>
 
 ### InputEventMouseWheel
 
 `public sealed class InputEventMouseWheel : InputEvent` - The mouse wheel turning; positive is away from the user.
 
-- `public InputEventMouseWheel(float delta, float horizontal = 0f)`
-- `public float Delta { get; }`
-- `public float Horizontal { get; }`
-- `public override string ToString()`
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `InputEventMouseWheel` | `public InputEventMouseWheel(float delta, float horizontal = 0f)` |  |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Delta` | `public float Delta { get; }` |  |
+| `Horizontal` | `public float Horizontal { get; }` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ToString` | `public override string ToString()` |  |
+
+<a id="inputeventtouch"></a>
 
 ### InputEventTouch
 
 `public sealed class InputEventTouch : InputEvent` - A finger touching down on, or lifting off, the screen.
 
-- `public InputEventTouch(int finger, bool pressed, float x, float y, float pressure = 1f)`
-- `public int Finger { get; }`
-- `public bool IsPressed { get; }`
-- `public float X { get; }` - Window pixels.
-- `public float Y { get; }`
-- `public float Pressure { get; }`
-- `public override bool Pressed { get; }`
-- `public override string ToString()`
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `InputEventTouch` | `public InputEventTouch(int finger, bool pressed, float x, float y, float pressure = 1f)` |  |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Finger` | `public int Finger { get; }` |  |
+| `IsPressed` | `public bool IsPressed { get; }` |  |
+| `Pressed` | `public override bool Pressed { get; }` |  |
+| `Pressure` | `public float Pressure { get; }` |  |
+| `X` | `public float X { get; }` | Window pixels. |
+| `Y` | `public float Y { get; }` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ToString` | `public override string ToString()` |  |
+
+<a id="inputeventtouchmotion"></a>
 
 ### InputEventTouchMotion
 
 `public sealed class InputEventTouchMotion : InputEvent` - A finger that is down moving.
 
-- `public InputEventTouchMotion(int finger, float x, float y, float relativeX, float relativeY, float pressure = 1f)`
-- `public int Finger { get; }`
-- `public float X { get; }`
-- `public float Y { get; }`
-- `public float RelativeX { get; }`
-- `public float RelativeY { get; }`
-- `public float Pressure { get; }`
-- `public override string ToString()`
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `InputEventTouchMotion` | `public InputEventTouchMotion(int finger, float x, float y, float relativeX, float relativeY, float pressure = 1f)` |  |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Finger` | `public int Finger { get; }` |  |
+| `Pressure` | `public float Pressure { get; }` |  |
+| `RelativeX` | `public float RelativeX { get; }` |  |
+| `RelativeY` | `public float RelativeY { get; }` |  |
+| `X` | `public float X { get; }` |  |
+| `Y` | `public float Y { get; }` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ToString` | `public override string ToString()` |  |
+
+<a id="inputmappingcontext"></a>
 
 ### InputMappingContext
 
 `public abstract class InputMappingContext` - A set of key-to-action mappings pushed and popped as a whole.
 
-- `public virtual string Name { get; }` - Name shown in logs; defaults to the class name.
-- `public void SaveBindings()` - Writes this context's current bindings to Settings (which must already be open), one Source/Key pair per binding slot.
-- `public void LoadBindings()` - Reads bindings SaveBindings previously wrote back over this context's current ones.
-- `public void ResetToDefaults()` - Restores every binding to what this context's own constructor set up, discarding any LoadBindings or rebind since.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Name` | `public virtual string Name { get; }` | Name shown in logs; defaults to the class name. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `LoadBindings` | `public void LoadBindings()` | Reads bindings SaveBindings previously wrote back over this context's current ones. |
+| `ResetToDefaults` | `public void ResetToDefaults()` | Restores every binding to what this context's own constructor set up, discarding any LoadBindings or rebind since. |
+| `SaveBindings` | `public void SaveBindings()` | Writes this context's current bindings to Settings (which must already be open), one Source/Key pair per binding slot. |
+
+<a id="inputmodifier"></a>
 
 ### InputModifier
 
 `public readonly struct InputModifier` - How an action's value is shaped.
 
-- `public string Spec { get; }` - The spec token, e.g.
-- `public static InputModifier FromSpec(string spec)` - Wraps raw spec text.
-- `public static InputModifier DeadZone(float lower = 0.2f, float upper = 1f, DeadZoneType type = DeadZoneType.Radial)` - Zeroes input below lower and remaps lower..upper to 0..1.
-- `public static InputModifier Scale(float uniform)` - Multiplies every channel by uniform.
-- `public static InputModifier Scale(float x, float y, float z)` - Multiplies each channel.
-- `public static InputModifier Negate(bool x = true, bool y = true, bool z = true)` - Negates the chosen channels.
-- `public static InputModifier Swizzle(SwizzleOrder order)` - Reorders the channels.
-- `public static InputModifier Smooth(float timeConstantSeconds)` - Exponential smoothing with the given time constant; 0 passes the value through.
-- `public static InputModifier ResponseCurve(float exponent)` - Raises each channel's magnitude to exponent, keeping the sign.
-- `public static InputModifier ResponseCurve(float x, float y, float z)` - Per-channel response curve exponents.
-- `public override string ToString()` - Inherited documentation.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Spec` | `public string Spec { get; }` | The spec token, e.g. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `DeadZone` | `public static InputModifier DeadZone(float lower = 0.2f, float upper = 1f, DeadZoneType type = DeadZoneType.Radial)` | Zeroes input below lower and remaps lower..upper to 0..1. |
+| `FromSpec` | `public static InputModifier FromSpec(string spec)` | Wraps raw spec text. |
+| `Negate` | `public static InputModifier Negate(bool x = true, bool y = true, bool z = true)` | Negates the chosen channels. |
+| `ResponseCurve` | `public static InputModifier ResponseCurve(float exponent)` | Raises each channel's magnitude to exponent, keeping the sign. |
+| `ResponseCurve` | `public static InputModifier ResponseCurve(float x, float y, float z)` | Per-channel response curve exponents. |
+| `Scale` | `public static InputModifier Scale(float uniform)` | Multiplies every channel by uniform. |
+| `Scale` | `public static InputModifier Scale(float x, float y, float z)` | Multiplies each channel. |
+| `Smooth` | `public static InputModifier Smooth(float timeConstantSeconds)` | Exponential smoothing with the given time constant; 0 passes the value through. |
+| `Swizzle` | `public static InputModifier Swizzle(SwizzleOrder order)` | Reorders the channels. |
+| `ToString` | `public override string ToString()` | Inherited documentation. |
+
+<a id="inputscheme"></a>
 
 ### InputScheme
 
 `public static class InputScheme` - The bridge between a project's INPUT.SCHEME and EnhancedInput.
 
-- `public static InputMappingContext? Current { get; }` - The context the last successful Load built, or null.
-- `public static string LastError { get; }` - The last Load's error text; empty after a success.
-- `public static bool Load(string path)` - Loads path and replaces whatever scheme context this class last pushed.
-- `public static void Unload()` - Removes the loaded scheme context, if any.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Current` | `public static InputMappingContext? Current { get; }` | The context the last successful Load built, or null. |
+| `LastError` | `public static string LastError { get; }` | The last Load's error text; empty after a success. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Load` | `public static bool Load(string path)` | Loads path and replaces whatever scheme context this class last pushed. |
+| `Unload` | `public static void Unload()` | Removes the loaded scheme context, if any. |
+
+<a id="inputsource"></a>
 
 ### InputSource
 
 `public enum InputSource` - Where one binding reads from.
 
-Values: `Key`, `MouseX`, `MouseY`, `MouseWheel`, `GamepadButton`, `GamepadAxis`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `GamepadAxis` | `GamepadAxis` |  |
+| `GamepadButton` | `GamepadButton` |  |
+| `Key` | `Key` |  |
+| `MouseWheel` | `MouseWheel` |  |
+| `MouseX` | `MouseX` |  |
+| `MouseY` | `MouseY` |  |
+
+<a id="inputtrigger"></a>
 
 ### InputTrigger
 
 `public readonly struct InputTrigger` - When an action fires.
 
-- `public string Spec { get; }` - The spec token, e.g.
-- `public static InputTrigger FromSpec(string spec)` - Wraps raw spec text.
-- `public static InputTrigger Down(float actuation = DefaultActuation)` - Fires every update the input is actuated.
-- `public static InputTrigger Pressed(float actuation = DefaultActuation)` - Fires on the update the input becomes actuated.
-- `public static InputTrigger Released(float actuation = DefaultActuation)` - Ongoing while actuated; fires on the update it is let go.
-- `public static InputTrigger Hold(float seconds, bool once = false, float actuation = DefaultActuation)` - Ongoing until held for seconds, then fires every update; with once it fires for one update only and re-arms after a release.
-- `public static InputTrigger HoldAndRelease(float seconds, float actuation = DefaultActuation)` - Fires on release, if the input had been held for at least seconds.
-- `public static InputTrigger Tap(float maxSeconds = DefaultTapMax, float actuation = DefaultActuation)` - Fires on release, if the input was held no longer than maxSeconds.
-- `public static InputTrigger Pulse(float interval, int limit = 0, bool triggerOnStart = true, float actuation = DefaultActuation)` - Fires every interval seconds while held, at most limit times when it is above zero; triggerOnStart fires one on the press itself.
-- `public static InputTrigger Chorded(InputAction other)` - Only fires while other is also triggering (a modifier key).
-- `public static InputTrigger Combo(float window, params InputAction[] steps)` - Fires once the steps actions have triggered in order, each within window seconds of the one before.
-- `public override string ToString()` - Inherited documentation.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Spec` | `public string Spec { get; }` | The spec token, e.g. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Chorded` | `public static InputTrigger Chorded(InputAction other)` | Only fires while other is also triggering (a modifier key). |
+| `Combo` | `public static InputTrigger Combo(float window, params InputAction[] steps)` | Fires once the steps actions have triggered in order, each within window seconds of the one before. |
+| `Down` | `public static InputTrigger Down(float actuation = DefaultActuation)` | Fires every update the input is actuated. |
+| `FromSpec` | `public static InputTrigger FromSpec(string spec)` | Wraps raw spec text. |
+| `Hold` | `public static InputTrigger Hold(float seconds, bool once = false, float actuation = DefaultActuation)` | Ongoing until held for seconds, then fires every update; with once it fires for one update only and re-arms after a release. |
+| `HoldAndRelease` | `public static InputTrigger HoldAndRelease(float seconds, float actuation = DefaultActuation)` | Fires on release, if the input had been held for at least seconds. |
+| `Pressed` | `public static InputTrigger Pressed(float actuation = DefaultActuation)` | Fires on the update the input becomes actuated. |
+| `Pulse` | `public static InputTrigger Pulse(float interval, int limit = 0, bool triggerOnStart = true, float actuation = DefaultActuation)` | Fires every interval seconds while held, at most limit times when it is above zero; triggerOnStart fires one on the press itself. |
+| `Released` | `public static InputTrigger Released(float actuation = DefaultActuation)` | Ongoing while actuated; fires on the update it is let go. |
+| `Tap` | `public static InputTrigger Tap(float maxSeconds = DefaultTapMax, float actuation = DefaultActuation)` | Fires on release, if the input was held no longer than maxSeconds. |
+| `ToString` | `public override string ToString()` | Inherited documentation. |
+
+<a id="inputvaluetype"></a>
 
 ### InputValueType
 
 `public enum InputValueType` - What shape of value an InputAction carries.
 
-Values: `Digital`, `Axis1D`, `Axis2D`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Axis1D` | `Axis1D` |  |
+| `Axis2D` | `Axis2D` |  |
+| `Digital` | `Digital` |  |
+
+<a id="interpolationmode"></a>
 
 ### InterpolationMode
 
 `public enum InterpolationMode` - How an entity takes part in pose interpolation.
 
-Values: `Inherit = 0`, `On = 1`, `Off = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Inherit` | `Inherit = 0` |  |
+| `Off` | `Off = 2` |  |
+| `On` | `On = 1` |  |
+
+<a id="irawtable"></a>
 
 ### IRawTable
 
 `public interface IRawTable` - A table as the binder reads it: named columns, named rows, text cells.
 
-- `int ColumnCount { get; }` - The number of columns, not counting the row-name column.
-- `string ColumnName(int c)` - The name of column c.
-- `DataColumnType ColumnType(int c)` - The declared type of column c.
-- `int RowCount { get; }` - The number of rows.
-- `string RowName(int r)` - The name of row r.
-- `string Cell(int r, int c)` - The cell text, empty when out of range.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ColumnCount` | `int ColumnCount { get; }` | The number of columns, not counting the row-name column. |
+| `RowCount` | `int RowCount { get; }` | The number of rows. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Cell` | `string Cell(int r, int c)` | The cell text, empty when out of range. |
+| `ColumnName` | `string ColumnName(int c)` | The name of column c. |
+| `ColumnType` | `DataColumnType ColumnType(int c)` | The declared type of column c. |
+| `RowName` | `string RowName(int r)` | The name of row r. |
+
+<a id="jellystate"></a>
 
 ### JellyState
 
 `public readonly record struct JellyState(float VolumeRatio, float MaxStretch, int Nodes, bool Awake, bool Frozen, bool Failed)` - A jelly as of the last tick: current / rest volume, the largest lattice edge strain, the lattice node count.
 
+<a id="key"></a>
+
 ### Key
 
 `public enum Key` - Keyboard and mouse codes.
 
-Values: `A = 0`, `B`, `C`, `D`, `E`, `F`, `G`, `H`, `I`, `J`, `K`, `L`, `M`, `N`, `O`, `P`, `Q`, `R`, `S`, `T`, `U`, `V`, `W`, `X`, `Y`, `Z`, `D0 = 26`, `D1`, `D2`, `D3`, `D4`, `D5`, `D6`, `D7`, `D8`, `D9`, `Space = 36`, `LeftShift`, `LeftCtrl`, `LeftAlt`, `Enter`, `Escape`, `Tab`, `Left`, `Right`, `Up`, `Down`, `MouseLeft`, `MouseRight`, `MouseMiddle`, `F1`, `F2`, `F3`, `F4`, `F5`, `F6`, `F7`, `F8`, `F9`, `F10`, `F11`, `F12`, `PageUp`, `PageDown`, `Home`, `End`, `Insert`, `Delete`, `Backspace`, `CapsLock`, `NumLock`, `ScrollLock`, `Pause`, `PrintScreen`, `Menu`, `Meta`, `Minus`, `Equal`, `LBracket`, `RBracket`, `Backslash`, `Semicolon`, `Apostrophe`, `Comma`, `Period`, `Slash`, `Grave`, `Kp0`, `Kp1`, `Kp2`, `Kp3`, `Kp4`, `Kp5`, `Kp6`, `Kp7`, `Kp8`, `Kp9`, `KpAdd`, `KpSubtract`, `KpMultiply`, `KpDivide`, `KpDecimal`, `KpEnter`, `MouseX1`, `MouseX2`, `MouseWheelUp`, `MouseWheelDown`, `MouseWheelLeft`, `MouseWheelRight`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `A` | `A = 0` |  |
+| `Apostrophe` | `Apostrophe` |  |
+| `B` | `B` |  |
+| `Backslash` | `Backslash` |  |
+| `Backspace` | `Backspace` |  |
+| `C` | `C` |  |
+| `CapsLock` | `CapsLock` |  |
+| `Comma` | `Comma` |  |
+| `D` | `D` |  |
+| `D0` | `D0 = 26` |  |
+| `D1` | `D1` |  |
+| `D2` | `D2` |  |
+| `D3` | `D3` |  |
+| `D4` | `D4` |  |
+| `D5` | `D5` |  |
+| `D6` | `D6` |  |
+| `D7` | `D7` |  |
+| `D8` | `D8` |  |
+| `D9` | `D9` |  |
+| `Delete` | `Delete` |  |
+| `Down` | `Down` |  |
+| `E` | `E` |  |
+| `End` | `End` |  |
+| `Enter` | `Enter` |  |
+| `Equal` | `Equal` |  |
+| `Escape` | `Escape` |  |
+| `F` | `F` |  |
+| `F1` | `F1` |  |
+| `F10` | `F10` |  |
+| `F11` | `F11` |  |
+| `F12` | `F12` |  |
+| `F2` | `F2` |  |
+| `F3` | `F3` |  |
+| `F4` | `F4` |  |
+| `F5` | `F5` |  |
+| `F6` | `F6` |  |
+| `F7` | `F7` |  |
+| `F8` | `F8` |  |
+| `F9` | `F9` |  |
+| `G` | `G` |  |
+| `Grave` | `Grave` |  |
+| `H` | `H` |  |
+| `Home` | `Home` |  |
+| `I` | `I` |  |
+| `Insert` | `Insert` |  |
+| `J` | `J` |  |
+| `K` | `K` |  |
+| `Kp0` | `Kp0` |  |
+| `Kp1` | `Kp1` |  |
+| `Kp2` | `Kp2` |  |
+| `Kp3` | `Kp3` |  |
+| `Kp4` | `Kp4` |  |
+| `Kp5` | `Kp5` |  |
+| `Kp6` | `Kp6` |  |
+| `Kp7` | `Kp7` |  |
+| `Kp8` | `Kp8` |  |
+| `Kp9` | `Kp9` |  |
+| `KpAdd` | `KpAdd` |  |
+| `KpDecimal` | `KpDecimal` |  |
+| `KpDivide` | `KpDivide` |  |
+| `KpEnter` | `KpEnter` |  |
+| `KpMultiply` | `KpMultiply` |  |
+| `KpSubtract` | `KpSubtract` |  |
+| `L` | `L` |  |
+| `LBracket` | `LBracket` |  |
+| `Left` | `Left` |  |
+| `LeftAlt` | `LeftAlt` |  |
+| `LeftCtrl` | `LeftCtrl` |  |
+| `LeftShift` | `LeftShift` |  |
+| `M` | `M` |  |
+| `Menu` | `Menu` |  |
+| `Meta` | `Meta` |  |
+| `Minus` | `Minus` |  |
+| `MouseLeft` | `MouseLeft` |  |
+| `MouseMiddle` | `MouseMiddle` |  |
+| `MouseRight` | `MouseRight` |  |
+| `MouseWheelDown` | `MouseWheelDown` |  |
+| `MouseWheelLeft` | `MouseWheelLeft` |  |
+| `MouseWheelRight` | `MouseWheelRight` |  |
+| `MouseWheelUp` | `MouseWheelUp` |  |
+| `MouseX1` | `MouseX1` |  |
+| `MouseX2` | `MouseX2` |  |
+| `N` | `N` |  |
+| `NumLock` | `NumLock` |  |
+| `O` | `O` |  |
+| `P` | `P` |  |
+| `PageDown` | `PageDown` |  |
+| `PageUp` | `PageUp` |  |
+| `Pause` | `Pause` |  |
+| `Period` | `Period` |  |
+| `PrintScreen` | `PrintScreen` |  |
+| `Q` | `Q` |  |
+| `R` | `R` |  |
+| `RBracket` | `RBracket` |  |
+| `Right` | `Right` |  |
+| `S` | `S` |  |
+| `ScrollLock` | `ScrollLock` |  |
+| `Semicolon` | `Semicolon` |  |
+| `Slash` | `Slash` |  |
+| `Space` | `Space = 36` |  |
+| `T` | `T` |  |
+| `Tab` | `Tab` |  |
+| `U` | `U` |  |
+| `Up` | `Up` |  |
+| `V` | `V` |  |
+| `W` | `W` |  |
+| `X` | `X` |  |
+| `Y` | `Y` |  |
+| `Z` | `Z` |  |
+
+<a id="landscape"></a>
 
 ### Landscape
 
 `public static class Landscape` - The landscape's paint layers, as the level's terrain material defines them.
 
-- `public static int LayerCount { get; }` - How many paint layers the terrain material has (0 with no landscape or a plain material).
-- `public static string LayerName(int layer)` - The name of layer layer, or an empty string for an unknown index.
-- `public static int LayerIndex(string name)` - The index of the layer called name (case-sensitive), or -1.
-- `public static GroundSample Sample(float xCm, float yCm)` - Samples the landscape at a world XY (centimetres).
-- `public static GroundSample Sample(Vec3 p)` - Samples the landscape under a world position.
-- `public static float LayerWeight(float xCm, float yCm, int layer)` - The paint weight (0..1) of layer layer at a world XY; 0 off the section or for an unknown layer.
-- `public static float LayerWeight(float xCm, float yCm, string layer)` - The paint weight of the layer called layer at a world XY; 0 for an unknown name.
-- `public static bool Weights(float xCm, float yCm, Span<float> dst)` - Writes the weights of every layer (material order, summing to 1) into dst, which must hold at least 8 floats.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `LayerCount` | `public static int LayerCount { get; }` | How many paint layers the terrain material has (0 with no landscape or a plain material). |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `LayerIndex` | `public static int LayerIndex(string name)` | The index of the layer called name (case-sensitive), or -1. |
+| `LayerName` | `public static string LayerName(int layer)` | The name of layer layer, or an empty string for an unknown index. |
+| `LayerWeight` | `public static float LayerWeight(float xCm, float yCm, int layer)` | The paint weight (0..1) of layer layer at a world XY; 0 off the section or for an unknown layer. |
+| `LayerWeight` | `public static float LayerWeight(float xCm, float yCm, string layer)` | The paint weight of the layer called layer at a world XY; 0 for an unknown name. |
+| `Sample` | `public static GroundSample Sample(Vec3 p)` | Samples the landscape under a world position. |
+| `Sample` | `public static GroundSample Sample(float xCm, float yCm)` | Samples the landscape at a world XY (centimetres). |
+| `Weights` | `public static bool Weights(float xCm, float yCm, Span<float> dst)` | Writes the weights of every layer (material order, summing to 1) into dst, which must hold at least 8 floats. |
+
+<a id="layer2d"></a>
 
 ### Layer2D
 
 `public struct Layer2D` - A canvas layer: everything below it (the nearest ancestor-or-self layer) sorts by Index and takes its transform.
 
-- `public int Index` - The layer index; higher draws over lower.
-- `public Layer2DFlags Flags` - Behaviour bits.
-- `public Vector2 Offset` - Translation of everything in the layer.
-- `public float Rotation` - Rotation in radians.
-- `public Vector2 Scale` - Scale; 0 reads as 1.
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Flags` | `public Layer2DFlags Flags` | Behaviour bits. |
+| `Index` | `public int Index` | The layer index; higher draws over lower. |
+| `Offset` | `public Vector2 Offset` | Translation of everything in the layer. |
+| `Rotation` | `public float Rotation` | Rotation in radians. |
+| `Scale` | `public Vector2 Scale` | Scale; 0 reads as 1. |
+
+<a id="layer2dflags"></a>
 
 ### Layer2DFlags
 
 `public enum Layer2DFlags : uint` - Flags of Layer2D.
 
-Values: `None = 0`, `Hidden = 1`, `FollowViewport = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `FollowViewport` | `FollowViewport = 2` |  |
+| `Hidden` | `Hidden = 1` |  |
+| `None` | `None = 0` |  |
+
+<a id="levelsequences"></a>
 
 ### LevelSequences
 
 `public static class LevelSequences` - The level's sequences, addressed by name.
 
-- `public static bool Play(string sequence, float startSeconds = -1f, float rate = 0f)` - Starts or resumes sequence.
-- `public static bool Pause(string sequence)` - Pauses the sequence where it is; what it wrote stays.
-- `public static bool Stop(string? sequence = null)` - Stops the sequence (null or empty = every sequence): back to time 0, everything it wrote is put back as authored, its sounds stop.
-- `public static bool SetTime(string sequence, float seconds)` - Jumps to a time.
-- `public static bool SetRate(string sequence, float rate)` - Playback speed multiplier, 0 or more (0 holds the clock).
-- `public static bool IsPlaying(string? sequence = null)` - True while the sequence (null or empty = any sequence) is playing.
-- `public static bool TryGetState(string sequence, out float time, out float length, out float rate, out bool playing)` - The sequence's clock, length and rate.
-- `public static bool Bind(string sequence, string bindingName, Entity actor)` - Makes actor the actor that the sequence's tracks bound by the name bindingName drive (spawnable actors, a character picked at run time).
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Bind` | `public static bool Bind(string sequence, string bindingName, Entity actor)` | Makes actor the actor that the sequence's tracks bound by the name bindingName drive (spawnable actors, a character picked at run time). |
+| `IsPlaying` | `public static bool IsPlaying(string? sequence = null)` | True while the sequence (null or empty = any sequence) is playing. |
+| `Pause` | `public static bool Pause(string sequence)` | Pauses the sequence where it is; what it wrote stays. |
+| `Play` | `public static bool Play(string sequence, float startSeconds = -1f, float rate = 0f)` | Starts or resumes sequence. |
+| `SetRate` | `public static bool SetRate(string sequence, float rate)` | Playback speed multiplier, 0 or more (0 holds the clock). |
+| `SetTime` | `public static bool SetTime(string sequence, float seconds)` | Jumps to a time. |
+| `Stop` | `public static bool Stop(string? sequence = null)` | Stops the sequence (null or empty = every sequence): back to time 0, everything it wrote is put back as authored, its sounds stop. |
+| `TryGetState` | `public static bool TryGetState(string sequence, out float time, out float length, out float rate, out bool playing)` | The sequence's clock, length and rate. |
+
+<a id="lifestate"></a>
 
 ### LifeState
 
 `public enum LifeState` - Where a character is between being alive and dead.
 
-Values: `Alive = 0`, `Dying = 1`, `Dead = 2`, `GettingUp = 3`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Alive` | `Alive = 0` |  |
+| `Dead` | `Dead = 2` |  |
+| `Dying` | `Dying = 1` |  |
+| `GettingUp` | `GettingUp = 3` |  |
+
+<a id="loc"></a>
 
 ### Loc
 
 `public static class Loc` - Localized text for the active culture.
 
-- `public static string Culture { get; }` - The active culture tag, normalised ("pt-BR").
-- `public static string DefaultCulture { get; }` - The project's default culture (LOCALE.DEFAULT), the last stop of the fallback chain.
-- `public static IReadOnlyList<string> Cultures { get; }` - The cultures the project ships (the folders under Content/Localization), sorted.
-- `public static CultureInfo CultureInfo { get; }` - For number and date formatting in the active culture; invariant when the OS does not know the tag.
-- `public static bool SetCulture(string tag, bool persist = true)` - Switches the active culture.
-- `public static string Text(string table, string key, string? defaultText = null)` - The text for table/key: the chain, then defaultText, then "[Table:Key]".
-- `public static string Tr(string message, string context = "")` - A message by its source text, from the culture chain's .po files; the source text itself when no culture translates it.
-- `public static string TrN(string message, string plural, int n, string context = "")` - The singular or plural form of a message for n: msgstr[0] for 1, msgstr[1] otherwise; the source forms when untranslated.
-- `public static bool TryGet(string table, string key, out string text)` - The text for the key in the chain only: false when no culture in it has the key (no default, no brackets).
-- `public static string Resolve(string textOrReference)` - "@T:K=D" resolved, "@@x" to "@x", anything else unchanged.
-- `public static string Format(string table, string key, string? defaultText, params object?[] args)` - Text formatted with args in the active culture's number and date style.
-- `public static string Plural(string table, string key, long count, params object?[] args)` - Count-dependent text: looks up key.one, key.few, key.many or key.other by the culture's plural rule, falling back to key.other, then key.
-- `public static IReadOnlyList<string> MissingKeys { get; }` - "Table:Key" of every text asked for since the last ClearMissing that no culture had.
-- `public static void ClearMissing()` - Forgets the missing-key list.
-- `public static event Action<string>? CultureChanged` - Raised from Pump (the game thread, once per frame) with the new culture after it changed.
-- `public static void Pump()` - Compares the active culture with the last frame's and raises CultureChanged.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Culture` | `public static string Culture { get; }` | The active culture tag, normalised ("pt-BR"). |
+| `CultureInfo` | `public static CultureInfo CultureInfo { get; }` | For number and date formatting in the active culture; invariant when the OS does not know the tag. |
+| `Cultures` | `public static IReadOnlyList<string> Cultures { get; }` | The cultures the project ships (the folders under Content/Localization), sorted. |
+| `DefaultCulture` | `public static string DefaultCulture { get; }` | The project's default culture (LOCALE.DEFAULT), the last stop of the fallback chain. |
+| `MissingKeys` | `public static IReadOnlyList<string> MissingKeys { get; }` | "Table:Key" of every text asked for since the last ClearMissing that no culture had. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ClearMissing` | `public static void ClearMissing()` | Forgets the missing-key list. |
+| `Format` | `public static string Format(string table, string key, string? defaultText, params object?[] args)` | Text formatted with args in the active culture's number and date style. |
+| `Plural` | `public static string Plural(string table, string key, long count, params object?[] args)` | Count-dependent text: looks up key.one, key.few, key.many or key.other by the culture's plural rule, falling back to key.other, then key. |
+| `Pump` | `public static void Pump()` | Compares the active culture with the last frame's and raises CultureChanged. |
+| `Resolve` | `public static string Resolve(string textOrReference)` | "@T:K=D" resolved, "@@x" to "@x", anything else unchanged. |
+| `SetCulture` | `public static bool SetCulture(string tag, bool persist = true)` | Switches the active culture. |
+| `Text` | `public static string Text(string table, string key, string? defaultText = null)` | The text for table/key: the chain, then defaultText, then "[Table:Key]". |
+| `Tr` | `public static string Tr(string message, string context = "")` | A message by its source text, from the culture chain's .po files; the source text itself when no culture translates it. |
+| `TrN` | `public static string TrN(string message, string plural, int n, string context = "")` | The singular or plural form of a message for n: msgstr[0] for 1, msgstr[1] otherwise; the source forms when untranslated. |
+| `TryGet` | `public static bool TryGet(string table, string key, out string text)` | The text for the key in the chain only: false when no culture in it has the key (no default, no brackets). |
+
+**Events**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `CultureChanged` | `public static event Action<string>? CultureChanged` | Raised from Pump (the game thread, once per frame) with the new culture after it changed. |
+
+<a id="locformat"></a>
 
 ### LocFormat
 
 `public static class LocFormat` - Plural categories and composite formatting.
 
-- `public static string PluralCategory(string culture, long n)` - The plural category ("one", "few", "many" or "other") of n in culture.
-- `public static string Apply(string template, CultureInfo culture, object?[] args)` - string.Format with the culture; a template that is not a valid composite format comes back unformatted.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Apply` | `public static string Apply(string template, CultureInfo culture, object?[] args)` | string.Format with the culture; a template that is not a valid composite format comes back unformatted. |
+| `PluralCategory` | `public static string PluralCategory(string culture, long n)` | The plural category ("one", "few", "many" or "other") of n in culture. |
+
+<a id="locgraph"></a>
 
 ### LocGraph
 
 `public static class LocGraph` - The localization graph nodes' entry points.
 
-- `public static bool SetCultureForGraph(string culture)` - AN_SetCulture: switches (and remembers) the culture.
-- `public static bool IsCultureForGraph(string culture)` - AN_IsCulture: the active tag equals culture, or starts with it and a '-' ("de" matches "de-AT").
-- `public static int CultureCountForGraph()` - AN_CultureCount: how many cultures the project ships.
-- `public static int CurrentCultureIndexForGraph()` - AN_CurrentCultureIndex: the active culture's place among the shipped ones, -1 if unknown.
-- `public static bool SetCultureByIndexForGraph(int index)` - AN_SetCultureByIndex.
-- `public static bool SetUiItemsToCulturesForGraph(int widget)` - AN_SetUiItemsToCultures: a Choice or List shows the shipped cultures by their own names, the current one selected.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `CultureCountForGraph` | `public static int CultureCountForGraph()` | AN_CultureCount: how many cultures the project ships. |
+| `CurrentCultureIndexForGraph` | `public static int CurrentCultureIndexForGraph()` | AN_CurrentCultureIndex: the active culture's place among the shipped ones, -1 if unknown. |
+| `IsCultureForGraph` | `public static bool IsCultureForGraph(string culture)` | AN_IsCulture: the active tag equals culture, or starts with it and a '-' ("de" matches "de-AT"). |
+| `SetCultureByIndexForGraph` | `public static bool SetCultureByIndexForGraph(int index)` | AN_SetCultureByIndex. |
+| `SetCultureForGraph` | `public static bool SetCultureForGraph(string culture)` | AN_SetCulture: switches (and remembers) the culture. |
+| `SetUiItemsToCulturesForGraph` | `public static bool SetUiItemsToCulturesForGraph(int widget)` | AN_SetUiItemsToCultures: a Choice or List shows the shipped cultures by their own names, the current one selected. |
+
+<a id="loctext"></a>
 
 ### LocText
 
 `public readonly struct LocText` - A localizable string field, the LOCTEXT analogue: a table/key with an inline default, resolved against the active culture every time it is read, so it follows a culture switch without being touched.
 
-- `public LocText(string table, string key, string? defaultText = null)` - A reference to table/key.
-- `public LocText(string reference)` - From "@Table:Key=Default", or a literal (which ToString returns as is, "@@" unescaped).
-- `public string Table { get; }` - The table, empty for a literal.
-- `public string Key { get; }` - The key, empty for a literal.
-- `public string? Default { get; }` - The inline default, null when none was given.
-- `public bool IsEmpty { get; }` - True for default(LocText) and the empty literal.
-- `public override string ToString()` - The text for the active culture.
-- `public string Format(params object?[] args)` - ToString formatted with args in the active culture.
-- `public static implicit operator string(LocText t)` - The text for the active culture.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `LocText` | `public LocText(string reference)` | From "@Table:Key=Default", or a literal (which ToString returns as is, "@@" unescaped). |
+| `LocText` | `public LocText(string table, string key, string? defaultText = null)` | A reference to table/key. |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Default` | `public string? Default { get; }` | The inline default, null when none was given. |
+| `IsEmpty` | `public bool IsEmpty { get; }` | True for default(LocText) and the empty literal. |
+| `Key` | `public string Key { get; }` | The key, empty for a literal. |
+| `Table` | `public string Table { get; }` | The table, empty for a literal. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Format` | `public string Format(params object?[] args)` | ToString formatted with args in the active culture. |
+| `operator string` | `public static implicit operator string(LocText t)` | The text for the active culture. |
+| `ToString` | `public override string ToString()` | The text for the active culture. |
+
+<a id="magnitudekind"></a>
 
 ### MagnitudeKind
 
 `public enum MagnitudeKind` - Where a modifier's magnitude comes from.
 
-Values: `Constant`, `SetByCaller`, `AttributeBased`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AttributeBased` | `AttributeBased` |  |
+| `Constant` | `Constant` |  |
+| `SetByCaller` | `SetByCaller` |  |
+
+<a id="meshgimode"></a>
 
 ### MeshGiMode
 
 `public enum MeshGiMode` - How a mesh takes part in the voxel GI (SetGiMode).
 
-Values: `Static = 0`, `Dynamic = 1`, `Disabled = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Disabled` | `Disabled = 2` |  |
+| `Dynamic` | `Dynamic = 1` |  |
+| `Static` | `Static = 0` |  |
+
+<a id="meshshadowmode"></a>
 
 ### MeshShadowMode
 
 `public enum MeshShadowMode` - How a mesh takes part in the sun's shadows (SetShadowMode).
 
-Values: `On = 0`, `Off = 1`, `ShadowsOnly = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Off` | `Off = 1` |  |
+| `On` | `On = 0` |  |
+| `ShadowsOnly` | `ShadowsOnly = 2` |  |
+
+<a id="modelattribute"></a>
 
 ### ModelAttribute
 
 `public sealed class ModelAttribute : Attribute` - Marks a property in the generated region as one model slot the viewport gizmo drives.
 
+<a id="modelhandle"></a>
+
 ### ModelHandle
 
 `public readonly struct ModelHandle : IEquatable<ModelHandle>` - A handle to one placed model inside an actor: a child entity with a mesh and a transform, but no class.
 
-- `public Entity Entity { get; }` - The child entity this model is.
-- `public ulong ModelId { get; }` - The per-placement identity minted when the model was placed.
-- `public bool IsValid { get; }`
-- `public bool Equals(ModelHandle o)`
-- `public override bool Equals(object? o)`
-- `public override int GetHashCode()`
-- `public override string ToString()`
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Entity` | `public Entity Entity { get; }` | The child entity this model is. |
+| `IsValid` | `public bool IsValid { get; }` |  |
+| `ModelId` | `public ulong ModelId { get; }` | The per-placement identity minted when the model was placed. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Equals` | `public bool Equals(ModelHandle o)` |  |
+| `Equals` | `public override bool Equals(object? o)` |  |
+| `GetHashCode` | `public override int GetHashCode()` |  |
+| `ToString` | `public override string ToString()` |  |
+
+<a id="modelimport"></a>
 
 ### ModelImport
 
 `public static class ModelImport` - Import a model file into the project's Content folder.
 
-- `public static bool IsAvailable { get; }` - True when the host can import (the editor).
-- `public static ModelImportResult Import(string source, string destFolder, ModelImportOptions? options = null, bool overwrite = false)` - Imports source (an absolute path, or one relative to the project folder) into the Content-relative folder destFolder.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `IsAvailable` | `public static bool IsAvailable { get; }` | True when the host can import (the editor). |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Import` | `public static ModelImportResult Import(string source, string destFolder, ModelImportOptions? options = null, bool overwrite = false)` | Imports source (an absolute path, or one relative to the project folder) into the Content-relative folder destFolder. |
+
+<a id="modelimportgraph"></a>
 
 ### ModelImportGraph
 
 `public static class ModelImportGraph` - What the Import Model and Is Model Import Available graph nodes call: primitive-only signatures the graph compiler's emitted IL needs.
 
-- `public static bool ImportModelForGraph(string source, string dest, bool overwrite, float scale, out int meshes, out int skeletons, out int clips)` - Import Model node: imports source into dest (Content-relative).
-- `public static bool IsModelImportAvailableForGraph()` - Is Model Import Available node.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ImportModelForGraph` | `public static bool ImportModelForGraph(string source, string dest, bool overwrite, float scale, out int meshes, out int skeletons, out int clips)` | Import Model node: imports source into dest (Content-relative). |
+| `IsModelImportAvailableForGraph` | `public static bool IsModelImportAvailableForGraph()` | Is Model Import Available node. |
+
+<a id="modelimportoptions"></a>
 
 ### ModelImportOptions
 
 `public sealed class ModelImportOptions` - The FBX import options a script can set; the rest keep the editor's defaults.
 
-- `public float Scale { get; set; }` - Centimetres per metre: the file is converted to metres, then multiplied by this.
-- `public float UnitMeters { get; set; }` - Greater than 0 ignores the file's own unit and treats one file unit as this many metres.
-- `public bool Meshes { get; set; }` - Import the geometry.
-- `public bool Skeletons { get; set; }` - Import skeletons and skin weights.
-- `public bool Animations { get; set; }` - Import animation clips.
-- `public bool Materials { get; set; }` - Import materials and their textures.
-- `public bool BlendShapes { get; set; }` - Import blend shapes (reported, not carried, until morph targets land).
-- `public RootMotionImport RootMotion { get; set; }` - Which clips are flagged as root motion.
-- `public int BakeFps { get; set; }` - Resample rate for non-linear curves.
-- `public bool ReduceKeys { get; set; }` - Let the importer drop keys a straight line reproduces.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Animations` | `public bool Animations { get; set; }` | Import animation clips. |
+| `BakeFps` | `public int BakeFps { get; set; }` | Resample rate for non-linear curves. |
+| `BlendShapes` | `public bool BlendShapes { get; set; }` | Import blend shapes (reported, not carried, until morph targets land). |
+| `Materials` | `public bool Materials { get; set; }` | Import materials and their textures. |
+| `Meshes` | `public bool Meshes { get; set; }` | Import the geometry. |
+| `ReduceKeys` | `public bool ReduceKeys { get; set; }` | Let the importer drop keys a straight line reproduces. |
+| `RootMotion` | `public RootMotionImport RootMotion { get; set; }` | Which clips are flagged as root motion. |
+| `Scale` | `public float Scale { get; set; }` | Centimetres per metre: the file is converted to metres, then multiplied by this. |
+| `Skeletons` | `public bool Skeletons { get; set; }` | Import skeletons and skin weights. |
+| `UnitMeters` | `public float UnitMeters { get; set; }` | Greater than 0 ignores the file's own unit and treats one file unit as this many metres. |
+
+<a id="modelimportresult"></a>
 
 ### ModelImportResult
 
 `public readonly record struct ModelImportResult(bool Ok, string Message, int Meshes, int Skeletons, int Clips, int Materials, int Textures)` - What an import wrote.
 
+<a id="modifierdef"></a>
+
 ### ModifierDef
 
 `public sealed class ModifierDef` - One attribute change an effect makes.
 
-- `public AttributeRef Attribute` - The attribute modified.
-- `public ModOp Op` - What it does.
-- `public MagnitudeKind Kind` - Where the magnitude comes from.
-- `public float Value` - The constant (Constant) or the scale (SetByCaller, AttributeBased).
-- `public float Add` - AttributeBased only: added after scaling.
-- `public GameplayTag CallerTag` - SetByCaller only: the key the caller supplies the value under.
-- `public AttributeRef FromAttribute` - AttributeBased only: the attribute read.
-- `public bool FromSource` - AttributeBased only: read it from the source (true) or the target (false).
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Add` | `public float Add` | AttributeBased only: added after scaling. |
+| `Attribute` | `public AttributeRef Attribute` | The attribute modified. |
+| `CallerTag` | `public GameplayTag CallerTag` | SetByCaller only: the key the caller supplies the value under. |
+| `FromAttribute` | `public AttributeRef FromAttribute` | AttributeBased only: the attribute read. |
+| `FromSource` | `public bool FromSource` | AttributeBased only: read it from the source (true) or the target (false). |
+| `Kind` | `public MagnitudeKind Kind` | Where the magnitude comes from. |
+| `Op` | `public ModOp Op` | What it does. |
+| `Value` | `public float Value` | The constant (Constant) or the scale (SetByCaller, AttributeBased). |
+
+<a id="modop"></a>
 
 ### ModOp
 
 `public enum ModOp` - What a modifier does to its attribute.
 
-Values: `Add`, `Multiply`, `Override`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Add` | `Add` |  |
+| `Multiply` | `Multiply` |  |
+| `Override` | `Override` |  |
+
+<a id="motiondrive"></a>
 
 ### MotionDrive
 
 `public enum MotionDrive` - Who moves the entity.
 
-Values: `Simulation = 0`, `Animation = 1`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Animation` | `Animation = 1` |  |
+| `Simulation` | `Simulation = 0` |  |
+
+<a id="motionfacing"></a>
 
 ### MotionFacing
 
 `public enum MotionFacing` - Where the matched character faces.
 
-Values: `Velocity = 0`, `Yaw = 1`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Velocity` | `Velocity = 0` |  |
+| `Yaw` | `Yaw = 1` |  |
+
+<a id="multimeshes"></a>
 
 ### MultiMeshes
 
 `public static class MultiMeshes` - Instance tables drawn as one mesh (a multi-mesh).
 
-- `public static int Create(string key)`
-- `public static bool Destroy(int id)`
-- `public static bool SetSource(int id, string meshPath)` - The mesh to instance: a content path ("Meshes/Rock.ocmesh") or a runtime mesh by its path (PathOf).
-- `public static bool SetFlags(int id, bool useColors, bool useCustom)`
-- `public static bool SetCount(int id, int count)`
-- `public static bool SetVisible(int id, int count)` - How many instances are drawn (the first N); -1 draws all of them.
-- `public static bool SetTransform(int id, int index, float[] t12)` - One instance's transform as 12 floats: the engine's row-vector world matrix with its 4th column dropped (three basis rows, then the translation).
-- `public static bool SetColor(int id, int index, float r, float g, float b, float a)`
-- `public static bool SetCustom(int id, int index, float x, float y, float z, float w)`
-- `public static bool SetBuffer(int id, int count, float[]? transforms12, float[]? colors4, float[]? custom4)` - The whole table at once; count instances (the table is resized to it); colours and custom data may be null.
-- `public static int MeshOf(int id)` - The runtime mesh the MultiMesh bakes into (its path is PathOf of "multimesh/&lt;key&gt;"); 0 for an unknown id.
-- `public static bool TryGetInfo(int id, out int instances, out int visible, out int drawn, out int generation)` - Instances, visible (requested), drawn (after the engine's vertex budget; 0 until the first bake) and the baked mesh's generation.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Create` | `public static int Create(string key)` |  |
+| `Destroy` | `public static bool Destroy(int id)` |  |
+| `MeshOf` | `public static int MeshOf(int id)` | The runtime mesh the MultiMesh bakes into (its path is PathOf of "multimesh/&lt;key&gt;"); 0 for an unknown id. |
+| `SetBuffer` | `public static bool SetBuffer(int id, int count, float[]? transforms12, float[]? colors4, float[]? custom4)` | The whole table at once; count instances (the table is resized to it); colours and custom data may be null. |
+| `SetColor` | `public static bool SetColor(int id, int index, float r, float g, float b, float a)` |  |
+| `SetCount` | `public static bool SetCount(int id, int count)` |  |
+| `SetCustom` | `public static bool SetCustom(int id, int index, float x, float y, float z, float w)` |  |
+| `SetFlags` | `public static bool SetFlags(int id, bool useColors, bool useCustom)` |  |
+| `SetSource` | `public static bool SetSource(int id, string meshPath)` | The mesh to instance: a content path ("Meshes/Rock.ocmesh") or a runtime mesh by its path (PathOf). |
+| `SetTransform` | `public static bool SetTransform(int id, int index, float[] t12)` | One instance's transform as 12 floats: the engine's row-vector world matrix with its 4th column dropped (three basis rows, then the translation). |
+| `SetVisible` | `public static bool SetVisible(int id, int count)` | How many instances are drawn (the first N); -1 draws all of them. |
+| `TryGetInfo` | `public static bool TryGetInfo(int id, out int instances, out int visible, out int drawn, out int generation)` | Instances, visible (requested), drawn (after the engine's vertex budget; 0 until the first bake) and the baked mesh's generation. |
+
+<a id="music"></a>
 
 ### Music
 
 `public static class Music` - The music slot.
 
-- `public static Voice Play(string path, float fadeSeconds = 2f, float volume = 1f, bool looping = true, FadeCurve curve = FadeCurve.EqualPower)` - Plays path on the Music bus, fading the current track out as it fades in.
-- `public static void Stop(float fadeSeconds = 1f)` - Fades the current track out and ends it.
-- `public static Voice Current { get; }` - The current track's voice, or None once it has ended.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Current` | `public static Voice Current { get; }` | The current track's voice, or None once it has ended. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Play` | `public static Voice Play(string path, float fadeSeconds = 2f, float volume = 1f, bool looping = true, FadeCurve curve = FadeCurve.EqualPower)` | Plays path on the Music bus, fading the current track out as it fades in. |
+| `Stop` | `public static void Stop(float fadeSeconds = 1f)` | Fades the current track out and ends it. |
+
+<a id="os"></a>
 
 ### OS
 
 `public static class OS` - The operating system and build (name and features).
 
-- `public static string Name { get; }` - "Windows", "Linux" or "macOS".
-- `public static bool HasFeature(string tag)` - Whether a feature tag applies: the OS ("windows", "linux", "macos"), "pc", "64", the build ("debug" or "release") and the host ("editor" or "standalone").
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Name` | `public static string Name { get; }` | "Windows", "Linux" or "macOS". |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `HasFeature` | `public static bool HasFeature(string tag)` | Whether a feature tag applies: the OS ("windows", "linux", "macos"), "pc", "64", the build ("debug" or "release") and the host ("editor" or "standalone"). |
+
+<a id="overlapevent"></a>
 
 ### OverlapEvent
 
 `public readonly struct OverlapEvent` - Something entering or leaving a sensor volume during the last step.
 
-- `public Body Sensor { get; }` - The sensor whose volume it is.
-- `public Body Other { get; }` - What entered or left.
-- `public bool Entered { get; }` - True on entering, false on leaving.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Entered` | `public bool Entered { get; }` | True on entering, false on leaving. |
+| `Other` | `public Body Other { get; }` | What entered or left. |
+| `Sensor` | `public Body Sensor { get; }` | The sensor whose volume it is. |
+
+<a id="parallax2d"></a>
 
 ### Parallax2D
 
 `public struct Parallax2D` - Parallax scrolling for the sprites below an entity (Godot's Parallax2D).
 
-- `public Vector2 ScrollScale` - 1 scrolls with the world, 0 stays on screen, between is farther away.
-- `public Vector2 ScrollOffset` - Added to the scroll.
-- `public Vector2 RepeatSize` - Tile size per axis; 0 means no tiling on that axis.
-- `public int RepeatTimes` - Tiles on each side of the original; 0 reads as 1.
-- `public Vector2 Autoscroll` - World units per second the layer drifts.
-- `public Vector2 LimitBegin` - With LimitBegin: the camera position the scroll uses is not lower than this.
-- `public Vector2 LimitEnd` - With LimitEnd: the camera position the scroll uses is not higher than this.
-- `public Parallax2DFlags Flags` - Behaviour bits.
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Autoscroll` | `public Vector2 Autoscroll` | World units per second the layer drifts. |
+| `Flags` | `public Parallax2DFlags Flags` | Behaviour bits. |
+| `LimitBegin` | `public Vector2 LimitBegin` | With LimitBegin: the camera position the scroll uses is not lower than this. |
+| `LimitEnd` | `public Vector2 LimitEnd` | With LimitEnd: the camera position the scroll uses is not higher than this. |
+| `RepeatSize` | `public Vector2 RepeatSize` | Tile size per axis; 0 means no tiling on that axis. |
+| `RepeatTimes` | `public int RepeatTimes` | Tiles on each side of the original; 0 reads as 1. |
+| `ScrollOffset` | `public Vector2 ScrollOffset` | Added to the scroll. |
+| `ScrollScale` | `public Vector2 ScrollScale` | 1 scrolls with the world, 0 stays on screen, between is farther away. |
+
+<a id="parallax2dflags"></a>
 
 ### Parallax2DFlags
 
 `public enum Parallax2DFlags : uint` - Flags of Parallax2D.
 
-Values: `None = 0`, `NoFollow = 1`, `LimitBegin = 2`, `LimitEnd = 4`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `LimitBegin` | `LimitBegin = 2` |  |
+| `LimitEnd` | `LimitEnd = 4` |  |
+| `NoFollow` | `NoFollow = 1` |  |
+| `None` | `None = 0` |  |
+
+<a id="particleparamkind"></a>
 
 ### ParticleParamKind
 
 `public enum ParticleParamKind` - The kind of a particle user parameter, as an effect declares it with PARAM.
 
-Values: `Float = 0`, `Vector = 1`, `Color = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Color` | `Color = 2` |  |
+| `Float` | `Float = 0` |  |
+| `Vector` | `Vector = 1` |  |
+
+<a id="particles"></a>
 
 ### Particles
 
 `public static class Particles` - Fire-and-forget particle effects and the particle system's budgets.
 
-- `public static int SpawnAt(string effect, Vec3 position, Vec3 direction, int count = 1)` - Spawns count particles of the effect (a content path ending .ocparticle) at a world point, fired along direction (effect +Z maps onto it; zero keeps the effect's authored direction).
-- `public static int SpawnAt(string effect, Vec3 position, Vec3 direction, int count, float speedScale, float sizeScale = 1f, float lifetimeScale = 1f, Vec3 inheritedVelocity = default)` - As above with speed, size and lifetime scales and an inherited velocity (a vehicle's own velocity, for sparks and smoke: effects that carry the spawn.inheritvelocity module add it, scaled, to each particle).
-- `public static int SpawnAt(long effectId, Vec3 position, Vec3 direction, int count = 1)` - The same by effect id (Assets.ObjectIdOf(path)), for callers that hash once.
-- `public static bool SetBudget(int maxGpuParticles = 2_000_000, int maxCpuParticles = 200_000, int maxSpawnAtPerFrame = 2048)` - Sets the particle budgets: live GPU particles (allocated capacity), live CPU particles, and spawn-at particles per frame.
-- `public static bool SetGpuMode(int mode)` - Chooses where emitters may simulate: 0 everything on the CPU, 1 automatic (big emitters on the GPU), 2 every emitter that can on the GPU.
-- `public static bool TryGetStats(out ParticleStats stats)` - Reads the particle system's counters.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `SetBudget` | `public static bool SetBudget(int maxGpuParticles = 2_000_000, int maxCpuParticles = 200_000, int maxSpawnAtPerFrame = 2048)` | Sets the particle budgets: live GPU particles (allocated capacity), live CPU particles, and spawn-at particles per frame. |
+| `SetGpuMode` | `public static bool SetGpuMode(int mode)` | Chooses where emitters may simulate: 0 everything on the CPU, 1 automatic (big emitters on the GPU), 2 every emitter that can on the GPU. |
+| `SpawnAt` | `public static int SpawnAt(long effectId, Vec3 position, Vec3 direction, int count = 1)` | The same by effect id (Assets.ObjectIdOf(path)), for callers that hash once. |
+| `SpawnAt` | `public static int SpawnAt(string effect, Vec3 position, Vec3 direction, int count = 1)` | Spawns count particles of the effect (a content path ending .ocparticle) at a world point, fired along direction (effect +Z maps onto it; zero keeps the effect's authored direction). |
+| `SpawnAt` | `public static int SpawnAt(string effect, Vec3 position, Vec3 direction, int count, float speedScale, float sizeScale = 1f, float lifetimeScale = 1f, Vec3 inheritedVelocity = default)` | As above with speed, size and lifetime scales and an inherited velocity (a vehicle's own velocity, for sparks and smoke: effects that carry the spawn.inheritvelocity module add it, scaled, to each particle). |
+| `TryGetStats` | `public static bool TryGetStats(out ParticleStats stats)` | Reads the particle system's counters. |
+
+<a id="particlestats"></a>
 
 ### ParticleStats
 
 `public readonly record struct ParticleStats(int GpuEmitters, int CpuEmitters, int GpuParticles, int CpuParticles, int SpawnAtDropped, int GpuAllocatedKB)` - The particle system's counters, as TryGetStats returns them.
 
+<a id="paths"></a>
+
 ### Paths
 
 `public static class Paths` - The project's directories and the res:// and user:// paths.
 
-- `public static string Project { get; }` - The directory holding the project's manifest; "" before a project opens.
-- `public static string Content { get; }` - The project's content directory, what res:// names; "" before a project opens.
-- `public static string User { get; }` - The player's writable directory for this project, what user:// names (created on first use).
-- `public static string Globalize(string path)` - An OS path for path: res://a/b under Content, user://a/b under User, anything else unchanged.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Content` | `public static string Content { get; }` | The project's content directory, what res:// names; "" before a project opens. |
+| `Project` | `public static string Project { get; }` | The directory holding the project's manifest; "" before a project opens. |
+| `User` | `public static string User { get; }` | The player's writable directory for this project, what user:// names (created on first use). |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Globalize` | `public static string Globalize(string path)` | An OS path for path: res://a/b under Content, user://a/b under User, anything else unchanged. |
+
+<a id="pausemode"></a>
 
 ### PauseMode
 
 `public enum PauseMode` - Whether an actor ticks while the game is paused (the process mode).
 
-Values: `Inherit = 0`, `Pausable = 1`, `WhenPaused = 2`, `Always = 3`, `Disabled = 4`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Always` | `Always = 3` |  |
+| `Disabled` | `Disabled = 4` |  |
+| `Inherit` | `Inherit = 0` |  |
+| `Pausable` | `Pausable = 1` |  |
+| `WhenPaused` | `WhenPaused = 2` |  |
+
+<a id="physicalsurfaces"></a>
 
 ### PhysicalSurfaces
 
 `public static class PhysicalSurfaces` - Physical surfaces for scripts.
 
-- `public static SurfaceHit Raycast(Vec3 origin, Vec3 direction, float maxDistanceCm, uint layerMask = uint.MaxValue)` - Casts a ray and reports what it hit: the surface at the exact triangle, cell or compound leaf, with its numbers.
-- `public static SurfaceHit Beneath(Entity entity, float probeCm = 150f)` - What an entity stands on: a ray straight down from just above its position, probeCm long, ignoring the entity's own rigid body.
-- `public static int Find(string name)` - The id of a REGISTERED surface called name (a Surfaces.ocsurf entry, a landscape layer or Register); 0 when no surface of that name is registered.
-- `public static int Register(string name, float friction = -1f, float restitution = -1f, int tag = 0)` - Adds or updates a named surface; returns its id (0 when refused).
-- `public static bool Tune(int surface, float friction, float restitution, int tag)` - Changes the numbers of a surface; live for every body on it.
-- `public static AP.SurfaceInfo? Info(int surface)` - The registry entry of surface (name, friction, restitution, tag), or null when the id is unknown.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Beneath` | `public static SurfaceHit Beneath(Entity entity, float probeCm = 150f)` | What an entity stands on: a ray straight down from just above its position, probeCm long, ignoring the entity's own rigid body. |
+| `Find` | `public static int Find(string name)` | The id of a REGISTERED surface called name (a Surfaces.ocsurf entry, a landscape layer or Register); 0 when no surface of that name is registered. |
+| `Info` | `public static AP.SurfaceInfo? Info(int surface)` | The registry entry of surface (name, friction, restitution, tag), or null when the id is unknown. |
+| `Raycast` | `public static SurfaceHit Raycast(Vec3 origin, Vec3 direction, float maxDistanceCm, uint layerMask = uint.MaxValue)` | Casts a ray and reports what it hit: the surface at the exact triangle, cell or compound leaf, with its numbers. |
+| `Register` | `public static int Register(string name, float friction = -1f, float restitution = -1f, int tag = 0)` | Adds or updates a named surface; returns its id (0 when refused). |
+| `Tune` | `public static bool Tune(int surface, float friction, float restitution, int tag)` | Changes the numbers of a surface; live for every body on it. |
+
+<a id="physics"></a>
 
 ### Physics
 
 `public static class Physics` - The simulation as a script sees it: bodies, sensors, queries and gravity.
 
-- `public static bool Ready { get; }` - True when the simulation is running.
-- `public static float FixedStep { get; }` - The fixed simulation step in seconds.
-- `public static void SetGravity(Vec3 g)` - Sets gravity in cm/s².
-- `public static int BodyCount { get; }` - How many bodies exist.
-- `public static Body AddStaticBox(Vec3 centre, Vec3 halfExtents)` - Adds a box that never moves.
-- `public static Body AddDynamicBox(Vec3 centre, Vec3 halfExtents, float massKg = 0f)` - Adds a box that falls and collides.
-- `public static Body AddDynamicSphere(Vec3 centre, float radius, float massKg = 0f)` - Adds a sphere that falls and collides.
-- `public static RaycastHit Raycast(Vec3 origin, Vec3 direction, float maxDistanceCm)` - Casts a ray up to maxDistanceCm and returns the first hit, including which entity (if any) owns whatever it hit -- see Entity.
-- `public static bool RaycastAny(Vec3 origin, Vec3 direction, float maxDistanceCm)` - True if anything lies within maxDistanceCm along the ray.
-- `public static Body AddSensorBox(Vec3 centre, Vec3 halfExtents)` - Adds a box trigger volume.
-- `public static Body AddSensorSphere(Vec3 centre, float radius)` - Adds a spherical trigger volume.
-- `public static IReadOnlyList<ContactEvent> Contacts { get; }` - Contacts that began during the last step.
-- `public static IReadOnlyList<OverlapEvent> Overlaps { get; }` - Sensor volumes entered or left during the last step.
-- `public static Body[] OverlapSphere(Vec3 centre, float radius, int maxResults = 64)` - Every body overlapping a sphere.
-- `public static RaycastHit SphereCast(Vec3 origin, Vec3 direction, float maxDistanceCm, float radius)` - Sweeps a sphere and returns the first thing it touches.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `BodyCount` | `public static int BodyCount { get; }` | How many bodies exist. |
+| `Contacts` | `public static IReadOnlyList<ContactEvent> Contacts { get; }` | Contacts that began during the last step. |
+| `FixedStep` | `public static float FixedStep { get; }` | The fixed simulation step in seconds. |
+| `Overlaps` | `public static IReadOnlyList<OverlapEvent> Overlaps { get; }` | Sensor volumes entered or left during the last step. |
+| `Ready` | `public static bool Ready { get; }` | True when the simulation is running. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AddDynamicBox` | `public static Body AddDynamicBox(Vec3 centre, Vec3 halfExtents, float massKg = 0f)` | Adds a box that falls and collides. |
+| `AddDynamicSphere` | `public static Body AddDynamicSphere(Vec3 centre, float radius, float massKg = 0f)` | Adds a sphere that falls and collides. |
+| `AddSensorBox` | `public static Body AddSensorBox(Vec3 centre, Vec3 halfExtents)` | Adds a box trigger volume. |
+| `AddSensorSphere` | `public static Body AddSensorSphere(Vec3 centre, float radius)` | Adds a spherical trigger volume. |
+| `AddStaticBox` | `public static Body AddStaticBox(Vec3 centre, Vec3 halfExtents)` | Adds a box that never moves. |
+| `OverlapSphere` | `public static Body[] OverlapSphere(Vec3 centre, float radius, int maxResults = 64)` | Every body overlapping a sphere. |
+| `Raycast` | `public static RaycastHit Raycast(Vec3 origin, Vec3 direction, float maxDistanceCm)` | Casts a ray up to maxDistanceCm and returns the first hit, including which entity (if any) owns whatever it hit -- see Entity. |
+| `RaycastAny` | `public static bool RaycastAny(Vec3 origin, Vec3 direction, float maxDistanceCm)` | True if anything lies within maxDistanceCm along the ray. |
+| `SetGravity` | `public static void SetGravity(Vec3 g)` | Sets gravity in cm/s². |
+| `SphereCast` | `public static RaycastHit SphereCast(Vec3 origin, Vec3 direction, float maxDistanceCm, float radius)` | Sweeps a sphere and returns the first thing it touches. |
+
+<a id="playstate"></a>
 
 ### PlayState
 
 `public enum PlayState` - The world's play state, as read from aver_fw_play_state.
 
-Values: `Editor = 0`, `Playing = 1`, `Paused = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Editor` | `Editor = 0` |  |
+| `Paused` | `Paused = 2` |  |
+| `Playing` | `Playing = 1` |  |
+
+<a id="pointer"></a>
 
 ### Pointer
 
 `public static class Pointer` - The pointer over the game window: its mode, the cursor's shape and images, and moving it.
 
-- `public static PointerMode Mode { get; set; }` - The pointer mode.
-- `public static CursorShape Shape { get; set; }` - The shape shown while the pointer is over the window.
-- `public static bool SetCursorImage(CursorShape shape, byte[]? rgba, int width, int height, int hotX = 0, int hotY = 0)` - Replaces a shape with an image: rgba is width x height x 4 straight-alpha bytes, top row first, each side 1 to 256, the hotspot inside it.
-- `public static void Warp(float x, float y)` - Moves the pointer to the window pixel (x, y) at the next frame.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Mode` | `public static PointerMode Mode { get; set; }` | The pointer mode. |
+| `Shape` | `public static CursorShape Shape { get; set; }` | The shape shown while the pointer is over the window. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `SetCursorImage` | `public static bool SetCursorImage(CursorShape shape, byte[]? rgba, int width, int height, int hotX = 0, int hotY = 0)` | Replaces a shape with an image: rgba is width x height x 4 straight-alpha bytes, top row first, each side 1 to 256, the hotspot inside it. |
+| `Warp` | `public static void Warp(float x, float y)` | Moves the pointer to the window pixel (x, y) at the next frame. |
+
+<a id="pointermode"></a>
 
 ### PointerMode
 
 `public enum PointerMode` - How the pointer behaves over the game window.
 
-Values: `Auto = 0`, `Visible = 1`, `Hidden = 2`, `Captured = 3`, `Confined = 4`, `ConfinedHidden = 5`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Auto` | `Auto = 0` |  |
+| `Captured` | `Captured = 3` |  |
+| `Confined` | `Confined = 4` |  |
+| `ConfinedHidden` | `ConfinedHidden = 5` |  |
+| `Hidden` | `Hidden = 2` |  |
+| `Visible` | `Visible = 1` |  |
+
+<a id="poseinterpolation"></a>
 
 ### PoseInterpolation
 
 `public static class PoseInterpolation` - Draws entities between their last two physics steps.
 
-- `public static bool? Enabled { get; set; }` - The switch every entity that inherits follows: null leaves it to the project, true or false overrides it.
-- `public static InterpolationMode GetMode(int entity)`
-- `public static void SetMode(int entity, InterpolationMode mode)`
-- `public static void Reset(int entity)` - The next pose of the entity is a teleport: it is drawn there at once, with no blend from where it was.
-- `public static bool TryGetDrawnPose(int entity, out Vec3 position, out Quat rotation)` - The pose last drawn for a blended entity: world position (engine cm) and rotation (x y z w).
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Enabled` | `public static bool? Enabled { get; set; }` | The switch every entity that inherits follows: null leaves it to the project, true or false overrides it. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `GetMode` | `public static InterpolationMode GetMode(int entity)` |  |
+| `Reset` | `public static void Reset(int entity)` | The next pose of the entity is a teleport: it is drawn there at once, with no blend from where it was. |
+| `SetMode` | `public static void SetMode(int entity, InterpolationMode mode)` |  |
+| `TryGetDrawnPose` | `public static bool TryGetDrawnPose(int entity, out Vec3 position, out Quat rotation)` | The pose last drawn for a blended entity: world position (engine cm) and rotation (x y z w). |
+
+<a id="postfx"></a>
 
 ### PostFx
 
 `public static class PostFx` - Script-driven post-process layers, blended over the level's own post volumes.
 
-- `public const string DefaultLayer = "script"` - The layer a call without a name uses.
-- `public static bool SetValue(string? layer, string key, float v0, float v1 = 0f, float v2 = 0f)` - Sets one post value on a layer (creating the layer on first use).
-- `public static bool SetValue(string key, float v0)` - Sets one post value on the DefaultLayer layer.
-- `public static bool SetLayerWeight(string? layer, float weight, float blendSeconds = 0f)` - Fades a layer to weight (0 to 1) over blendSeconds from wherever it is now; 0 seconds applies at once.
-- `public static bool ClearLayer(string? layer = null)` - Removes a layer at once (SetLayerWeight to 0 first to fade it out).
-- `public static void ClearAll()` - Removes every layer a script made.
-- `public static bool SetVolumeWeight(string volume, float weight, float blendSeconds = 0f)` - Scales the weight of one of the LEVEL's post volumes, by its authored name, from its current scale (1 at first) over blendSeconds: 0 mutes it, 1 restores it.
-- `public static bool ClearVolumeWeight(string volume)` - Removes the scale on a level volume, so it applies at its authored weight again.
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `DefaultLayer` | `public const string DefaultLayer = "script"` | The layer a call without a name uses. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ClearAll` | `public static void ClearAll()` | Removes every layer a script made. |
+| `ClearLayer` | `public static bool ClearLayer(string? layer = null)` | Removes a layer at once (SetLayerWeight to 0 first to fade it out). |
+| `ClearVolumeWeight` | `public static bool ClearVolumeWeight(string volume)` | Removes the scale on a level volume, so it applies at its authored weight again. |
+| `SetLayerWeight` | `public static bool SetLayerWeight(string? layer, float weight, float blendSeconds = 0f)` | Fades a layer to weight (0 to 1) over blendSeconds from wherever it is now; 0 seconds applies at once. |
+| `SetValue` | `public static bool SetValue(string key, float v0)` | Sets one post value on the DefaultLayer layer. |
+| `SetValue` | `public static bool SetValue(string? layer, string key, float v0, float v1 = 0f, float v2 = 0f)` | Sets one post value on a layer (creating the layer on first use). |
+| `SetVolumeWeight` | `public static bool SetVolumeWeight(string volume, float weight, float blendSeconds = 0f)` | Scales the weight of one of the LEVEL's post volumes, by its authored name, from its current scale (1 at first) over blendSeconds: 0 mutes it, 1 restores it. |
+
+<a id="preattributechange"></a>
 
 ### PreAttributeChange
 
 `public delegate void PreAttributeChange(AbilitySystem system, AttributeRef attribute, ref float newValue)` - Lets a game adjust an attribute's new Current value before it is stored (a custom clamp).
 
+<a id="preload"></a>
+
 ### Preload
 
 `public static class Preload` - Tells the host what is about to be shown, so its background workers decode and compress the textures before the frame that draws it.
 
-- `public static bool Mesh(string meshAssetPath)` - Queues the slot materials of the mesh at content-relative meshAssetPath ("Meshes/a.ocmesh").
-- `public static bool Material(string materialName)` - Queues the textures of the material named materialName (what Entity.SetMaterial takes).
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Material` | `public static bool Material(string materialName)` | Queues the textures of the material named materialName (what Entity.SetMaterial takes). |
+| `Mesh` | `public static bool Mesh(string meshAssetPath)` | Queues the slot materials of the mesh at content-relative meshAssetPath ("Meshes/a.ocmesh"). |
+
+<a id="presentmode"></a>
 
 ### PresentMode
 
 `public enum PresentMode` - Present modes.
 
-Values: `Fifo = 0`, `Immediate = 1`, `Adaptive = 2`, `Mailbox = 3`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Adaptive` | `Adaptive = 2` |  |
+| `Fifo` | `Fifo = 0` |  |
+| `Immediate` | `Immediate = 1` |  |
+| `Mailbox` | `Mailbox = 3` |  |
+
+<a id="probeblend"></a>
 
 ### ProbeBlend
 
 `public readonly struct ProbeBlend` - The reflection probes that light a point.
 
-- `public int[] Ids { get; init; }` - Up to four probe ids, the most specific (smallest) first.
-- `public float[] Weights { get; init; }` - Each probe's share of the blend (its intensity included).
-- `public float Rest { get; init; }` - What is left for the sky / default environment, 0 to 1.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Ids` | `public int[] Ids { get; init; }` | Up to four probe ids, the most specific (smallest) first. |
+| `Rest` | `public float Rest { get; init; }` | What is left for the sky / default environment, 0 to 1. |
+| `Weights` | `public float[] Weights { get; init; }` | Each probe's share of the blend (its intensity included). |
+
+<a id="projectsettings"></a>
 
 ### ProjectSettings
 
 `public static class ProjectSettings` - The project manifest's settings by key, as the text the manifest holds.
 
-- `public static string Get(string key, string fallback = "")` - The value of a manifest key (any case), or fallback when it is absent.
-- `public static bool Has(string key)` - Whether the manifest states the key.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Get` | `public static string Get(string key, string fallback = "")` | The value of a manifest key (any case), or fallback when it is absent. |
+| `Has` | `public static bool Has(string key)` | Whether the manifest states the key. |
+
+<a id="ragdollmode"></a>
 
 ### RagdollMode
 
 `public enum RagdollMode` - How a ragdoll relates to the animation.
 
-Values: `Kinematic = 0`, `Limp = 1`, `Powered = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Kinematic` | `Kinematic = 0` |  |
+| `Limp` | `Limp = 1` |  |
+| `Powered` | `Powered = 2` |  |
+
+<a id="randomnumbergenerator"></a>
 
 ### RandomNumberGenerator
 
 `public sealed class RandomNumberGenerator` - A seedable PCG32 generator with the usual random-number-generator methods.
 
-- `public const ulong DefaultStream = 1442695040888963407UL` - The stream every generator uses unless told otherwise (PCG's default increment).
-- `public RandomNumberGenerator()` - A generator seeded from the clock and a counter, so two made at once differ.
-- `public RandomNumberGenerator(ulong seed, ulong stream = DefaultStream)` - A generator seeded with seed.
-- `public ulong Seed { get; set; }` - The seed last set; setting it restarts the sequence.
-- `public ulong State { get; set; }` - The generator's position: save it and set it back to replay from there.
-- `public void Randomize()` - Reseeds from the clock and a process counter.
-- `public uint Randi()` - A uniform 32-bit value (pcg32: XSH-RR of the old state).
-- `public uint Randi(uint bound)` - A uniform value in [0, bound), unbiased (pcg32_boundedrand).
-- `public float Randf()` - A float in [0, 1), from the top 24 bits so every value is exact.
-- `public float RandfRange(float from, float to)` - A float in [from, to).
-- `public int RandiRange(int from, int to)` - An integer in [from, to], both ends reachable; reversed bounds are swapped.
-- `public float Randfn(float mean = 0f, float deviation = 1f)` - A normally distributed float (Box-Muller) with this mean and deviation.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `RandomNumberGenerator` | `public RandomNumberGenerator()` | A generator seeded from the clock and a counter, so two made at once differ. |
+| `RandomNumberGenerator` | `public RandomNumberGenerator(ulong seed, ulong stream = DefaultStream)` | A generator seeded with seed. |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Seed` | `public ulong Seed { get; set; }` | The seed last set; setting it restarts the sequence. |
+| `State` | `public ulong State { get; set; }` | The generator's position: save it and set it back to replay from there. |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `DefaultStream` | `public const ulong DefaultStream = 1442695040888963407UL` | The stream every generator uses unless told otherwise (PCG's default increment). |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Randf` | `public float Randf()` | A float in [0, 1), from the top 24 bits so every value is exact. |
+| `Randfn` | `public float Randfn(float mean = 0f, float deviation = 1f)` | A normally distributed float (Box-Muller) with this mean and deviation. |
+| `RandfRange` | `public float RandfRange(float from, float to)` | A float in [from, to). |
+| `Randi` | `public uint Randi()` | A uniform 32-bit value (pcg32: XSH-RR of the old state). |
+| `Randi` | `public uint Randi(uint bound)` | A uniform value in [0, bound), unbiased (pcg32_boundedrand). |
+| `RandiRange` | `public int RandiRange(int from, int to)` | An integer in [from, to], both ends reachable; reversed bounds are swapped. |
+| `Randomize` | `public void Randomize()` | Reseeds from the clock and a process counter. |
+
+<a id="raycasthit"></a>
 
 ### RaycastHit
 
 `public readonly struct RaycastHit` - What a raycast or sphere cast found.
 
-- `public Body Body { get; }` - The body that was hit; None when nothing was hit.
-- `public Entity Entity { get; }` - The scene entity that owns the hit body or character, stamped there by whoever created it (see aver_phys_set_entity).
-- `public Vec3 Point { get; }` - Where the ray met the surface, in centimetres.
-- `public Vec3 Normal { get; }` - The surface normal at that point, unit length.
-- `public bool Hit { get; }` - True when the ray hit something.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Body` | `public Body Body { get; }` | The body that was hit; None when nothing was hit. |
+| `Entity` | `public Entity Entity { get; }` | The scene entity that owns the hit body or character, stamped there by whoever created it (see aver_phys_set_entity). |
+| `Hit` | `public bool Hit { get; }` | True when the ray hit something. |
+| `Normal` | `public Vec3 Normal { get; }` | The surface normal at that point, unit length. |
+| `Point` | `public Vec3 Point { get; }` | Where the ray met the surface, in centimetres. |
+
+<a id="renderkey"></a>
 
 ### RenderKey
 
 `public enum RenderKey` - Which render setting a script has taken over.
 
-Values: `Scale = 1`, `Sharpness = 2`, `Taa = 3`, `Msaa = 4`, `LodThreshold = 5`, `Occlusion = 6`, `ShadowCascades = 7`, `ShadowSplit = 8`, `ShadowDistance = 9`, `ShadowFilter = 10`, `VolFogAniso = 11`, `VolFogLength = 12`, `VolFogTemporal = 13`, `VolFogIntensity = 14`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `LodThreshold` | `LodThreshold = 5` |  |
+| `Msaa` | `Msaa = 4` |  |
+| `Occlusion` | `Occlusion = 6` |  |
+| `Scale` | `Scale = 1` |  |
+| `ShadowCascades` | `ShadowCascades = 7` |  |
+| `ShadowDistance` | `ShadowDistance = 9` |  |
+| `ShadowFilter` | `ShadowFilter = 10` |  |
+| `ShadowSplit` | `ShadowSplit = 8` |  |
+| `Sharpness` | `Sharpness = 2` |  |
+| `Taa` | `Taa = 3` |  |
+| `VolFogAniso` | `VolFogAniso = 11` |  |
+| `VolFogIntensity` | `VolFogIntensity = 14` |  |
+| `VolFogLength` | `VolFogLength = 12` |  |
+| `VolFogTemporal` | `VolFogTemporal = 13` |  |
+
+<a id="rendersettings"></a>
 
 ### RenderSettings
 
 `public static class RenderSettings` - Render settings a script can change at run time.
 
-- `public static bool Set(RenderKey key, float value)` - Overrides one setting.
-- `public static float? Get(RenderKey key)` - The value a script has set for the key, or null when it holds none.
-- `public static bool Clear(RenderKey key)` - Releases one setting, so the project's value returns.
-- `public static void ClearAll()` - Releases every setting.
-- `public static bool SetScale(float scale)` - 3D render scale (Godot's scaling_3d_scale), 0.25 to 2.
-- `public static bool SetMsaa(int samples)` - MSAA samples: 1, 2, 4 or 8 (anything between snaps down to a power of two).
-- `public static bool SetSunShadows(int cascades, float split, float maxDistanceCm, float filterWidth)` - The sun's shadow cascades: how many (1 to 4), the split scheme (0 even to 1 logarithmic), the farthest shadowed distance in centimetres (0 is automatic) and the filter width in shadow texels (1 is the engine's own 3x3 kernel, 0 a hard edge).
-- `public static RenderStats? GetStats()` - What the last frame submitted.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Clear` | `public static bool Clear(RenderKey key)` | Releases one setting, so the project's value returns. |
+| `ClearAll` | `public static void ClearAll()` | Releases every setting. |
+| `Get` | `public static float? Get(RenderKey key)` | The value a script has set for the key, or null when it holds none. |
+| `GetStats` | `public static RenderStats? GetStats()` | What the last frame submitted. |
+| `Set` | `public static bool Set(RenderKey key, float value)` | Overrides one setting. |
+| `SetMsaa` | `public static bool SetMsaa(int samples)` | MSAA samples: 1, 2, 4 or 8 (anything between snaps down to a power of two). |
+| `SetScale` | `public static bool SetScale(float scale)` | 3D render scale (Godot's scaling_3d_scale), 0.25 to 2. |
+| `SetSunShadows` | `public static bool SetSunShadows(int cascades, float split, float maxDistanceCm, float filterWidth)` | The sun's shadow cascades: how many (1 to 4), the split scheme (0 even to 1 logarithmic), the farthest shadowed distance in centimetres (0 is automatic) and the filter width in shadow texels (1 is the engine's own 3x3 kernel, 0 a hard edge). |
+
+<a id="renderstats"></a>
 
 ### RenderStats
 
 `public readonly record struct RenderStats(int Objects, int Triangles, int DrawCalls, int Translucent, int ShadowDraws, int Frame)` - What the last frame submitted (GetStats).
 
+<a id="rootmotionaxes"></a>
+
 ### RootMotionAxes
 
 `public enum RootMotionAxes` - Which root components are extracted.
 
-Values: `X = 1`, `Y = 2`, `Z = 4`, `Yaw = 8`, `Planar = X | Y | Yaw`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Planar` | `Planar = X \| Y \| Yaw` |  |
+| `X` | `X = 1` |  |
+| `Y` | `Y = 2` |  |
+| `Yaw` | `Yaw = 8` |  |
+| `Z` | `Z = 4` |  |
+
+<a id="rootmotionimport"></a>
 
 ### RootMotionImport
 
 `public enum RootMotionImport` - How the importer flags a clip as carrying root motion (FBX only).
 
-Values: `Off = 0`, `Auto = 1`, `All = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `All` | `All = 2` |  |
+| `Auto` | `Auto = 1` |  |
+| `Off` | `Off = 0` |  |
+
+<a id="rootmotionmode"></a>
 
 ### RootMotionMode
 
 `public enum RootMotionMode` - What the animation system does with the planar motion baked into a clip's root bone.
 
-Values: `None = 0`, `Ignore = 1`, `Apply = 2`, `Accumulate = 3`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Accumulate` | `Accumulate = 3` |  |
+| `Apply` | `Apply = 2` |  |
+| `Ignore` | `Ignore = 1` |  |
+| `None` | `None = 0` |  |
+
+<a id="ropeend"></a>
 
 ### RopeEnd
 
 `public enum RopeEnd` - Which end of a rope.
 
-Values: `Start = 0`, `End = 1`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `End` | `End = 1` |  |
+| `Start` | `Start = 0` |  |
+
+<a id="ropes"></a>
 
 ### Ropes
 
 `public static class Ropes` - Ropes and cables at world level.
 
-- `public static Entity Create(Vec3 start, Vec3 end, float lengthCm = 0f, float radiusCm = 0f, string asset = "")` - Creates a rope entity between two world points, both ends pinned.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Create` | `public static Entity Create(Vec3 start, Vec3 end, float lengthCm = 0f, float radiusCm = 0f, string asset = "")` | Creates a rope entity between two world points, both ends pinned. |
+
+<a id="ropestate"></a>
 
 ### RopeState
 
 `public readonly record struct RopeState(float LengthCm, float Strain, int Segments, bool Cut, bool Awake)` - A rope as of the last tick: the polyline length, its strain against the rest length, the segment count, whether it was cut.
 
+<a id="runtimemeshes"></a>
+
 ### RuntimeMeshes
 
 `public static class RuntimeMeshes` - Meshes built from arrays at run time.
 
-- `public static string PathOf(string key)` - The asset path an entity's mesh renderer names for the runtime mesh key: @rtmesh/&lt;key&gt;.
-- `public static int Create(string key)` - Makes the mesh named key (or returns the id it has).
-- `public static bool Destroy(int id)`
-- `public static bool Clear(int id)` - Removes every surface; the mesh keeps its key.
-- `public static int AddSurface(int id, float[] positions, float[]? normals, float[]? uv, float[]? colors, float[]? uv1, float[]? tangents, uint[]? indices, string? material)` - Appends a surface: positions is 3 floats per vertex; the optional arrays are 3 (normals), 2 (UV), 4 (colour), 2 (second UV) and 4 (tangent xyz and handedness) floats per vertex; indices is a triangle list (null draws the vertices in order).
-- `public static int SurfaceCount(int id)`
-- `public static bool TryGetInfo(int id, out int surfaces, out int vertices, out int triangles, out int generation)` - Surfaces, vertices, triangles and the generation counter of a mesh; false for an unknown id.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AddSurface` | `public static int AddSurface(int id, float[] positions, float[]? normals, float[]? uv, float[]? colors, float[]? uv1, float[]? tangents, uint[]? indices, string? material)` | Appends a surface: positions is 3 floats per vertex; the optional arrays are 3 (normals), 2 (UV), 4 (colour), 2 (second UV) and 4 (tangent xyz and handedness) floats per vertex; indices is a triangle list (null draws the vertices in order). |
+| `Clear` | `public static bool Clear(int id)` | Removes every surface; the mesh keeps its key. |
+| `Create` | `public static int Create(string key)` | Makes the mesh named key (or returns the id it has). |
+| `Destroy` | `public static bool Destroy(int id)` |  |
+| `PathOf` | `public static string PathOf(string key)` | The asset path an entity's mesh renderer names for the runtime mesh key: @rtmesh/&lt;key&gt;. |
+| `SurfaceCount` | `public static int SurfaceCount(int id)` |  |
+| `TryGetInfo` | `public static bool TryGetInfo(int id, out int surfaces, out int vertices, out int triangles, out int generation)` | Surfaces, vertices, triangles and the generation counter of a mesh; false for an unknown id. |
+
+<a id="runtimetexture"></a>
 
 ### RuntimeTexture
 
 `public sealed class RuntimeTexture` - A texture whose pixels come from an Image and can be replaced at any time.
 
-- `public int Id { get; }` - The engine's id for this texture.
-- `public string Key { get; }` - The key it was made with.
-- `public string MaterialPath { get; }` - The texture-slot path a material names it by ("@rt:rtex.&lt;key&gt;").
-- `public ulong GpuHandle { get; }` - The GPU texture handle the host uploaded, what a UI draw command carries.
-- `public bool IsValid { get; }` - Whether the texture still exists (it does not after Destroy or the end of a play session).
-- `public int Width { get; }` - Width in pixels (0 when the texture is gone).
-- `public int Height { get; }` - Height in pixels (0 when the texture is gone).
-- `public bool Mipmaps { get; }` - Whether the host builds a full mip chain at upload (8-bit textures only).
-- `public int Generation { get; }` - Counts how many times the pixels changed.
-- `public static RuntimeTexture? Create(string key, Image image, bool srgb = false, bool mipmaps = false)` - Makes the texture key from image, or returns the one that already has the key (its pixels are then replaced by the image's).
-- `public static RuntimeTexture? Find(string key)` - The texture with this key, or null.
-- `public bool Update(Image image, bool srgb = false)` - Replaces the pixels (and the size and format) with the image's.
-- `public bool UpdateRegion(Image image, int srcX, int srcY, int width, int height, int x, int y, bool srgb = false)` - Writes the rectangle (srcX, srcY, width, height) of image to (x, y) of the texture.
-- `public Image? GetImage()` - A copy of the texture's current pixels as an image (null when the texture is gone).
-- `public bool Destroy()` - Removes the texture.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Generation` | `public int Generation { get; }` | Counts how many times the pixels changed. |
+| `GpuHandle` | `public ulong GpuHandle { get; }` | The GPU texture handle the host uploaded, what a UI draw command carries. |
+| `Height` | `public int Height { get; }` | Height in pixels (0 when the texture is gone). |
+| `Id` | `public int Id { get; }` | The engine's id for this texture. |
+| `IsValid` | `public bool IsValid { get; }` | Whether the texture still exists (it does not after Destroy or the end of a play session). |
+| `Key` | `public string Key { get; }` | The key it was made with. |
+| `MaterialPath` | `public string MaterialPath { get; }` | The texture-slot path a material names it by ("@rt:rtex.&lt;key&gt;"). |
+| `Mipmaps` | `public bool Mipmaps { get; }` | Whether the host builds a full mip chain at upload (8-bit textures only). |
+| `Width` | `public int Width { get; }` | Width in pixels (0 when the texture is gone). |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Create` | `public static RuntimeTexture? Create(string key, Image image, bool srgb = false, bool mipmaps = false)` | Makes the texture key from image, or returns the one that already has the key (its pixels are then replaced by the image's). |
+| `Destroy` | `public bool Destroy()` | Removes the texture. |
+| `Find` | `public static RuntimeTexture? Find(string key)` | The texture with this key, or null. |
+| `GetImage` | `public Image? GetImage()` | A copy of the texture's current pixels as an image (null when the texture is gone). |
+| `Update` | `public bool Update(Image image, bool srgb = false)` | Replaces the pixels (and the size and format) with the image's. |
+| `UpdateRegion` | `public bool UpdateRegion(Image image, int srcX, int srcY, int width, int height, int x, int y, bool srgb = false)` | Writes the rectangle (srcX, srcY, width, height) of image to (x, y) of the texture. |
+
+<a id="scene2d"></a>
 
 ### Scene2D
 
 `public static class Scene2D` - 2D scenes: sprites, 2D transforms and layers as entity components, the stretch transform and the ordered canvas that sprites and external draws (a UI control's) share.
 
-- `public const int AbiVersion = 3` - The ABI version this binding was written against.
-- `public static bool Available { get; }` - True when the native library is the version this binding speaks and its structs match the managed ones.
-- `public static bool Register()` - Registers the six components with the scene (idempotent).
-- `public static int ComponentId(Scene2DComponent which)` - The scene component id of one of the six, for the generic field API; 0 when not registered.
-- `public static bool Set(Entity e, in Transform2D t)` - Adds the component if the entity lacks it and writes the state.
-- `public static bool Set(Entity e, in Sprite2D s)` - Adds the component if the entity lacks it and writes the state.
-- `public static bool Set(Entity e, in Layer2D l)` - Adds the component if the entity lacks it and writes the state.
-- `public static bool TryGet(Entity e, out Transform2D t)` - Reads the transform.
-- `public static bool TryGet(Entity e, out Sprite2D s)` - Reads the sprite.
-- `public static bool TryGet(Entity e, out Layer2D l)` - Reads the layer.
-- `public static Parallax2D DefaultParallax { get; }` - Parallax settings that scroll with the world, as Godot's defaults: scroll scale 1, no tiling.
-- `public static bool Set(Entity e, in Camera2D c)` - Adds the component if the entity lacks it and writes the state.
-- `public static bool TryGet(Entity e, out Camera2D c)` - Reads the camera.
-- `public static bool Set(Entity e, in Parallax2D p)` - Adds the component if the entity lacks it and writes the state.
-- `public static bool TryGet(Entity e, out Parallax2D p)` - Reads the parallax.
-- `public static bool MakeCurrent(Entity e)` - Makes the entity's camera the current one (clearing the others).
-- `public static Entity CurrentCamera { get; }` - The entity of the camera that applies, or None.
-- `public static bool TryGetCameraCenter(Entity e, out Vector2 center)` - The view centre of the entity's camera in world units after easing and limits.
-- `public static bool TryGetCameraView(out Matrix3x2 view)` - The current camera's world to content-units transform.
-- `public static bool Set(Entity e, in SpriteAnim2D a)` - Writes the playback settings (speed scale and autoplay), adding the component if needed.
-- `public static bool TryGet(Entity e, out SpriteAnim2D a)` - Reads the playback settings and state.
-- `public const int MaxClips = 16` - The most clips one entity can hold.
-- `public const int MaxClipFrames = 128` - The most frames one entity can hold, across its clips.
-- `public static bool SetClip(Entity e, int index, string name, float fps, bool loop, ReadOnlySpan<SpriteAnimFrame2D> frames)` - Defines clip index (an index equal to the clip count appends), adding the component if needed.
-- `public static bool TryGetClip(Entity e, int index, out string name, out float fps, out bool loop, out SpriteAnimFrame2D[] frames)` - Reads clip index.
-- `public static int FindClip(Entity e, string name)` - The index of the clip named name, or -1.
-- `public static bool Play(Entity e, string? name = null, bool restart = false)` - Plays the clip name (null or empty continues the current one); restart rewinds one that is already playing.
-- `public static bool Stop(Entity e)` - Stops the animation and rewinds it to its first frame.
-- `public static bool Pause(Entity e)` - Stops the animation where it is.
-- `public static bool SetFrame(Entity e, int frame, float progress = 0f)` - Shows frame frame of the current clip (clamped), progress of the way through it.
-- `public static SpriteAnimEvent2D[] PollAnimationEvents(int max = 256)` - Drains the queued animation events (frame changed, finished, looped, clip changed), oldest first.
-- `public static void Tick(float dt)` - One step of everything time-driven: transforms, animations (and their events), parallax autoscroll, camera drag and easing.
-- `public static bool Remove(Entity e, Scene2DComponent which)` - Removes one of the components.
-- `public static int UpdateTransforms()` - Recomposes the 2D transforms now (the canvas frame does it too).
-- `public static bool TryGetWorld(Entity e, out Matrix3x2 world, out int z)` - The composed world transform (canvas units; x' = M11 x + M21 y + M31) and effective z of a 2D entity.
-- `public static bool TryGetSpriteBounds(Entity e, out Vector4 bounds)` - The sprite's axis-aligned bounds (x, y, width, height) in world 2D space.
-- `public static void SetCanvas(CanvasStretchMode mode, CanvasStretchAspect aspect, CanvasScaleMode scaleMode, float baseWidth, float baseHeight, float scale, Vector4 view)` - Sets the viewport stretch and the window rectangle (x, y, width, height) the game is drawn in.
-- `public static void SetCanvasView(Vector4 view)` - Moves the window rectangle (x, y, width, height) the game is drawn in and keeps the stretch rules.
-- `public static bool TryGetCanvasTransform(out Matrix3x2 toWindow)` - The canvas transform, content units to window pixels.
-- `public static void SetTextureResolver(Scene2DTextureResolver? resolver)` - Installs the host's image lookup (null clears it, and sprites draw nothing).
-- `public static bool SubmitExternal(int layer, int z, long order, Action draw, bool inCanvas = false)` - Queues an external draw into the canvas's ordered list.
-- `public static int Pending { get; }` - Items waiting for the next flush.
-- `public static void Flush(IntPtr drawList)` - Sorts the queue and draws it into the UI draw list (the pointer aver_ui_draw_list returns); a zero pointer drops the queue.
-- `public static int Frame(IntPtr drawList)` - Recomposes the 2D transforms, queues every visible sprite and flushes.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Available` | `public static bool Available { get; }` | True when the native library is the version this binding speaks and its structs match the managed ones. |
+| `CurrentCamera` | `public static Entity CurrentCamera { get; }` | The entity of the camera that applies, or None. |
+| `DefaultParallax` | `public static Parallax2D DefaultParallax { get; }` | Parallax settings that scroll with the world, as Godot's defaults: scroll scale 1, no tiling. |
+| `Pending` | `public static int Pending { get; }` | Items waiting for the next flush. |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AbiVersion` | `public const int AbiVersion = 3` | The ABI version this binding was written against. |
+| `MaxClipFrames` | `public const int MaxClipFrames = 128` | The most frames one entity can hold, across its clips. |
+| `MaxClips` | `public const int MaxClips = 16` | The most clips one entity can hold. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ComponentId` | `public static int ComponentId(Scene2DComponent which)` | The scene component id of one of the six, for the generic field API; 0 when not registered. |
+| `FindClip` | `public static int FindClip(Entity e, string name)` | The index of the clip named name, or -1. |
+| `Flush` | `public static void Flush(IntPtr drawList)` | Sorts the queue and draws it into the UI draw list (the pointer aver_ui_draw_list returns); a zero pointer drops the queue. |
+| `Frame` | `public static int Frame(IntPtr drawList)` | Recomposes the 2D transforms, queues every visible sprite and flushes. |
+| `MakeCurrent` | `public static bool MakeCurrent(Entity e)` | Makes the entity's camera the current one (clearing the others). |
+| `Pause` | `public static bool Pause(Entity e)` | Stops the animation where it is. |
+| `Play` | `public static bool Play(Entity e, string? name = null, bool restart = false)` | Plays the clip name (null or empty continues the current one); restart rewinds one that is already playing. |
+| `PollAnimationEvents` | `public static SpriteAnimEvent2D[] PollAnimationEvents(int max = 256)` | Drains the queued animation events (frame changed, finished, looped, clip changed), oldest first. |
+| `Register` | `public static bool Register()` | Registers the six components with the scene (idempotent). |
+| `Remove` | `public static bool Remove(Entity e, Scene2DComponent which)` | Removes one of the components. |
+| `Set` | `public static bool Set(Entity e, in Camera2D c)` | Adds the component if the entity lacks it and writes the state. |
+| `Set` | `public static bool Set(Entity e, in Layer2D l)` | Adds the component if the entity lacks it and writes the state. |
+| `Set` | `public static bool Set(Entity e, in Parallax2D p)` | Adds the component if the entity lacks it and writes the state. |
+| `Set` | `public static bool Set(Entity e, in Sprite2D s)` | Adds the component if the entity lacks it and writes the state. |
+| `Set` | `public static bool Set(Entity e, in SpriteAnim2D a)` | Writes the playback settings (speed scale and autoplay), adding the component if needed. |
+| `Set` | `public static bool Set(Entity e, in Transform2D t)` | Adds the component if the entity lacks it and writes the state. |
+| `SetCanvas` | `public static void SetCanvas(CanvasStretchMode mode, CanvasStretchAspect aspect, CanvasScaleMode scaleMode, float baseWidth, float baseHeight, float scale, Vector4 view)` | Sets the viewport stretch and the window rectangle (x, y, width, height) the game is drawn in. |
+| `SetCanvasView` | `public static void SetCanvasView(Vector4 view)` | Moves the window rectangle (x, y, width, height) the game is drawn in and keeps the stretch rules. |
+| `SetClip` | `public static bool SetClip(Entity e, int index, string name, float fps, bool loop, ReadOnlySpan<SpriteAnimFrame2D> frames)` | Defines clip index (an index equal to the clip count appends), adding the component if needed. |
+| `SetFrame` | `public static bool SetFrame(Entity e, int frame, float progress = 0f)` | Shows frame frame of the current clip (clamped), progress of the way through it. |
+| `SetTextureResolver` | `public static void SetTextureResolver(Scene2DTextureResolver? resolver)` | Installs the host's image lookup (null clears it, and sprites draw nothing). |
+| `Stop` | `public static bool Stop(Entity e)` | Stops the animation and rewinds it to its first frame. |
+| `SubmitExternal` | `public static bool SubmitExternal(int layer, int z, long order, Action draw, bool inCanvas = false)` | Queues an external draw into the canvas's ordered list. |
+| `Tick` | `public static void Tick(float dt)` | One step of everything time-driven: transforms, animations (and their events), parallax autoscroll, camera drag and easing. |
+| `TryGet` | `public static bool TryGet(Entity e, out Camera2D c)` | Reads the camera. |
+| `TryGet` | `public static bool TryGet(Entity e, out Layer2D l)` | Reads the layer. |
+| `TryGet` | `public static bool TryGet(Entity e, out Parallax2D p)` | Reads the parallax. |
+| `TryGet` | `public static bool TryGet(Entity e, out Sprite2D s)` | Reads the sprite. |
+| `TryGet` | `public static bool TryGet(Entity e, out SpriteAnim2D a)` | Reads the playback settings and state. |
+| `TryGet` | `public static bool TryGet(Entity e, out Transform2D t)` | Reads the transform. |
+| `TryGetCameraCenter` | `public static bool TryGetCameraCenter(Entity e, out Vector2 center)` | The view centre of the entity's camera in world units after easing and limits. |
+| `TryGetCameraView` | `public static bool TryGetCameraView(out Matrix3x2 view)` | The current camera's world to content-units transform. |
+| `TryGetCanvasTransform` | `public static bool TryGetCanvasTransform(out Matrix3x2 toWindow)` | The canvas transform, content units to window pixels. |
+| `TryGetClip` | `public static bool TryGetClip(Entity e, int index, out string name, out float fps, out bool loop, out SpriteAnimFrame2D[] frames)` | Reads clip index. |
+| `TryGetSpriteBounds` | `public static bool TryGetSpriteBounds(Entity e, out Vector4 bounds)` | The sprite's axis-aligned bounds (x, y, width, height) in world 2D space. |
+| `TryGetWorld` | `public static bool TryGetWorld(Entity e, out Matrix3x2 world, out int z)` | The composed world transform (canvas units; x' = M11 x + M21 y + M31) and effective z of a 2D entity. |
+| `UpdateTransforms` | `public static int UpdateTransforms()` | Recomposes the 2D transforms now (the canvas frame does it too). |
+
+<a id="scene2dcomponent"></a>
 
 ### Scene2DComponent
 
 `public enum Scene2DComponent` - Which of the six components.
 
-Values: `Transform = 0`, `Sprite = 1`, `Layer = 2`, `SpriteAnim = 3`, `Camera = 4`, `Parallax = 5`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Camera` | `Camera = 4` |  |
+| `Layer` | `Layer = 2` |  |
+| `Parallax` | `Parallax = 5` |  |
+| `Sprite` | `Sprite = 1` |  |
+| `SpriteAnim` | `SpriteAnim = 3` |  |
+| `Transform` | `Transform = 0` |  |
+
+<a id="scene2dtextureresolver"></a>
 
 ### Scene2DTextureResolver
 
 `public delegate bool Scene2DTextureResolver(long assetId, out ulong texture, out int width, out int height)` - Resolves a sprite's asset id to the texture the UI draw list knows and its size in pixels.
 
+<a id="scenequeries"></a>
+
 ### SceneQueries
 
 `public static class SceneQueries` - Counted access to sets of entities: by tag, by actor class, and a parent's children.
 
-- `public static int CountWithTag(uint mask)` - How many live entities carry every bit of mask (zero matches none).
-- `public static Entity WithTagAt(uint mask, int index)` - The indexth live entity carrying every bit of mask, in scene order, or None when the index is out of range.
-- `public static int CountActorsOfClass(string className)` - How many live actors are of class className or a class derived from it.
-- `public static Entity ActorOfClassAt(string className, int index)` - The indexth live actor of the class (derived classes included), or None when the index is out of range or the class is unknown.
-- `public static int ActorCount()` - How many live actors exist; plain scene entities are not counted.
-- `public static Entity ChildAt(Entity parent, int index)` - The indexth immediate child of parent in link order, or None when the index is out of range.
-- `public static bool TryGetDistance(Entity a, Entity b, out float distance)` - The world-space distance in centimetres between two entities.
-- `public static int RagdollModeOf(Entity e)` - The entity's ragdoll mode as an int (0 Kinematic, 1 Limp, 2 Powered), or -1 when it has none.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ActorCount` | `public static int ActorCount()` | How many live actors exist; plain scene entities are not counted. |
+| `ActorOfClassAt` | `public static Entity ActorOfClassAt(string className, int index)` | The indexth live actor of the class (derived classes included), or None when the index is out of range or the class is unknown. |
+| `ChildAt` | `public static Entity ChildAt(Entity parent, int index)` | The indexth immediate child of parent in link order, or None when the index is out of range. |
+| `CountActorsOfClass` | `public static int CountActorsOfClass(string className)` | How many live actors are of class className or a class derived from it. |
+| `CountWithTag` | `public static int CountWithTag(uint mask)` | How many live entities carry every bit of mask (zero matches none). |
+| `RagdollModeOf` | `public static int RagdollModeOf(Entity e)` | The entity's ragdoll mode as an int (0 Kinematic, 1 Limp, 2 Powered), or -1 when it has none. |
+| `TryGetDistance` | `public static bool TryGetDistance(Entity a, Entity b, out float distance)` | The world-space distance in centimetres between two entities. |
+| `WithTagAt` | `public static Entity WithTagAt(uint mask, int index)` | The indexth live entity carrying every bit of mask, in scene order, or None when the index is out of range. |
+
+<a id="settings"></a>
 
 ### Settings
 
 `public static class Settings` - Durable per-player key/value storage that outlives any save file -- a save is a world, and settings belong to the player, not to a playthrough (settings_abi.h's own opening comment: "Deleting a save must not reset the volume, and loading one must not change the resolution").
 
-- `public static bool Open(string path)` - Opens (or creates) the store at path.
-- `public static bool OpenDefault()` - Opens the engine's own default store (DefaultPath).
-- `public static string DefaultPath { get; }` - The default store location: &lt;user data dir&gt;/Aver/settings.ini.
-- `public static bool Flush()` - Writes the store to disk if anything changed since the last flush.
-- `public static float GetFloat(string key, float fallback = 0f)` - Reads a float, or fallback if the key is missing or does not parse as a float -- a hand-edited file never reads back as a silent 0 (settings_abi.h's own readers comment).
-- `public static int GetInt(string key, int fallback = 0)` - Reads an int, or fallback if the key is missing or does not parse.
-- `public static bool GetBool(string key, bool fallback = false)` - Reads a bool, or fallback if the key is missing or does not parse.
-- `public static string GetString(string key, string fallback = "")` - Reads a string, or fallback if the key is missing.
-- `public static bool SetFloat(string key, float value)` - Writes a float.
-- `public static bool SetInt(string key, int value)` - Writes an int.
-- `public static bool SetBool(string key, bool value)` - Writes a bool.
-- `public static bool SetString(string key, string value)` - Writes a string.
-- `public static bool Has(string key)` - True when the key is present, whatever its stored type.
-- `public static bool Remove(string key)` - Removes a key.
-- `public static int Count { get; }` - How many keys the store holds.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Count` | `public static int Count { get; }` | How many keys the store holds. |
+| `DefaultPath` | `public static string DefaultPath { get; }` | The default store location: &lt;user data dir&gt;/Aver/settings.ini. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Flush` | `public static bool Flush()` | Writes the store to disk if anything changed since the last flush. |
+| `GetBool` | `public static bool GetBool(string key, bool fallback = false)` | Reads a bool, or fallback if the key is missing or does not parse. |
+| `GetFloat` | `public static float GetFloat(string key, float fallback = 0f)` | Reads a float, or fallback if the key is missing or does not parse as a float -- a hand-edited file never reads back as a silent 0 (settings_abi.h's own readers comment). |
+| `GetInt` | `public static int GetInt(string key, int fallback = 0)` | Reads an int, or fallback if the key is missing or does not parse. |
+| `GetString` | `public static string GetString(string key, string fallback = "")` | Reads a string, or fallback if the key is missing. |
+| `Has` | `public static bool Has(string key)` | True when the key is present, whatever its stored type. |
+| `Open` | `public static bool Open(string path)` | Opens (or creates) the store at path. |
+| `OpenDefault` | `public static bool OpenDefault()` | Opens the engine's own default store (DefaultPath). |
+| `Remove` | `public static bool Remove(string key)` | Removes a key. |
+| `SetBool` | `public static bool SetBool(string key, bool value)` | Writes a bool. |
+| `SetFloat` | `public static bool SetFloat(string key, float value)` | Writes a float. |
+| `SetInt` | `public static bool SetInt(string key, int value)` | Writes an int. |
+| `SetString` | `public static bool SetString(string key, string value)` | Writes a string. |
+
+<a id="sky"></a>
 
 ### Sky
 
 `public static class Sky` - The sky as a script sees it: the cloud layer, and overrides for the sun, the fog and the sky light.
 
-- `public static void SetClouds(int seed, float coverage, float density = 1.0f, float bottomCm = 150000.0f, float topCm = 280000.0f, float featureScale = 0.00002f, float windXCmPerSec = 900.0f, float windYCmPerSec = 260.0f)` - Publishes a cloud layer.
-- `public static void Clear()` - Drops the request, so the level's own sky takes over again.
-- `public static bool SetSunDirection(float x, float y, float z)` - Points the sun: the world direction TOWARD the light.
-- `public static bool SetSunDirection(Vec3 towardLight)` - Points the sun: the world direction TOWARD the light.
-- `public static bool SetSunIntensity(float lux)` - Sun illuminance in lux (about 100000 on a clear day).
-- `public static bool SetSunColor(float r, float g, float b, float temperatureK = 0f)` - Sun colour as linear rgb, or a colour temperature in kelvin when temperatureK is above 0 (it replaces the colour; 0 uses the colour).
-- `public static bool SetFogDensity(float perCm)` - Fog density per centimetre (the level's default is about 0.000004).
-- `public static bool SetFogColor(float r, float g, float b)` - Fog tint as linear rgb; white is clear air.
-- `public static bool SetFogShape(float falloff, float heightZ, float startCm, float maxOpacity = 1f)` - The shape of the fog: how fast it thins going up (0 is uniform), the world Z at which the density is exactly the fog density, the distance in front of the camera before it starts (cm), and the most opaque it gets.
-- `public static bool SetSkyLight(float multiplier)` - Multiplier on the light the sky hemisphere gives the scene (1 is the level's own).
-- `public static bool SetAmbient(float r, float g, float b, float energy = 1f, float skyContribution = 0f)` - A constant ambient light instead of (or blended with) the sky's own: linear rgb times energy, with skyContribution of the sky's ambient mixed in (0 gives the colour alone, 1 the sky alone).
-- `public static void ClearOverrides()` - Releases every sun, fog, sky-light and ambient override, so the level's authored values return.
-- `public static bool ClearOverride(WorldEnvKey key)` - Releases one override.
-- `public static bool ClearOverride(string? name)` - Releases one override by its dotted name (sun.dir, sun.lux, sun.color, sun.temp, fog.density, fog.color, fog.falloff, fog.height, fog.start, fog.maxopacity, sky.light, ambient.color, ambient.energy, ambient.sky); null or empty releases all of them.
-- `public static bool IsOverridden(WorldEnvKey key)` - True while a script holds this setting.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Clear` | `public static void Clear()` | Drops the request, so the level's own sky takes over again. |
+| `ClearOverride` | `public static bool ClearOverride(WorldEnvKey key)` | Releases one override. |
+| `ClearOverride` | `public static bool ClearOverride(string? name)` | Releases one override by its dotted name (sun.dir, sun.lux, sun.color, sun.temp, fog.density, fog.color, fog.falloff, fog.height, fog.start, fog.maxopacity, sky.light, ambient.color, ambient.energy, ambient.sky); null or empty releases all of them. |
+| `ClearOverrides` | `public static void ClearOverrides()` | Releases every sun, fog, sky-light and ambient override, so the level's authored values return. |
+| `IsOverridden` | `public static bool IsOverridden(WorldEnvKey key)` | True while a script holds this setting. |
+| `SetAmbient` | `public static bool SetAmbient(float r, float g, float b, float energy = 1f, float skyContribution = 0f)` | A constant ambient light instead of (or blended with) the sky's own: linear rgb times energy, with skyContribution of the sky's ambient mixed in (0 gives the colour alone, 1 the sky alone). |
+| `SetClouds` | `public static void SetClouds(int seed, float coverage, float density = 1.0f, float bottomCm = 150000.0f, float topCm = 280000.0f, float featureScale = 0.00002f, float windXCmPerSec = 900.0f, float windYCmPerSec = 260.0f)` | Publishes a cloud layer. |
+| `SetFogColor` | `public static bool SetFogColor(float r, float g, float b)` | Fog tint as linear rgb; white is clear air. |
+| `SetFogDensity` | `public static bool SetFogDensity(float perCm)` | Fog density per centimetre (the level's default is about 0.000004). |
+| `SetFogShape` | `public static bool SetFogShape(float falloff, float heightZ, float startCm, float maxOpacity = 1f)` | The shape of the fog: how fast it thins going up (0 is uniform), the world Z at which the density is exactly the fog density, the distance in front of the camera before it starts (cm), and the most opaque it gets. |
+| `SetSkyLight` | `public static bool SetSkyLight(float multiplier)` | Multiplier on the light the sky hemisphere gives the scene (1 is the level's own). |
+| `SetSunColor` | `public static bool SetSunColor(float r, float g, float b, float temperatureK = 0f)` | Sun colour as linear rgb, or a colour temperature in kelvin when temperatureK is above 0 (it replaces the colour; 0 uses the colour). |
+| `SetSunDirection` | `public static bool SetSunDirection(Vec3 towardLight)` | Points the sun: the world direction TOWARD the light. |
+| `SetSunDirection` | `public static bool SetSunDirection(float x, float y, float z)` | Points the sun: the world direction TOWARD the light. |
+| `SetSunIntensity` | `public static bool SetSunIntensity(float lux)` | Sun illuminance in lux (about 100000 on a clear day). |
+
+<a id="softbodies"></a>
 
 ### SoftBodies
 
 `public static class SoftBodies` - World-level cloth and destruction: wind, explosions, budgets and the event stream.
 
-- `public static bool SetWind(Vec3 velocityCmPerS, float gustCmPerS = 0f, float gustHz = 0.3f, float turbulence = 0f)` - The world wind in cm/s, independent of the sky's cloud drift.
-- `public static int Explode(Vec3 centre, float radiusCm, float impulseCmPerS, float energyJoules)` - A radial shove and damage to every soft body in reach.
-- `public static bool SetBudget(int maxPieces = 48, int maxParticles = 20000, int maxRebuildsPerFrame = 2, float debrisLifetimeSeconds = 12f)` - Caps: live debris pieces, simulated particles, rebuilds per frame and how long debris lives.
-- `public static bool SetEffectsEnabled(bool enabled)` - Switches the break effects (the particles and sounds bound in .ocsoft) on or off for the whole world.
-- `public static int RepairAll()` - Repairs every soft body; returns how many.
-- `public static bool TryPopEvent(out SoftEvent ev)` - Takes one pending event off the queue (the same queue as DrainEvents, so one consumer should own it).
-- `public static int DrainEvents(Span<SoftEvent> buffer)` - Moves the pending events into buffer and returns how many.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `DrainEvents` | `public static int DrainEvents(Span<SoftEvent> buffer)` | Moves the pending events into buffer and returns how many. |
+| `Explode` | `public static int Explode(Vec3 centre, float radiusCm, float impulseCmPerS, float energyJoules)` | A radial shove and damage to every soft body in reach. |
+| `RepairAll` | `public static int RepairAll()` | Repairs every soft body; returns how many. |
+| `SetBudget` | `public static bool SetBudget(int maxPieces = 48, int maxParticles = 20000, int maxRebuildsPerFrame = 2, float debrisLifetimeSeconds = 12f)` | Caps: live debris pieces, simulated particles, rebuilds per frame and how long debris lives. |
+| `SetEffectsEnabled` | `public static bool SetEffectsEnabled(bool enabled)` | Switches the break effects (the particles and sounds bound in .ocsoft) on or off for the whole world. |
+| `SetWind` | `public static bool SetWind(Vec3 velocityCmPerS, float gustCmPerS = 0f, float gustHz = 0.3f, float turbulence = 0f)` | The world wind in cm/s, independent of the sky's cloud drift. |
+| `TryPopEvent` | `public static bool TryPopEvent(out SoftEvent ev)` | Takes one pending event off the queue (the same queue as DrainEvents, so one consumer should own it). |
+
+<a id="softbodystate"></a>
 
 ### SoftBodyState
 
 `public readonly record struct SoftBodyState(float Damage01, float MaxStrain, int Pieces, int BrokenEdges, bool Awake, bool Frozen)` - What an entity's soft body is doing.
 
+<a id="softcontactmode"></a>
+
 ### SoftContactMode
 
 `public enum SoftContactMode` - What happens when a soft body meets one particular other body (pinned to AVER_PHYS_SBX_PAIR_*).
 
-Values: `Normal = 0`, `Sensor = 1`, `Ignore = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Ignore` | `Ignore = 2` |  |
+| `Normal` | `Normal = 0` |  |
+| `Sensor` | `Sensor = 1` |  |
+
+<a id="softdamagekind"></a>
 
 ### SoftDamageKind
 
 `public enum SoftDamageKind` - What deposited the energy (pinned to softbody::DepositKind).
 
-Values: `Impact = 0`, `Explosion = 1`, `Gameplay = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Explosion` | `Explosion = 1` |  |
+| `Gameplay` | `Gameplay = 2` |  |
+| `Impact` | `Impact = 0` |  |
+
+<a id="softevent"></a>
 
 ### SoftEvent
 
 `public readonly record struct SoftEvent(SoftEventKind Kind, int Entity, int Piece, int Beam, Vec3 Point, float Value, int Seq)` - One thing that happened to a soft body.
 
+<a id="softeventkind"></a>
+
 ### SoftEventKind
 
 `public enum SoftEventKind` - Pinned to softbody::SoftEventKind.
 
-Values: `Impact`, `Torn`, `Detached`, `Dust`, `Repaired`, `Released`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Detached` | `Detached` |  |
+| `Dust` | `Dust` |  |
+| `Impact` | `Impact` |  |
+| `Released` | `Released` |  |
+| `Repaired` | `Repaired` |  |
+| `Torn` | `Torn` |  |
+
+<a id="softfieldkind"></a>
 
 ### SoftFieldKind
 
 `public enum SoftFieldKind` - What a soft field does (pinned to softbody::FieldKind).
 
-Values: `RadialForce = 0`, `DirectionalForce = 1`, `Damage = 2`, `ReleaseAnchors = 3`, `Kill = 4`, `Sleep = 5`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Damage` | `Damage = 2` |  |
+| `DirectionalForce` | `DirectionalForce = 1` |  |
+| `Kill` | `Kill = 4` |  |
+| `RadialForce` | `RadialForce = 0` |  |
+| `ReleaseAnchors` | `ReleaseAnchors = 3` |  |
+| `Sleep` | `Sleep = 5` |  |
+
+<a id="softfields"></a>
 
 ### SoftFields
 
 `public static class SoftFields` - Fields fired from code.
 
-- `public static int Pulse(in SoftFieldSpec spec)` - Applies the field once at the next tick.
-- `public static int Impact(Vec3 point, Vec3 direction, float radiusCm, float energyJoules, float kickCmPerS = 0f)` - The crash helper: damage energy in a sphere at point, shoved along direction (zero = radial) with an extra kick of kickCmPerS.
-- `public static int Start(in SoftFieldSpec spec, float lifetimeSeconds)` - Starts a continuous field (strength and energy become per second) that stops after lifetimeSeconds.
-- `public static bool Stop(int handle)` - Stops a field started with Start.
-- `public static Entity Spawn(in SoftFieldSpec spec, float lifetimeSeconds)` - Creates an entity with a CSoftField that removes itself after the lifetime; move it to move the field.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Impact` | `public static int Impact(Vec3 point, Vec3 direction, float radiusCm, float energyJoules, float kickCmPerS = 0f)` | The crash helper: damage energy in a sphere at point, shoved along direction (zero = radial) with an extra kick of kickCmPerS. |
+| `Pulse` | `public static int Pulse(in SoftFieldSpec spec)` | Applies the field once at the next tick. |
+| `Spawn` | `public static Entity Spawn(in SoftFieldSpec spec, float lifetimeSeconds)` | Creates an entity with a CSoftField that removes itself after the lifetime; move it to move the field. |
+| `Start` | `public static int Start(in SoftFieldSpec spec, float lifetimeSeconds)` | Starts a continuous field (strength and energy become per second) that stops after lifetimeSeconds. |
+| `Stop` | `public static bool Stop(int handle)` | Stops a field started with Start. |
+
+<a id="softfieldshape"></a>
 
 ### SoftFieldShape
 
 `public enum SoftFieldShape` - The volume of a soft field (pinned to softbody::FieldShape).
 
-Values: `Sphere = 0`, `Box = 1`, `Capsule = 2`, `Everywhere = 3`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Box` | `Box = 1` |  |
+| `Capsule` | `Capsule = 2` |  |
+| `Everywhere` | `Everywhere = 3` |  |
+| `Sphere` | `Sphere = 0` |  |
+
+<a id="softfieldspec"></a>
 
 ### SoftFieldSpec
 
 `public readonly record struct SoftFieldSpec( SoftFieldKind Kind, SoftFieldShape Shape, Vec3 Centre, Vec3 Extents, Vec3 RotationDegrees = default, Vec3 Direction = default, float Strength = 0f, float EnergyJoules = 0f, float Falloff = 1f, float Turbulence = 0f, SoftFieldTargets Targets = SoftFieldTargets.All, bool PerSecond = false)` - One field.
 
+<a id="softfieldtargets"></a>
+
 ### SoftFieldTargets
 
 `public enum SoftFieldTargets` - Which soft bodies a field touches (pinned to the kFieldTarget* masks).
 
-Values: `Cloth = 1`, `Destructible = 2`, `Debris = 4`, `All = 7`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `All` | `All = 7` |  |
+| `Cloth` | `Cloth = 1` |  |
+| `Debris` | `Debris = 4` |  |
+| `Destructible` | `Destructible = 2` |  |
+
+<a id="softpreset"></a>
 
 ### SoftPreset
 
 `public enum SoftPreset` - The material presets (pinned to softbody::SoftPreset in Material.hpp).
 
-Values: `ClothLight = 0`, `ClothHeavy = 1`, `Metal = 2`, `Wood = 3`, `Glass = 4`, `Jelly = 5`, `Rope = 6`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ClothHeavy` | `ClothHeavy = 1` |  |
+| `ClothLight` | `ClothLight = 0` |  |
+| `Glass` | `Glass = 4` |  |
+| `Jelly` | `Jelly = 5` |  |
+| `Metal` | `Metal = 2` |  |
+| `Rope` | `Rope = 6` |  |
+| `Wood` | `Wood = 3` |  |
+
+<a id="softsensorevent"></a>
 
 ### SoftSensorEvent
 
 `public readonly record struct SoftSensorEvent(Entity Soft, Entity Sensor, bool Entered)` - A soft body entering or leaving a sensor.
 
+<a id="softshapes"></a>
+
 ### SoftShapes
 
 `public static class SoftShapes` - World-level soft shape events.
 
-- `public static int DrainSensorEvents(Span<SoftSensorEvent> buffer)` - Moves the soft bodies' sensor enter / exit events of the last tick into buffer and returns how many.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `DrainSensorEvents` | `public static int DrainSensorEvents(Span<SoftSensorEvent> buffer)` | Moves the soft bodies' sensor enter / exit events of the last tick into buffer and returns how many. |
+
+<a id="sound"></a>
 
 ### Sound
 
 `public readonly struct Sound : IEquatable<Sound>` - A decoded sound, ready to play.
 
-- `public readonly int Handle` - The raw handle.
-- `public Sound(int handle)` - Wraps a raw handle.
-- `public static Sound None { get; }` - The absence of a sound.
-- `public bool IsValid { get; }` - True when this refers to a real loaded sound.
-- `public void Unload()` - Releases it.
-- `public bool Equals(Sound other)` - Handle equality.
-- `public override bool Equals(object? o)` - Handle equality.
-- `public override int GetHashCode()` - The handle itself.
-- `public override string ToString()` - Diagnostic text.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Sound` | `public Sound(int handle)` | Wraps a raw handle. |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `IsValid` | `public bool IsValid { get; }` | True when this refers to a real loaded sound. |
+| `None` | `public static Sound None { get; }` | The absence of a sound. |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Handle` | `public readonly int Handle` | The raw handle. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Equals` | `public bool Equals(Sound other)` | Handle equality. |
+| `Equals` | `public override bool Equals(object? o)` | Handle equality. |
+| `GetHashCode` | `public override int GetHashCode()` | The handle itself. |
+| `ToString` | `public override string ToString()` | Diagnostic text. |
+| `Unload` | `public void Unload()` | Releases it. |
+
+<a id="soundgraph"></a>
 
 ### SoundGraph
 
 `public readonly struct SoundGraph : IEquatable<SoundGraph>` - A loaded, compiled .ocsnd that can be played as a real-time voice.
 
-- `public readonly int Handle` - The raw handle.
-- `public SoundGraph(int handle)` - Wraps a raw handle.
-- `public static SoundGraph None { get; }` - The absence of a graph, and what a failed load gives back.
-- `public bool IsValid { get; }` - True when this refers to a loaded graph.
-- `public double Duration { get; }` - The authored length in seconds: how long a non-looping play lasts.
-- `public int ParamCount { get; }` - How many named live inputs (Parameter nodes) the graph has.
-- `public string ParamName(int id)` - The name of live input id, or an empty string.
-- `public int FindParam(string name)` - The id of a named live input, or -1.
-- `public float ParamDefault(int id)` - The value live input id was authored with.
-- `public void Unload()` - Forgets the graph.
-- `public bool Equals(SoundGraph other)` - Handle equality.
-- `public override bool Equals(object? o)` - Handle equality.
-- `public override int GetHashCode()` - The handle itself.
-- `public override string ToString()` - Diagnostic text.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `SoundGraph` | `public SoundGraph(int handle)` | Wraps a raw handle. |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Duration` | `public double Duration { get; }` | The authored length in seconds: how long a non-looping play lasts. |
+| `IsValid` | `public bool IsValid { get; }` | True when this refers to a loaded graph. |
+| `None` | `public static SoundGraph None { get; }` | The absence of a graph, and what a failed load gives back. |
+| `ParamCount` | `public int ParamCount { get; }` | How many named live inputs (Parameter nodes) the graph has. |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Handle` | `public readonly int Handle` | The raw handle. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Equals` | `public bool Equals(SoundGraph other)` | Handle equality. |
+| `Equals` | `public override bool Equals(object? o)` | Handle equality. |
+| `FindParam` | `public int FindParam(string name)` | The id of a named live input, or -1. |
+| `GetHashCode` | `public override int GetHashCode()` | The handle itself. |
+| `ParamDefault` | `public float ParamDefault(int id)` | The value live input id was authored with. |
+| `ParamName` | `public string ParamName(int id)` | The name of live input id, or an empty string. |
+| `ToString` | `public override string ToString()` | Diagnostic text. |
+| `Unload` | `public void Unload()` | Forgets the graph. |
+
+<a id="speakerlayout"></a>
 
 ### SpeakerLayout
 
 `public enum SpeakerLayout` - The output channel layouts a project can ask for, mirroring AVER_AUDIO_SPEAKERS_* in audio_abi.h.
 
-Values: `Stereo = 2`, `Surround51 = 6`, `Surround71 = 8`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Stereo` | `Stereo = 2` |  |
+| `Surround51` | `Surround51 = 6` |  |
+| `Surround71` | `Surround71 = 8` |  |
+
+<a id="speech"></a>
 
 ### Speech
 
 `public static class Speech` - The game talking through the OS voice (SAPI on Windows): narrated menus, captions and script announcements.
 
-- `public static bool Available { get; }` - An OS voice exists.
-- `public static bool Enabled { get; set; }` - The master switch (also the settings page's Text to speech).
-- `public static bool NarrateUi { get; set; }` - Read focused menu items aloud.
-- `public static bool NarrateCaptions { get; set; }` - Read new caption lines aloud.
-- `public static int Rate { get; set; }` - Speech rate, -10 to 10 (SAPI's range).
-- `public static float Volume { get; set; }` - Speech volume, 0 to 1.
-- `public static bool Announce(string textOrRef, bool interrupt = false)` - Says a string (or a localization reference).
-- `public static void Stop()` - Cuts off everything being said and queued.
-- `public static bool IsSpeaking { get; }` - Whether speech is in progress or queued.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Available` | `public static bool Available { get; }` | An OS voice exists. |
+| `Enabled` | `public static bool Enabled { get; set; }` | The master switch (also the settings page's Text to speech). |
+| `IsSpeaking` | `public static bool IsSpeaking { get; }` | Whether speech is in progress or queued. |
+| `NarrateCaptions` | `public static bool NarrateCaptions { get; set; }` | Read new caption lines aloud. |
+| `NarrateUi` | `public static bool NarrateUi { get; set; }` | Read focused menu items aloud. |
+| `Rate` | `public static int Rate { get; set; }` | Speech rate, -10 to 10 (SAPI's range). |
+| `Volume` | `public static float Volume { get; set; }` | Speech volume, 0 to 1. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Announce` | `public static bool Announce(string textOrRef, bool interrupt = false)` | Says a string (or a localization reference). |
+| `Stop` | `public static void Stop()` | Cuts off everything being said and queued. |
+
+<a id="sprite2d"></a>
 
 ### Sprite2D
 
 `public struct Sprite2D` - A sprite: a texture, or a region or frame of it, drawn at the entity's transform.
 
-- `public long Texture` - Asset id of the image (Assets.ObjectIdOf of its content path); 0 draws nothing.
-- `public Vector4 Region` - Source rectangle in pixels (x, y, width, height); a zero width or height means the whole image.
-- `public Vector2 Offset` - Offset of the image from the entity's origin.
-- `public uint Modulate` - Straight RGBA multiplier, 0xAABBGGRR; 0 means white.
-- `public Sprite2DFlags Flags` - Behaviour bits.
-- `public int HFrames` - Columns of the frame grid inside the region; 0 means 1.
-- `public int VFrames` - Rows of the frame grid; 0 means 1.
-- `public int Frame` - Which cell of the grid to draw; wraps.
-- `public Sprite2DBlend Blend` - How it combines with what is behind it.
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Blend` | `public Sprite2DBlend Blend` | How it combines with what is behind it. |
+| `Flags` | `public Sprite2DFlags Flags` | Behaviour bits. |
+| `Frame` | `public int Frame` | Which cell of the grid to draw; wraps. |
+| `HFrames` | `public int HFrames` | Columns of the frame grid inside the region; 0 means 1. |
+| `Modulate` | `public uint Modulate` | Straight RGBA multiplier, 0xAABBGGRR; 0 means white. |
+| `Offset` | `public Vector2 Offset` | Offset of the image from the entity's origin. |
+| `Region` | `public Vector4 Region` | Source rectangle in pixels (x, y, width, height); a zero width or height means the whole image. |
+| `Texture` | `public long Texture` | Asset id of the image (Assets.ObjectIdOf of its content path); 0 draws nothing. |
+| `VFrames` | `public int VFrames` | Rows of the frame grid; 0 means 1. |
+
+<a id="sprite2dblend"></a>
 
 ### Sprite2DBlend
 
 `public enum Sprite2DBlend` - How a sprite combines with what is behind it.
 
-Values: `Mix = 0`, `Add = 1`, `Sub = 2`, `Mul = 3`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Add` | `Add = 1` |  |
+| `Mix` | `Mix = 0` |  |
+| `Mul` | `Mul = 3` |  |
+| `Sub` | `Sub = 2` |  |
+
+<a id="sprite2dflags"></a>
 
 ### Sprite2DFlags
 
 `public enum Sprite2DFlags : uint` - Flags of Sprite2D.
 
-Values: `None = 0`, `FlipH = 1`, `FlipV = 2`, `NotCentered = 4`, `Hidden = 8`, `Nearest = 16`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `FlipH` | `FlipH = 1` |  |
+| `FlipV` | `FlipV = 2` |  |
+| `Hidden` | `Hidden = 8` |  |
+| `Nearest` | `Nearest = 16` |  |
+| `None` | `None = 0` |  |
+| `NotCentered` | `NotCentered = 4` |  |
+
+<a id="spriteanim2d"></a>
 
 ### SpriteAnim2D
 
 `public struct SpriteAnim2D` - Playback settings and state of the sprite animation on an entity.
 
-- `public float SpeedScale` - Playback speed; 0 reads as 1, negative plays backwards.
-- `public int Autoplay` - Clip index + 1 that starts playing on the first frame; 0 for none.
-- `public bool Playing` - Read only: the clip is advancing.
-- `public int Clip` - Read only: index of the current clip, -1 when there are none.
-- `public int Frame` - Read only: frame within the current clip.
-- `public float Progress` - Read only: 0 to 1 through that frame.
-- `public int ClipCount` - Read only: clips defined.
-- `public int FrameCount` - Read only: frames defined across all the clips.
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Autoplay` | `public int Autoplay` | Clip index + 1 that starts playing on the first frame; 0 for none. |
+| `Clip` | `public int Clip` | Read only: index of the current clip, -1 when there are none. |
+| `ClipCount` | `public int ClipCount` | Read only: clips defined. |
+| `Frame` | `public int Frame` | Read only: frame within the current clip. |
+| `FrameCount` | `public int FrameCount` | Read only: frames defined across all the clips. |
+| `Playing` | `public bool Playing` | Read only: the clip is advancing. |
+| `Progress` | `public float Progress` | Read only: 0 to 1 through that frame. |
+| `SpeedScale` | `public float SpeedScale` | Playback speed; 0 reads as 1, negative plays backwards. |
+
+<a id="spriteanimevent2d"></a>
 
 ### SpriteAnimEvent2D
 
 `public readonly record struct SpriteAnimEvent2D(Entity Entity, SpriteAnimEventKind Kind, int Clip, int Frame)` - A sprite animation event: Entity had Kind happen at Clip, Frame.
 
+<a id="spriteanimeventkind"></a>
+
 ### SpriteAnimEventKind
 
 `public enum SpriteAnimEventKind` - What a sprite animation reported.
 
-Values: `FrameChanged = 0`, `Finished = 1`, `Looped = 2`, `AnimationChanged = 3`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AnimationChanged` | `AnimationChanged = 3` |  |
+| `Finished` | `Finished = 1` |  |
+| `FrameChanged` | `FrameChanged = 0` |  |
+| `Looped` | `Looped = 2` |  |
+
+<a id="spriteanimframe2d"></a>
 
 ### SpriteAnimFrame2D
 
 `public struct SpriteAnimFrame2D` - One frame of a sprite animation.
 
-- `public long Texture` - Asset id of the image; 0 keeps the sprite's own texture (a frame that is a cell of its sheet).
-- `public Vector4 Region` - Source rectangle in pixels (x, y, width, height); a zero width or height means the whole image.
-- `public float Weight` - Relative length, 0 reads as 1: the frame lasts Weight / (fps * speed scale) seconds.
-- `public int Cell` - The sprite's HFrames x VFrames cell while this frame shows.
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Cell` | `public int Cell` | The sprite's HFrames x VFrames cell while this frame shows. |
+| `Region` | `public Vector4 Region` | Source rectangle in pixels (x, y, width, height); a zero width or height means the whole image. |
+| `Texture` | `public long Texture` | Asset id of the image; 0 keeps the sprite's own texture (a frame that is a cell of its sheet). |
+| `Weight` | `public float Weight` | Relative length, 0 reads as 1: the frame lasts Weight / (fps * speed scale) seconds. |
+
+<a id="stackexpire"></a>
 
 ### StackExpire
 
 `public enum StackExpire` - What happens to the stacks when the duration runs out.
 
-Values: `ClearAll`, `RemoveOne`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ClearAll` | `ClearAll` |  |
+| `RemoveOne` | `RemoveOne` |  |
+
+<a id="stackscope"></a>
 
 ### StackScope
 
 `public enum StackScope` - How repeated applications of one effect combine.
 
-Values: `None`, `Target`, `Source`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `None` | `None` |  |
+| `Source` | `Source` |  |
+| `Target` | `Target` |  |
+
+<a id="stereoupmix"></a>
 
 ### StereoUpmix
 
 `public enum StereoUpmix` - How a stereo source is placed on a 5.1 or 7.1 mix, mirroring AVER_AUDIO_UPMIX_* in audio_abi.h.
 
-Values: `Front = 0`, `Wrap = 1`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Front` | `Front = 0` |  |
+| `Wrap` | `Wrap = 1` |  |
+
+<a id="subviewclear"></a>
 
 ### SubViewClear
 
 `public enum SubViewClear` - Whether the target is cleared before a picture.
 
-Values: `Always = 0`, `Never = 1`, `Once = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Always` | `Always = 0` |  |
+| `Never` | `Never = 1` |  |
+| `Once` | `Once = 2` |  |
+
+<a id="subviewinfo"></a>
 
 ### SubViewInfo
 
 `public readonly struct SubViewInfo` - What the host knows about a view: its modes and the size it is actually drawn at.
 
-- `public SubViewUpdate Update { get; init; }`
-- `public SubViewClear Clear { get; init; }`
-- `public bool Transparent { get; init; }`
-- `public int CameraEntity { get; init; }` - The camera entity handle, 0 for none.
-- `public int Width { get; init; }` - The size drawn: the requested size times the 3D scale, fitted to the pixel budget.
-- `public int Height { get; init; }`
-- `public int Renders { get; init; }` - Pictures drawn so far.
-- `public int Generation { get; init; }` - Changes when the texture is rebuilt; a consumer holding the old Texture must read it again.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `CameraEntity` | `public int CameraEntity { get; init; }` | The camera entity handle, 0 for none. |
+| `Clear` | `public SubViewClear Clear { get; init; }` |  |
+| `Generation` | `public int Generation { get; init; }` | Changes when the texture is rebuilt; a consumer holding the old Texture must read it again. |
+| `Height` | `public int Height { get; init; }` |  |
+| `Renders` | `public int Renders { get; init; }` | Pictures drawn so far. |
+| `Transparent` | `public bool Transparent { get; init; }` |  |
+| `Update` | `public SubViewUpdate Update { get; init; }` |  |
+| `Width` | `public int Width { get; init; }` | The size drawn: the requested size times the 3D scale, fitted to the pixel budget. |
+
+<a id="subviews"></a>
 
 ### SubViews
 
 `public static class SubViews` - Sub-viewports: extra views of the world drawn into textures that materials and the UI show.
 
-- `public const int DefaultMaxViews = 4`
-- `public const int DefaultRendersPerFrame = 2`
-- `public static int Create(string key, int width, int height)` - Makes the view named key or returns the one that exists.
-- `public static bool Destroy(int id)`
-- `public static int Find(string key)` - The id of the view with this key, or 0.
-- `public static bool SetSize(int id, int width, int height)`
-- `public static bool SetUpdate(int id, SubViewUpdate mode)` - Setting Once asks for one render now.
-- `public static bool SetClear(int id, SubViewClear mode)`
-- `public static bool SetTransparent(int id, bool on)` - A transparent view clears to alpha 0.
-- `public static bool SetOwnWorld(int id, bool on)` - Carried only: the engine has one world.
-- `public static bool SetCamera(int id, int entityHandle)` - The entity whose camera component and world transform draw the view; 0 clears it (a view with no camera is not drawn).
-- `public static bool SetScale(int id, float scale, int msaa = 0)` - Multiplies the drawn size (0.25 to 8); the multisample count is stored, not used.
-- `public static bool SetParentVisible(int id, bool visible)`
-- `public static bool SetClearColor(int id, float r, float g, float b, float a = 1f)` - The colour the target is cleared to (display values 0 to 1).
-- `public static bool AddMaterialConsumer(int id)` - Counts a material that shows the view's texture; a WhenVisible view is drawn only while there is one.
-- `public static bool RemoveMaterialConsumer(int id)`
-- `public static bool AddUiConsumer(int id)` - Counts a piece of UI that shows the view's texture.
-- `public static bool RemoveUiConsumer(int id)`
-- `public static bool RequestRender(int id)` - Asks for one more picture whatever the update mode says.
-- `public static bool SetScreenRect(int id, float x, float y, float width, float height, bool visible)` - Shows the view over the window, a rectangle in the UI's own pixels (a SubViewportContainer); visible false hides it.
-- `public static bool TryGetInfo(int id, out SubViewInfo info)` - False for an unknown id.
-- `public static ulong Texture(int id)` - The host's texture (an engine texture handle) for the view, 0 until a picture has been drawn.
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `DefaultMaxViews` | `public const int DefaultMaxViews = 4` |  |
+| `DefaultRendersPerFrame` | `public const int DefaultRendersPerFrame = 2` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AddMaterialConsumer` | `public static bool AddMaterialConsumer(int id)` | Counts a material that shows the view's texture; a WhenVisible view is drawn only while there is one. |
+| `AddUiConsumer` | `public static bool AddUiConsumer(int id)` | Counts a piece of UI that shows the view's texture. |
+| `Create` | `public static int Create(string key, int width, int height)` | Makes the view named key or returns the one that exists. |
+| `Destroy` | `public static bool Destroy(int id)` |  |
+| `Find` | `public static int Find(string key)` | The id of the view with this key, or 0. |
+| `RemoveMaterialConsumer` | `public static bool RemoveMaterialConsumer(int id)` |  |
+| `RemoveUiConsumer` | `public static bool RemoveUiConsumer(int id)` |  |
+| `RequestRender` | `public static bool RequestRender(int id)` | Asks for one more picture whatever the update mode says. |
+| `SetCamera` | `public static bool SetCamera(int id, int entityHandle)` | The entity whose camera component and world transform draw the view; 0 clears it (a view with no camera is not drawn). |
+| `SetClear` | `public static bool SetClear(int id, SubViewClear mode)` |  |
+| `SetClearColor` | `public static bool SetClearColor(int id, float r, float g, float b, float a = 1f)` | The colour the target is cleared to (display values 0 to 1). |
+| `SetOwnWorld` | `public static bool SetOwnWorld(int id, bool on)` | Carried only: the engine has one world. |
+| `SetParentVisible` | `public static bool SetParentVisible(int id, bool visible)` |  |
+| `SetScale` | `public static bool SetScale(int id, float scale, int msaa = 0)` | Multiplies the drawn size (0.25 to 8); the multisample count is stored, not used. |
+| `SetScreenRect` | `public static bool SetScreenRect(int id, float x, float y, float width, float height, bool visible)` | Shows the view over the window, a rectangle in the UI's own pixels (a SubViewportContainer); visible false hides it. |
+| `SetSize` | `public static bool SetSize(int id, int width, int height)` |  |
+| `SetTransparent` | `public static bool SetTransparent(int id, bool on)` | A transparent view clears to alpha 0. |
+| `SetUpdate` | `public static bool SetUpdate(int id, SubViewUpdate mode)` | Setting Once asks for one render now. |
+| `Texture` | `public static ulong Texture(int id)` | The host's texture (an engine texture handle) for the view, 0 until a picture has been drawn. |
+| `TryGetInfo` | `public static bool TryGetInfo(int id, out SubViewInfo info)` | False for an unknown id. |
+
+<a id="subviewupdate"></a>
 
 ### SubViewUpdate
 
 `public enum SubViewUpdate` - When a view is drawn.
 
-Values: `Disabled = 0`, `Once = 1`, `WhenVisible = 2`, `WhenParentVisible = 3`, `Always = 4`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Always` | `Always = 4` |  |
+| `Disabled` | `Disabled = 0` |  |
+| `Once` | `Once = 1` |  |
+| `WhenParentVisible` | `WhenParentVisible = 3` |  |
+| `WhenVisible` | `WhenVisible = 2` |  |
+
+<a id="surface"></a>
 
 ### Surface
 
 `public static class Surface` - Physical-surface ids: graphs and scripts compare integers instead of names.
 
-- `public static int IdOf(string? name)` - The 32-bit FNV-1a hash of the UTF-8 name, never 0 (a zero hash becomes 1); 0 for a null or empty name.
-- `public static string NameOf(int surface)` - The name registered for an id (a .ocsurf table entry, a landscape layer or Surfaces.Register); an empty string when none is, or with no physics library loaded.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `IdOf` | `public static int IdOf(string? name)` | The 32-bit FNV-1a hash of the UTF-8 name, never 0 (a zero hash becomes 1); 0 for a null or empty name. |
+| `NameOf` | `public static string NameOf(int surface)` | The name registered for an id (a .ocsurf table entry, a landscape layer or Surfaces.Register); an empty string when none is, or with no physics library loaded. |
+
+<a id="surfacehit"></a>
 
 ### SurfaceHit
 
 `public readonly record struct SurfaceHit(bool Hit, Entity Entity, Vec3 Point, Vec3 Normal, float DistanceCm, int SurfaceId, string SurfaceName, float Friction, float Restitution, int Tag)` - What a ray or a query under an entity touched.
 
+<a id="swizzleorder"></a>
+
 ### SwizzleOrder
 
 `public enum SwizzleOrder` - Channel order of a Swizzle: output channel i reads the input channel named by letter i.
 
-Values: `XYZ`, `YXZ`, `ZYX`, `XZY`, `YZX`, `ZXY`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `XYZ` | `XYZ` |  |
+| `XZY` | `XZY` |  |
+| `YXZ` | `YXZ` |  |
+| `YZX` | `YZX` |  |
+| `ZXY` | `ZXY` |  |
+| `ZYX` | `ZYX` |  |
+
+<a id="tickgroup"></a>
 
 ### TickGroup
 
 `public enum TickGroup` - Kept so older scripts compile; see Ticks.
 
-Values: `PrePhysics = 0`, `Physics = 1`, `PostPhysics = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Physics` | `Physics = 1` |  |
+| `PostPhysics` | `PostPhysics = 2` |  |
+| `PrePhysics` | `PrePhysics = 0` |  |
+
+<a id="timerflags"></a>
 
 ### TimerFlags
 
 `public enum TimerFlags` - Per-timer clock behaviour.
 
-Values: `None = 0`, `IgnorePause = 2`, `IgnoreDilation = 4`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `IgnoreDilation` | `IgnoreDilation = 4` |  |
+| `IgnorePause` | `IgnorePause = 2` |  |
+| `None` | `None = 0` |  |
+
+<a id="timerhandle"></a>
 
 ### TimerHandle
 
 `public readonly struct TimerHandle : IEquatable<TimerHandle>` - A timer handle.
 
-- `public int Value { get; }` - The raw ABI handle.
-- `public TimerHandle(int value)` - Wraps a raw handle (for graph interop).
-- `public bool IsValid { get; }` - True for any non-zero handle; says nothing about whether the timer still runs.
-- `public bool IsActive { get; }` - True while the timer is still scheduled.
-- `public bool Equals(TimerHandle other)` - Inherited documentation.
-- `public override bool Equals(object? obj)` - Inherited documentation.
-- `public override int GetHashCode()` - Inherited documentation.
-- `public static bool operator ==(TimerHandle a, TimerHandle b)` - Equality.
-- `public static bool operator !=(TimerHandle a, TimerHandle b)` - Inequality.
-- `public override string ToString()` - Inherited documentation.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `TimerHandle` | `public TimerHandle(int value)` | Wraps a raw handle (for graph interop). |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `IsActive` | `public bool IsActive { get; }` | True while the timer is still scheduled. |
+| `IsValid` | `public bool IsValid { get; }` | True for any non-zero handle; says nothing about whether the timer still runs. |
+| `Value` | `public int Value { get; }` | The raw ABI handle. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Equals` | `public bool Equals(TimerHandle other)` | Inherited documentation. |
+| `Equals` | `public override bool Equals(object? obj)` | Inherited documentation. |
+| `GetHashCode` | `public override int GetHashCode()` | Inherited documentation. |
+| `operator !=` | `public static bool operator !=(TimerHandle a, TimerHandle b)` | Inequality. |
+| `operator ==` | `public static bool operator ==(TimerHandle a, TimerHandle b)` | Equality. |
+| `ToString` | `public override string ToString()` | Inherited documentation. |
+
+<a id="timers"></a>
 
 ### Timers
 
 `public static class Timers` - Frame-safe timers on a pausable, dilatable game clock.
 
-- `public static TimerHandle Set(float delay, Action<TimerHandle> callback, bool repeat = false, float firstDelay = -1f, int maxFires = 0, TimerFlags flags = TimerFlags.None, int owner = 0)` - Schedules callback.
-- `public static TimerHandle Set(float delay, Action callback, bool repeat = false, float firstDelay = -1f, int maxFires = 0, TimerFlags flags = TimerFlags.None, int owner = 0)` - Schedules a callback that does not need its own handle.
-- `public static bool Clear(TimerHandle h)` - Cancels a timer.
-- `public static int ClearOwner(int owner)` - Cancels every timer created with owner.
-- `public static void ClearAll()` - Cancels every timer.
-- `public static bool IsActive(TimerHandle h)` - True while the timer is scheduled.
-- `public static float Remaining(TimerHandle h)` - Seconds until the next fire; negative for an invalid handle.
-- `public static int FireCount(TimerHandle h)` - How many times the timer has fired; -1 for an invalid handle.
-- `public static bool SetPaused(TimerHandle h, bool paused)` - Pauses or resumes one timer.
-- `public static bool IsPaused(TimerHandle h)` - True when this timer is individually paused.
-- `public static bool Reset(TimerHandle h, float delay = -1f)` - Restarts the countdown; a non-negative delay also becomes the new interval.
-- `public static bool Paused { get; set; }` - Pauses every timer that does not carry IgnorePause.
-- `public static float TimeDilation { get; set; }` - Game-time scale, clamped to [0, 100]; the same value as TimeScale.
-- `public static double Time { get; }` - Dilated, pause-respecting game time in seconds.
-- `public static double RealTime { get; }` - Unscaled time in seconds.
-- `public static int Count { get; }` - Scheduled timer count.
-- `public static void Update(float rawDt)` - Host call: advances the clock by the UNSCALED frame delta.
-- `public static void Shutdown()` - Detaches from the native service.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Count` | `public static int Count { get; }` | Scheduled timer count. |
+| `Paused` | `public static bool Paused { get; set; }` | Pauses every timer that does not carry IgnorePause. |
+| `RealTime` | `public static double RealTime { get; }` | Unscaled time in seconds. |
+| `Time` | `public static double Time { get; }` | Dilated, pause-respecting game time in seconds. |
+| `TimeDilation` | `public static float TimeDilation { get; set; }` | Game-time scale, clamped to [0, 100]; the same value as TimeScale. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Clear` | `public static bool Clear(TimerHandle h)` | Cancels a timer. |
+| `ClearAll` | `public static void ClearAll()` | Cancels every timer. |
+| `ClearOwner` | `public static int ClearOwner(int owner)` | Cancels every timer created with owner. |
+| `FireCount` | `public static int FireCount(TimerHandle h)` | How many times the timer has fired; -1 for an invalid handle. |
+| `IsActive` | `public static bool IsActive(TimerHandle h)` | True while the timer is scheduled. |
+| `IsPaused` | `public static bool IsPaused(TimerHandle h)` | True when this timer is individually paused. |
+| `Remaining` | `public static float Remaining(TimerHandle h)` | Seconds until the next fire; negative for an invalid handle. |
+| `Reset` | `public static bool Reset(TimerHandle h, float delay = -1f)` | Restarts the countdown; a non-negative delay also becomes the new interval. |
+| `Set` | `public static TimerHandle Set(float delay, Action callback, bool repeat = false, float firstDelay = -1f, int maxFires = 0, TimerFlags flags = TimerFlags.None, int owner = 0)` | Schedules a callback that does not need its own handle. |
+| `Set` | `public static TimerHandle Set(float delay, Action<TimerHandle> callback, bool repeat = false, float firstDelay = -1f, int maxFires = 0, TimerFlags flags = TimerFlags.None, int owner = 0)` | Schedules callback. |
+| `SetPaused` | `public static bool SetPaused(TimerHandle h, bool paused)` | Pauses or resumes one timer. |
+| `Shutdown` | `public static void Shutdown()` | Detaches from the native service. |
+| `Update` | `public static void Update(float rawDt)` | Host call: advances the clock by the UNSCALED frame delta. |
+
+<a id="touch"></a>
 
 ### Touch
 
 `public static class Touch` - Fingers on a touch screen, by index.
 
-- `public const int MaxFingers = 10` - The most fingers tracked.
-- `public static bool IsDown(int index, out float x, out float y, out float pressure)` - True while finger index is down; its position in window pixels and pressure (0 to 1).
-- `public static bool Pressed(int index)` - True on the frame finger index went down.
-- `public static bool Released(int index)` - True on the frame finger index went up.
-- `public static bool Emulation { get; set; }` - Whether the left mouse button publishes as finger 0 (when no real finger has been seen).
-- `public static bool Available { get; }` - Whether the machine reported a real touch screen (a finger has arrived).
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Available` | `public static bool Available { get; }` | Whether the machine reported a real touch screen (a finger has arrived). |
+| `Emulation` | `public static bool Emulation { get; set; }` | Whether the left mouse button publishes as finger 0 (when no real finger has been seen). |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `MaxFingers` | `public const int MaxFingers = 10` | The most fingers tracked. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `IsDown` | `public static bool IsDown(int index, out float x, out float y, out float pressure)` | True while finger index is down; its position in window pixels and pressure (0 to 1). |
+| `Pressed` | `public static bool Pressed(int index)` | True on the frame finger index went down. |
+| `Released` | `public static bool Released(int index)` | True on the frame finger index went up. |
+
+<a id="transform2d"></a>
 
 ### Transform2D
 
 `public struct Transform2D` - Position, rotation, scale and z-index of a 2D entity.
 
-- `public Vector2 Position` - Local position, in canvas units.
-- `public float Rotation` - Local rotation in radians, clockwise on screen (y points down).
-- `public Vector2 Scale` - Local scale; 0 reads as 1.
-- `public int ZIndex` - Draw order within the canvas layer, -4096 to 4096; relative to the parent's unless ZAbsolute.
-- `public Transform2DFlags Flags` - Behaviour bits.
-- `public uint TreeOrder` - 0 derives the tree order from the hierarchy; otherwise the caller's own tree index (the shared sort key's last part).
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Flags` | `public Transform2DFlags Flags` | Behaviour bits. |
+| `Position` | `public Vector2 Position` | Local position, in canvas units. |
+| `Rotation` | `public float Rotation` | Local rotation in radians, clockwise on screen (y points down). |
+| `Scale` | `public Vector2 Scale` | Local scale; 0 reads as 1. |
+| `TreeOrder` | `public uint TreeOrder` | 0 derives the tree order from the hierarchy; otherwise the caller's own tree index (the shared sort key's last part). |
+| `ZIndex` | `public int ZIndex` | Draw order within the canvas layer, -4096 to 4096; relative to the parent's unless ZAbsolute. |
+
+<a id="transform2dflags"></a>
 
 ### Transform2DFlags
 
 `public enum Transform2DFlags : uint` - Flags of Transform2D.
 
-Values: `None = 0`, `ZAbsolute = 1`, `TopLevel = 2`, `Hidden = 4`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Hidden` | `Hidden = 4` |  |
+| `None` | `None = 0` |  |
+| `TopLevel` | `TopLevel = 2` |  |
+| `ZAbsolute` | `ZAbsolute = 1` |  |
+
+<a id="triggerstate"></a>
 
 ### TriggerState
 
 `public enum TriggerState` - Where an action is in its trigger cycle.
 
-Values: `None = 0`, `Ongoing = 1`, `Triggered = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `None` | `None = 0` |  |
+| `Ongoing` | `Ongoing = 1` |  |
+| `Triggered` | `Triggered = 2` |  |
+
+<a id="uigamesettings"></a>
 
 ### UiGameSettings
 
 `public static class UiGameSettings` - The engine's default wiring of the settings screen.
 
-- `public static event Action<string, float>? GraphicsChanged` - Raised for a graphics.* setting that changed (or was restored by ApplyAll): key and value.
-- `public static SettingsScreen Create(IRebindProvider? rebind = null)` - Creates the screen over Settings and Audio.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Create` | `public static SettingsScreen Create(IRebindProvider? rebind = null)` | Creates the screen over Settings and Audio. |
+
+**Events**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `GraphicsChanged` | `public static event Action<string, float>? GraphicsChanged` | Raised for a graphics.* setting that changed (or was restored by ApplyAll): key and value. |
+
+<a id="vehicleevent"></a>
 
 ### VehicleEvent
 
 `public readonly record struct VehicleEvent(VehicleEventKind Kind, Entity Vehicle, int A, int B, Vec3 Point, Vec3 Normal, float Value, float Value2, int Seq)` - Something that happened to a vehicle.
 
+<a id="vehicleeventkind"></a>
+
 ### VehicleEventKind
 
 `public enum VehicleEventKind` - What a vehicle event is.
 
-Values: `SkidBegin = 1`, `SkidEnd = 2`, `Land = 3`, `Impact = 4`, `Shift = 5`, `Flipped = 6`, `Assist = 7`, `Entered = 8`, `Exited = 9`, `Crash = 10`, `Destroyed = 11`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Assist` | `Assist = 7` |  |
+| `Crash` | `Crash = 10` |  |
+| `Destroyed` | `Destroyed = 11` |  |
+| `Entered` | `Entered = 8` |  |
+| `Exited` | `Exited = 9` |  |
+| `Flipped` | `Flipped = 6` |  |
+| `Impact` | `Impact = 4` |  |
+| `Land` | `Land = 3` |  |
+| `Shift` | `Shift = 5` |  |
+| `SkidBegin` | `SkidBegin = 1` |  |
+| `SkidEnd` | `SkidEnd = 2` |  |
+
+<a id="vehiclehud"></a>
 
 ### VehicleHud
 
 `public sealed class VehicleHud` - Binds a layout to a vehicle.
 
-- `public float RpmMax { get; set; }` - The rev limit the bar is drawn against, rpm.
-- `public VehicleHud(Widget root, Entity vehicle, bool miles = false)` - Finds the widgets under root and remembers the vehicle.
-- `public void Update()` - Reads the vehicle's telemetry and writes the widgets.
-- `public static string FormatSpeed(float cmPerSecond, bool miles = false)` - A speed in cm/s as text: "100 km/h" (or "62 mph" with miles).
-- `public static string FormatGear(int gear)` - The gear as the dash shows it: R, N, then the number.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `VehicleHud` | `public VehicleHud(Widget root, Entity vehicle, bool miles = false)` | Finds the widgets under root and remembers the vehicle. |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `RpmMax` | `public float RpmMax { get; set; }` | The rev limit the bar is drawn against, rpm. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `FormatGear` | `public static string FormatGear(int gear)` | The gear as the dash shows it: R, N, then the number. |
+| `FormatSpeed` | `public static string FormatSpeed(float cmPerSecond, bool miles = false)` | A speed in cm/s as text: "100 km/h" (or "62 mph" with miles). |
+| `Update` | `public void Update()` | Reads the vehicle's telemetry and writes the widgets. |
+
+<a id="vehiclepreset"></a>
 
 ### VehiclePreset
 
 `public enum VehiclePreset` - The built-in vehicles a preset-only Vehicle component (or Spawn) can be: the five traffic presets, sized from the mesh, and the tank.
 
-Values: `Car = 0`, `Van = 1`, `Truck = 2`, `Bus = 3`, `Sports = 4`, `Tank = 5`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Bus` | `Bus = 3` |  |
+| `Car` | `Car = 0` |  |
+| `Sports` | `Sports = 4` |  |
+| `Tank` | `Tank = 5` |  |
+| `Truck` | `Truck = 2` |  |
+| `Van` | `Van = 1` |  |
+
+<a id="vehicles"></a>
 
 ### Vehicles
 
 `public static class Vehicles` - Builds cars.
 
-- `public static float SpringSagCm(float hz)` - How far a spring of hz hertz sags under a quarter of a car's weight, cm: g / (2 pi f)^2.
-- `public static WheelPlan[] PlanWheels(CarSpec spec)` - The four wheels of spec: front left, front right, rear left, rear right.
-- `public static int[] AxleOf(IReadOnlyList<WheelPlan> wheels)` - Which axle each wheel belongs to, by the physics layer's rule: two wheels whose attachment points agree in X to within 5 cm and lie on opposite sides of Y = 0 form an axle; a wheel with no partner is its own axle.
-- `public static int CountAxles(IReadOnlyList<WheelPlan> wheels)` - How many axles the wheels form (see AxleOf).
-- `public static int CountDifferentials(IReadOnlyList<WheelPlan> wheels)` - How many differentials the physics layer builds: one per axle that has a driven wheel.
-- `public static Car CreateCar(Vec3 position, float yawDegrees = 0f)` - Builds a default car at position facing yawDegrees.
-- `public static Car CreateCar(Vec3 position, float yawDegrees, CarSpec spec)` - Makes the car as .ocvehicle text (ToOcVehicle) through the vehicle system, which builds the chassis, four wheels, engine and simulation and keeps the entity at the car's pose.
-- `public static Entity Spawn(string assetOrPreset, Vec3 position, float yawDegrees = 0f)` - Makes a vehicle entity from an .ocvehicle content path or a built-in preset name ("car", "van", "truck", "bus", "sports", "tank") at a pose, built now.
-- `public static Entity SpawnFromText(string ocvehicleText, Vec3 position, float yawDegrees = 0f)` - The same from inline .ocvehicle text (it begins OCVEHICLE 1).
-- `public static int DrainEvents(Span<VehicleEvent> buffer)` - Takes up to buffer.Length pending vehicle events (skids, landings, impacts, shifts, crashes, flips, getting in and out) off the queue, oldest first, and returns how many.
-- `public static bool TryGet(int vehicleHandle, out Car car)` - The car made by CreateCar (or Spawn) with this vehicle handle, if it still exists.
-- `public static void SyncEntities()` - Forgets cars whose entity died or whose physics world was reset.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AxleOf` | `public static int[] AxleOf(IReadOnlyList<WheelPlan> wheels)` | Which axle each wheel belongs to, by the physics layer's rule: two wheels whose attachment points agree in X to within 5 cm and lie on opposite sides of Y = 0 form an axle; a wheel with no partner is its own axle. |
+| `CountAxles` | `public static int CountAxles(IReadOnlyList<WheelPlan> wheels)` | How many axles the wheels form (see AxleOf). |
+| `CountDifferentials` | `public static int CountDifferentials(IReadOnlyList<WheelPlan> wheels)` | How many differentials the physics layer builds: one per axle that has a driven wheel. |
+| `CreateCar` | `public static Car CreateCar(Vec3 position, float yawDegrees = 0f)` | Builds a default car at position facing yawDegrees. |
+| `CreateCar` | `public static Car CreateCar(Vec3 position, float yawDegrees, CarSpec spec)` | Makes the car as .ocvehicle text (ToOcVehicle) through the vehicle system, which builds the chassis, four wheels, engine and simulation and keeps the entity at the car's pose. |
+| `DrainEvents` | `public static int DrainEvents(Span<VehicleEvent> buffer)` | Takes up to buffer.Length pending vehicle events (skids, landings, impacts, shifts, crashes, flips, getting in and out) off the queue, oldest first, and returns how many. |
+| `PlanWheels` | `public static WheelPlan[] PlanWheels(CarSpec spec)` | The four wheels of spec: front left, front right, rear left, rear right. |
+| `Spawn` | `public static Entity Spawn(string assetOrPreset, Vec3 position, float yawDegrees = 0f)` | Makes a vehicle entity from an .ocvehicle content path or a built-in preset name ("car", "van", "truck", "bus", "sports", "tank") at a pose, built now. |
+| `SpawnFromText` | `public static Entity SpawnFromText(string ocvehicleText, Vec3 position, float yawDegrees = 0f)` | The same from inline .ocvehicle text (it begins OCVEHICLE 1). |
+| `SpringSagCm` | `public static float SpringSagCm(float hz)` | How far a spring of hz hertz sags under a quarter of a car's weight, cm: g / (2 pi f)^2. |
+| `SyncEntities` | `public static void SyncEntities()` | Forgets cars whose entity died or whose physics world was reset. |
+| `TryGet` | `public static bool TryGet(int vehicleHandle, out Car car)` | The car made by CreateCar (or Spawn) with this vehicle handle, if it still exists. |
+
+<a id="vehicletelemetry"></a>
 
 ### VehicleTelemetry
 
 `public readonly record struct VehicleTelemetry( float SpeedCmS, float ForwardSpeedCmS, float Rpm, int Gear, int GearCount, bool Manual, bool Shifting, float Throttle, float Brake, float Steer, float Handbrake, int WheelsOnGround, bool AbsActive, bool TcsActive, bool Flipped, bool Destroyed, float Health01, float AirborneSeconds, float LongAccelG, float LatAccelG, float TrackLeftCmS, float TrackRightCmS)` - A vehicle's state as of the last fixed physics step.
 
+<a id="visemes"></a>
+
 ### Visemes
 
 `public static class Visemes` - The 15 viseme pose names.
 
-- `public const string Sil = "viseme_sil"`
-- `public const string PP = "viseme_PP"`
-- `public const string FF = "viseme_FF"`
-- `public const string TH = "viseme_TH"`
-- `public const string DD = "viseme_DD"`
-- `public const string Kk = "viseme_kk"`
-- `public const string CH = "viseme_CH"`
-- `public const string SS = "viseme_SS"`
-- `public const string Nn = "viseme_nn"`
-- `public const string RR = "viseme_RR"`
-- `public const string Aa = "viseme_aa"`
-- `public const string E = "viseme_E"`
-- `public const string Ih = "viseme_ih"`
-- `public const string Oh = "viseme_oh"`
-- `public const string Ou = "viseme_ou"`
-- `public static readonly IReadOnlyList<string> All` - All 15, in the engine's table order.
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Aa` | `public const string Aa = "viseme_aa"` |  |
+| `All` | `public static readonly IReadOnlyList<string> All` | All 15, in the engine's table order. |
+| `CH` | `public const string CH = "viseme_CH"` |  |
+| `DD` | `public const string DD = "viseme_DD"` |  |
+| `E` | `public const string E = "viseme_E"` |  |
+| `FF` | `public const string FF = "viseme_FF"` |  |
+| `Ih` | `public const string Ih = "viseme_ih"` |  |
+| `Kk` | `public const string Kk = "viseme_kk"` |  |
+| `Nn` | `public const string Nn = "viseme_nn"` |  |
+| `Oh` | `public const string Oh = "viseme_oh"` |  |
+| `Ou` | `public const string Ou = "viseme_ou"` |  |
+| `PP` | `public const string PP = "viseme_PP"` |  |
+| `RR` | `public const string RR = "viseme_RR"` |  |
+| `Sil` | `public const string Sil = "viseme_sil"` |  |
+| `SS` | `public const string SS = "viseme_SS"` |  |
+| `TH` | `public const string TH = "viseme_TH"` |  |
+
+<a id="voice"></a>
 
 ### Voice
 
 `public readonly struct Voice : IEquatable<Voice>` - One playing instance of a Sound.
 
-- `public void SetZoneSend(int slot, float send)` - How much of this voice feeds zone send reverb slot (0 to ZoneReverbSlots - 1), 0 to 1.
-- `public readonly int Handle` - The raw handle.
-- `public Voice(int handle)` - Wraps a raw handle.
-- `public static Voice None { get; }` - The absence of a voice, and what a refused play gives back.
-- `public bool IsValid { get; }` - True when the mixer accepted this play.
-- `public bool IsPlaying { get; }` - Whether it is still sounding right now.
-- `public void Stop()` - Stops it.
-- `public float Volume { set; }` - Its volume, 0..1 and beyond at your own risk.
-- `public float Pitch { set; }` - Its playback rate.
-- `public Vec3 Position { set; }` - Moves a positioned voice.
-- `public bool Equals(Voice other)` - Handle equality.
-- `public override bool Equals(object? o)` - Handle equality.
-- `public override int GetHashCode()` - The handle itself.
-- `public override string ToString()` - Diagnostic text.
-- `public bool IsGraphVoice { get; }` - True when this is a live sound-graph voice (one from PlayGraph(SoundGraph, float, bool, Bus, uint)) that has not ended.
-- `public bool SetGraphParam(string name, float value)` - Sets a sound graph's named live input (rpm, intensity, surface).
-- `public bool SetGraphParam(int id, float value)` - Sets a live input by id (FindParam), which skips the name lookup in a per-frame loop.
-- `public void GraphNoteOff()` - The note-off: ADSR nodes release from their current level and the voice ends once the longest release has played (a graph with no ADSR fades over 10 ms).
-- `public void FadeTo(float gain, float seconds, FadeCurve curve = FadeCurve.EqualPower, bool stopWhenDone = false)` - Ramps this voice's fade gain (on top of Volume) to gain.
-- `public void FadeOut(float seconds, FadeCurve curve = FadeCurve.EqualPower)` - Fades to silence over seconds and ends the voice.
-- `public float Occlusion { set; }` - 0 clear to 1 fully blocked: the mixer low-passes and ducks the voice.
-- `public float ReverbSend { set; }` - How much of this voice feeds the reverb, 0 to 1.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Voice` | `public Voice(int handle)` | Wraps a raw handle. |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `IsGraphVoice` | `public bool IsGraphVoice { get; }` | True when this is a live sound-graph voice (one from PlayGraph(SoundGraph, float, bool, Bus, uint)) that has not ended. |
+| `IsPlaying` | `public bool IsPlaying { get; }` | Whether it is still sounding right now. |
+| `IsValid` | `public bool IsValid { get; }` | True when the mixer accepted this play. |
+| `None` | `public static Voice None { get; }` | The absence of a voice, and what a refused play gives back. |
+| `Occlusion` | `public float Occlusion { set; }` | 0 clear to 1 fully blocked: the mixer low-passes and ducks the voice. |
+| `Pitch` | `public float Pitch { set; }` | Its playback rate. |
+| `Position` | `public Vec3 Position { set; }` | Moves a positioned voice. |
+| `ReverbSend` | `public float ReverbSend { set; }` | How much of this voice feeds the reverb, 0 to 1. |
+| `Volume` | `public float Volume { set; }` | Its volume, 0..1 and beyond at your own risk. |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Handle` | `public readonly int Handle` | The raw handle. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Equals` | `public bool Equals(Voice other)` | Handle equality. |
+| `Equals` | `public override bool Equals(object? o)` | Handle equality. |
+| `FadeOut` | `public void FadeOut(float seconds, FadeCurve curve = FadeCurve.EqualPower)` | Fades to silence over seconds and ends the voice. |
+| `FadeTo` | `public void FadeTo(float gain, float seconds, FadeCurve curve = FadeCurve.EqualPower, bool stopWhenDone = false)` | Ramps this voice's fade gain (on top of Volume) to gain. |
+| `GetHashCode` | `public override int GetHashCode()` | The handle itself. |
+| `GraphNoteOff` | `public void GraphNoteOff()` | The note-off: ADSR nodes release from their current level and the voice ends once the longest release has played (a graph with no ADSR fades over 10 ms). |
+| `SetGraphParam` | `public bool SetGraphParam(int id, float value)` | Sets a live input by id (FindParam), which skips the name lookup in a per-frame loop. |
+| `SetGraphParam` | `public bool SetGraphParam(string name, float value)` | Sets a sound graph's named live input (rpm, intensity, surface). |
+| `SetZoneSend` | `public void SetZoneSend(int slot, float send)` | How much of this voice feeds zone send reverb slot (0 to ZoneReverbSlots - 1), 0 to 1. |
+| `Stop` | `public void Stop()` | Stops it. |
+| `ToString` | `public override string ToString()` | Diagnostic text. |
+
+<a id="water"></a>
 
 ### Water
 
 `public static class Water` - Where the water is.
 
-- `public static WaterSample Sample(Vec3 p)` - Samples the water at a world position (centimetres).
-- `public static WaterSample Sample(Entity e)` - Samples the water at an entity's world position.
-- `public static bool IsInWater(Vec3 p)` - True when the point is under the water surface.
-- `public static Vec3 CurrentAt(Vec3 p)` - The water current at a point in cm/s (zero out of the water or in still water).
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `CurrentAt` | `public static Vec3 CurrentAt(Vec3 p)` | The water current at a point in cm/s (zero out of the water or in still water). |
+| `IsInWater` | `public static bool IsInWater(Vec3 p)` | True when the point is under the water surface. |
+| `Sample` | `public static WaterSample Sample(Entity e)` | Samples the water at an entity's world position. |
+| `Sample` | `public static WaterSample Sample(Vec3 p)` | Samples the water at a world position (centimetres). |
+
+<a id="waterkind"></a>
 
 ### WaterKind
 
 `public enum WaterKind` - What kind of water covers a point.
 
-Values: `None = 0`, `Ocean = 1`, `Lake = 2`, `River = 3`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Lake` | `Lake = 2` |  |
+| `None` | `None = 0` |  |
+| `Ocean` | `Ocean = 1` |  |
+| `River` | `River = 3` |  |
+
+<a id="watersample"></a>
 
 ### WaterSample
 
 `public readonly record struct WaterSample(bool Over, bool Submerged, float SurfaceZ, float DepthCm, Vec3 Current, WaterKind Kind)` - The water at one point.
 
+<a id="wheelplan"></a>
+
 ### WheelPlan
 
 `public readonly record struct WheelPlan(Vec3 AttachmentCm, float RadiusCm, float WidthCm, float SuspensionMinCm, float SuspensionMaxCm, float SuspensionHz, float SuspensionDamping, float MaxSteerDeg, float BrakeTorque, float HandBrakeTorque, bool Driven)` - One wheel as CreateCar adds it: the Aver.Physics.Vehicle.AddWheel arguments, named.
+
+<a id="wheeltelemetry"></a>
 
 ### WheelTelemetry
 
 `public readonly record struct WheelTelemetry( bool Contact, float SlipLongitudinal, float SlipLateralDeg, float LoadN, float CompressionCm, float AngularVelocityRadS, float SteerDeg, float SpinRad, Vec3 ContactPoint, Vec3 ContactNormal, float ForceLongitudinalN, float ForceLateralN, float SurfaceFriction, Entity SurfaceEntity, bool Skidding)` - One wheel's state as of the last fixed physics step.
 
+<a id="windowflags"></a>
+
 ### WindowFlags
 
 `public enum WindowFlags` - Window flags.
 
-Values: `None = 0`, `Resizable = 1`, `Borderless = 2`, `AlwaysOnTop = 4`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AlwaysOnTop` | `AlwaysOnTop = 4` |  |
+| `Borderless` | `Borderless = 2` |  |
+| `None` | `None = 0` |  |
+| `Resizable` | `Resizable = 1` |  |
+
+<a id="windowmode"></a>
 
 ### WindowMode
 
 `public enum WindowMode` - A window's mode.
 
-Values: `Windowed = 0`, `Minimized = 1`, `Maximized = 2`, `Fullscreen = 3`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Fullscreen` | `Fullscreen = 3` |  |
+| `Maximized` | `Maximized = 2` |  |
+| `Minimized` | `Minimized = 1` |  |
+| `Windowed` | `Windowed = 0` |  |
+
+<a id="worldenvkey"></a>
 
 ### WorldEnvKey
 
 `public enum WorldEnvKey` - Which sun, fog or sky-light setting a script has taken over.
 
-Values: `SunDir = 1`, `SunLux = 2`, `SunColor = 3`, `SunTemp = 4`, `FogDensity = 5`, `FogColor = 6`, `FogFalloff = 7`, `FogHeight = 8`, `FogStart = 9`, `FogMaxOpac = 10`, `SkyLight = 11`, `Ambient = 12`, `AmbientEnergy = 13`, `AmbientSky = 14`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Ambient` | `Ambient = 12` |  |
+| `AmbientEnergy` | `AmbientEnergy = 13` |  |
+| `AmbientSky` | `AmbientSky = 14` |  |
+| `FogColor` | `FogColor = 6` |  |
+| `FogDensity` | `FogDensity = 5` |  |
+| `FogFalloff` | `FogFalloff = 7` |  |
+| `FogHeight` | `FogHeight = 8` |  |
+| `FogMaxOpac` | `FogMaxOpac = 10` |  |
+| `FogStart` | `FogStart = 9` |  |
+| `SkyLight` | `SkyLight = 11` |  |
+| `SunColor` | `SunColor = 3` |  |
+| `SunDir` | `SunDir = 1` |  |
+| `SunLux` | `SunLux = 2` |  |
+| `SunTemp` | `SunTemp = 4` |  |
+
+<a id="worldorigin"></a>
 
 ### WorldOrigin
 
 `public static class WorldOrigin` - The floating origin: where it is, how to convert to and from absolute positions, and a callback for when it moves.
 
-- `public const long StepCm = WorldPos.RegionSizeCm` - The distance the origin moves in, centimetres: one region (1024 chunks of 16 m = 16.384 km).
-- `public static (long X, long Y) Origin` - The origin O in centimetres: always a whole number of regions, on X and Y (Z is never shifted).
-- `public static (int X, int Y) Region` - The region the origin is in, as whole regions along X and Y: Origin divided by StepCm.
-- `public static uint Generation { get; }` - Shifts so far, counting level loads: 0 at start.
-- `public static bool Enabled { get; }` - True when the origin can shift (the project did not turn it off, and this host supports it).
-- `public static Double3 ToAbsolute(Vec3 local)` - The absolute point (centimetres) an origin-relative position names: the add is in double, so it is exact.
-- `public static Vec3 ToLocal(Double3 absoluteCm)` - The origin-relative position of an absolute point: the subtraction is in double and the one rounding is the narrowing.
-- `public static bool RequestShift(int dxRegions, int dyRegions)` - Asks the host to shift the origin by whole regions at the next frame's start, as a camera-driven shift would.
-- `public static event Action<Double3, uint>? Changed` - Raised after every committed shift (at the next event flush, once the world is consistent) with the shift in centimetres: every origin-relative position changed by the NEGATIVE of this vector, and the new Generation.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Enabled` | `public static bool Enabled { get; }` | True when the origin can shift (the project did not turn it off, and this host supports it). |
+| `Generation` | `public static uint Generation { get; }` | Shifts so far, counting level loads: 0 at start. |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `StepCm` | `public const long StepCm = WorldPos.RegionSizeCm` | The distance the origin moves in, centimetres: one region (1024 chunks of 16 m = 16.384 km). |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `RequestShift` | `public static bool RequestShift(int dxRegions, int dyRegions)` | Asks the host to shift the origin by whole regions at the next frame's start, as a camera-driven shift would. |
+| `static` | `public static (int X, int Y) Region` | The region the origin is in, as whole regions along X and Y: Origin divided by StepCm. |
+| `static` | `public static (long X, long Y) Origin` | The origin O in centimetres: always a whole number of regions, on X and Y (Z is never shifted). |
+| `ToAbsolute` | `public static Double3 ToAbsolute(Vec3 local)` | The absolute point (centimetres) an origin-relative position names: the add is in double, so it is exact. |
+| `ToLocal` | `public static Vec3 ToLocal(Double3 absoluteCm)` | The origin-relative position of an absolute point: the subtraction is in double and the one rounding is the narrowing. |
+
+**Events**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Changed` | `public static event Action<Double3, uint>? Changed` | Raised after every committed shift (at the next event flush, once the world is consistent) with the shift in centimetres: every origin-relative position changed by the NEGATIVE of this vector, and the new Generation. |
+
+<a id="worldpos"></a>
 
 ### WorldPos
 
 `public readonly struct WorldPos : IEquatable<WorldPos>` - A position in the whole world: a global chunk index (16 m chunks, three integers) and a float offset inside that chunk, in [0, 1600) centimetres.
 
-- `public const int ChunkSizeCm = 1600` - Chunk edge in centimetres.
-- `public const int ChunksPerRegion = 1024` - Chunks along one region edge.
-- `public const long RegionSizeCm = (long)ChunksPerRegion * ChunkSizeCm` - Region edge in centimetres: the floating origin moves in whole steps of this.
-- `public readonly int ChunkX` - Global chunk index on X.
-- `public readonly int ChunkY` - Global chunk index on Y.
-- `public readonly int ChunkZ` - Global chunk index on Z.
-- `public readonly Vec3 Local` - Offset inside the chunk, centimetres, each component in [0, 1600).
-- `public WorldPos(int chunkX, int chunkY, int chunkZ, Vec3 local)` - Makes a position from a chunk and an offset.
-- `public static WorldPos FromAbsolute(Double3 cm)` - The position of an absolute point, in centimetres from the world's zero.
-- `public Double3 ToAbsolute()` - The absolute point this names, in centimetres from the world's zero.
-- `public Vec3 ToLocal()` - The origin-relative position the scene uses for this point, through the current floating origin.
-- `public static WorldPos FromLocal(Vec3 local)` - The position of an origin-relative point (a WorldPosition), through the current floating origin.
-- `public double DistanceTo(WorldPos other)` - The straight-line distance to another position in centimetres: the chunk difference is exact, the rest is in double.
-- `public WorldPos Offset(Double3 deltaCm)` - This position moved by a distance in centimetres; whole chunks go into the chunk index, so precision never degrades.
-- `public (int X, int Y, int Z) Region` - The region (1024 chunks, 16.384 km a side, region 0 centred on the world's zero) this point is in.
-- `public bool Equals(WorldPos o)` - Inherited documentation.
-- `public override bool Equals(object? obj)` - Inherited documentation.
-- `public override int GetHashCode()` - Inherited documentation.
-- `public static bool operator ==(WorldPos a, WorldPos b)` - Exact equality.
-- `public static bool operator !=(WorldPos a, WorldPos b)` - Exact inequality.
-- `public override string ToString()` - Inherited documentation.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `WorldPos` | `public WorldPos(int chunkX, int chunkY, int chunkZ, Vec3 local)` | Makes a position from a chunk and an offset. |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ChunkSizeCm` | `public const int ChunkSizeCm = 1600` | Chunk edge in centimetres. |
+| `ChunksPerRegion` | `public const int ChunksPerRegion = 1024` | Chunks along one region edge. |
+| `ChunkX` | `public readonly int ChunkX` | Global chunk index on X. |
+| `ChunkY` | `public readonly int ChunkY` | Global chunk index on Y. |
+| `ChunkZ` | `public readonly int ChunkZ` | Global chunk index on Z. |
+| `Local` | `public readonly Vec3 Local` | Offset inside the chunk, centimetres, each component in [0, 1600). |
+| `RegionSizeCm` | `public const long RegionSizeCm = (long)ChunksPerRegion * ChunkSizeCm` | Region edge in centimetres: the floating origin moves in whole steps of this. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `DistanceTo` | `public double DistanceTo(WorldPos other)` | The straight-line distance to another position in centimetres: the chunk difference is exact, the rest is in double. |
+| `Equals` | `public bool Equals(WorldPos o)` | Inherited documentation. |
+| `Equals` | `public override bool Equals(object? obj)` | Inherited documentation. |
+| `FromAbsolute` | `public static WorldPos FromAbsolute(Double3 cm)` | The position of an absolute point, in centimetres from the world's zero. |
+| `FromLocal` | `public static WorldPos FromLocal(Vec3 local)` | The position of an origin-relative point (a WorldPosition), through the current floating origin. |
+| `GetHashCode` | `public override int GetHashCode()` | Inherited documentation. |
+| `Offset` | `public WorldPos Offset(Double3 deltaCm)` | This position moved by a distance in centimetres; whole chunks go into the chunk index, so precision never degrades. |
+| `operator !=` | `public static bool operator !=(WorldPos a, WorldPos b)` | Exact inequality. |
+| `operator ==` | `public static bool operator ==(WorldPos a, WorldPos b)` | Exact equality. |
+| `public` | `public (int X, int Y, int Z) Region` | The region (1024 chunks, 16.384 km a side, region 0 centred on the world's zero) this point is in. |
+| `ToAbsolute` | `public Double3 ToAbsolute()` | The absolute point this names, in centimetres from the world's zero. |
+| `ToLocal` | `public Vec3 ToLocal()` | The origin-relative position the scene uses for this point, through the current floating origin. |
+| `ToString` | `public override string ToString()` | Inherited documentation. |
 
 ## namespace Aver.Framework.Hosting
+
+<a id="extensioncontext"></a>
 
 ### ExtensionContext
 
 `public sealed class ExtensionContext` - What the engine tells an extension at Load, and what it lets the extension ask for.
 
-- `public string Name { get; }` - The extension's name (its folder and the name of its manifest).
-- `public string Version { get; }` - The version of its manifest; empty when it names none.
-- `public string Directory { get; }` - The extension's installed folder, &lt;executable dir&gt;/Extensions/&lt;Name&gt;.
-- `public IReadOnlyList<Assembly> Assemblies { get; }` - The assemblies of the manifest's managed.runtime, loaded into the host context.
-- `public void DeclareActors(Type baseType)` - Declares every non-abstract actor type in Assemblies that derives from baseType.
-- `public void DeclareActors(Func<Type, bool> predicate)` - Declares every non-abstract actor type in Assemblies for which predicate is true.
-- `public void DeclareAllActors()` - Declares every non-abstract actor type in Assemblies.
-- `public void Log(string message, global::Aver.Scripting.Log.Level level = global::Aver.Scripting.Log.Level.Info)` - Writes one line to the engine's log, prefixed with the extension's name.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Assemblies` | `public IReadOnlyList<Assembly> Assemblies { get; }` | The assemblies of the manifest's managed.runtime, loaded into the host context. |
+| `Directory` | `public string Directory { get; }` | The extension's installed folder, &lt;executable dir&gt;/Extensions/&lt;Name&gt;. |
+| `Name` | `public string Name { get; }` | The extension's name (its folder and the name of its manifest). |
+| `Version` | `public string Version { get; }` | The version of its manifest; empty when it names none. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `DeclareActors` | `public void DeclareActors(Func<Type, bool> predicate)` | Declares every non-abstract actor type in Assemblies for which predicate is true. |
+| `DeclareActors` | `public void DeclareActors(Type baseType)` | Declares every non-abstract actor type in Assemblies that derives from baseType. |
+| `DeclareAllActors` | `public void DeclareAllActors()` | Declares every non-abstract actor type in Assemblies. |
+| `Log` | `public void Log(string message, global::Aver.Scripting.Log.Level level = global::Aver.Scripting.Log.Level.Info)` | Writes one line to the engine's log, prefixed with the extension's name. |
+
+<a id="extensionhost"></a>
 
 ### ExtensionHost
 
 `public static class ExtensionHost` - For extensions, not for game scripts.
 
-- `public static Entity EntityFromHandle(int handle)` - The entity for a raw ABI handle (the Handle of a live entity); default for 0.
-- `public static int SpawnActor(ActorClass cls, string? name, float[] position, float[] rotation, float[] scale, AverActor? instance)` - Spawns an actor of cls and binds instance to it instead of constructing one, so a node an extension made with new becomes the actor.
-- `public static void BeginSpawnBatch()` - Starts a spawn batch: the actors spawned until EndSpawnBatch run their begin-play together, parents first.
-- `public static int EndSpawnBatch()` - Ends the batch BeginSpawnBatch started.
-- `public static List<(string Key, string Text)> ReadProperties(Entity entity)` - The level-authored property values of entity (the key/value pairs of its placement), in file order.
-- `public static void SetViewEntity(Entity entity)` - Makes entity the entity the renderer views from.
-- `public static List<string> RegisteredActionNames()` - The names of the input actions the project registered natively, in handle order.
-- `public static void MarkHandled(InputEvent e)` - Marks an input event handled, so it goes no further down the chain.
-- `public static void SetSelf(AverActor actor, Entity entity)` - Binds an actor instance to an entity without a spawn (a wrapper around an entity that already exists).
-- `public static void MarkEditablesApplied(AverActor actor)` - Tells the bridge the actor's [Editable] values were written early, so its write before begin-play skips it.
-- `public static void BeginPass(bool physics)` - Starts a tick pass on the game thread: wakes what awaited the next frame and runs the continuations.
-- `public static void EndFrame()` - Ends a frame on the game thread: flushes the deferred calls and the end-of-frame destroys.
-- `public static int FlushDeferred()` - Runs the queued deferred calls now, including ones queued while it runs.
-- `public static void ResetDeferred()` - Drops every queued deferred call and pending frame wait.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `BeginPass` | `public static void BeginPass(bool physics)` | Starts a tick pass on the game thread: wakes what awaited the next frame and runs the continuations. |
+| `BeginSpawnBatch` | `public static void BeginSpawnBatch()` | Starts a spawn batch: the actors spawned until EndSpawnBatch run their begin-play together, parents first. |
+| `EndFrame` | `public static void EndFrame()` | Ends a frame on the game thread: flushes the deferred calls and the end-of-frame destroys. |
+| `EndSpawnBatch` | `public static int EndSpawnBatch()` | Ends the batch BeginSpawnBatch started. |
+| `EntityFromHandle` | `public static Entity EntityFromHandle(int handle)` | The entity for a raw ABI handle (the Handle of a live entity); default for 0. |
+| `FlushDeferred` | `public static int FlushDeferred()` | Runs the queued deferred calls now, including ones queued while it runs. |
+| `List<` | `public static List<(string Key, string Text)> ReadProperties(Entity entity)` | The level-authored property values of entity (the key/value pairs of its placement), in file order. |
+| `MarkEditablesApplied` | `public static void MarkEditablesApplied(AverActor actor)` | Tells the bridge the actor's [Editable] values were written early, so its write before begin-play skips it. |
+| `MarkHandled` | `public static void MarkHandled(InputEvent e)` | Marks an input event handled, so it goes no further down the chain. |
+| `RegisteredActionNames` | `public static List<string> RegisteredActionNames()` | The names of the input actions the project registered natively, in handle order. |
+| `ResetDeferred` | `public static void ResetDeferred()` | Drops every queued deferred call and pending frame wait. |
+| `SetSelf` | `public static void SetSelf(AverActor actor, Entity entity)` | Binds an actor instance to an entity without a spawn (a wrapper around an entity that already exists). |
+| `SetViewEntity` | `public static void SetViewEntity(Entity entity)` | Makes entity the entity the renderer views from. |
+| `SpawnActor` | `public static int SpawnActor(ActorClass cls, string? name, float[] position, float[] rotation, float[] scale, AverActor? instance)` | Spawns an actor of cls and binds instance to it instead of constructing one, so a node an extension made with new becomes the actor. |
+
+<a id="iaverextension"></a>
 
 ### IAverExtension
 
 `public interface IAverExtension` - The entry point of an extension's managed half: the type named by managed.entry in the extension's manifest.
 
-- `void Load(ExtensionContext context)` - Starts the extension.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Load` | `void Load(ExtensionContext context)` | Starts the extension. |
 
 ## namespace Aver.Framework.Net
+
+<a id="inettransport"></a>
 
 ### INetTransport
 
 `public interface INetTransport : IDisposable` - Channel 0 is for reliable traffic (acknowledged, in order); channel 1 for unreliable-ordered traffic (newest wins).
 
-- `public const int ReliableChannel = 0`
-- `public const int UnreliableChannel = 1`
-- `bool Listen(string ip, int port, int maxPeers, out int boundPort)` - Starts accepting peers; boundPort is the port in use (0 asks for a free one).
-- `long Connect(string ip, int port)` - Starts a connection and returns the peer id (0 on failure).
-- `bool Poll(out NetTransportEvent ev)` - Moves the network once and hands out the next event; false when none is pending.
-- `bool Send(long peer, bool reliable, byte[] data)`
-- `void Disconnect(long peer)` - A graceful close: data already queued is delivered first.
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ReliableChannel` | `public const int ReliableChannel = 0` |  |
+| `UnreliableChannel` | `public const int UnreliableChannel = 1` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Connect` | `long Connect(string ip, int port)` | Starts a connection and returns the peer id (0 on failure). |
+| `Disconnect` | `void Disconnect(long peer)` | A graceful close: data already queued is delivered first. |
+| `Listen` | `bool Listen(string ip, int port, int maxPeers, out int boundPort)` | Starts accepting peers; boundPort is the port in use (0 asks for a free one). |
+| `Poll` | `bool Poll(out NetTransportEvent ev)` | Moves the network once and hands out the next event; false when none is pending. |
+| `Send` | `bool Send(long peer, bool reliable, byte[] data)` |  |
+
+<a id="loopbacknetwork"></a>
 
 ### LoopbackNetwork
 
 `public sealed class LoopbackNetwork` - An in-memory network: transports made from one LoopbackNetwork reach each other by port.
 
-- `public Func<byte[], bool>? DropUnreliable` - Called for each unreliable packet; true drops it.
-- `public LoopbackTransport CreateTransport()`
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `DropUnreliable` | `public Func<byte[], bool>? DropUnreliable` | Called for each unreliable packet; true drops it. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `CreateTransport` | `public LoopbackTransport CreateTransport()` |  |
+
+<a id="loopbacktransport"></a>
 
 ### LoopbackTransport
 
 `public sealed class LoopbackTransport : INetTransport`
 
-- `public bool Listen(string ip, int port, int maxPeers, out int boundPort)`
-- `public long Connect(string ip, int port)`
-- `public bool Poll(out NetTransportEvent ev)`
-- `public bool Send(long peer, bool reliable, byte[] data)`
-- `public void Disconnect(long peer)`
-- `public void Dispose()`
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Connect` | `public long Connect(string ip, int port)` |  |
+| `Disconnect` | `public void Disconnect(long peer)` |  |
+| `Dispose` | `public void Dispose()` |  |
+| `Listen` | `public bool Listen(string ip, int port, int maxPeers, out int boundPort)` |  |
+| `Poll` | `public bool Poll(out NetTransportEvent ev)` |  |
+| `Send` | `public bool Send(long peer, bool reliable, byte[] data)` |  |
+
+<a id="nativenettransport"></a>
 
 ### NativeNetTransport
 
 `public sealed class NativeNetTransport : INetTransport` - The reliable-UDP transport of modules/net, through the Aver.Net.Abi library.
 
-- `public static bool IsAvailable()` - True when the native library loads.
-- `public static NativeNetTransport? CreateServer(string ip, int port, int maxPeers, out int boundPort)` - A host that accepts connections on ip:port (loopback unless the caller means to listen wider).
-- `public static NativeNetTransport? CreateClient()`
-- `public bool Listen(string ip, int port, int maxPeers, out int boundPort)`
-- `public long Connect(string ip, int port)`
-- `public bool Poll(out NetTransportEvent ev)`
-- `public bool Send(long peer, bool reliable, byte[] data)`
-- `public void Disconnect(long peer)`
-- `public void Dispose()`
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Connect` | `public long Connect(string ip, int port)` |  |
+| `CreateClient` | `public static NativeNetTransport? CreateClient()` |  |
+| `CreateServer` | `public static NativeNetTransport? CreateServer(string ip, int port, int maxPeers, out int boundPort)` | A host that accepts connections on ip:port (loopback unless the caller means to listen wider). |
+| `Disconnect` | `public void Disconnect(long peer)` |  |
+| `Dispose` | `public void Dispose()` |  |
+| `IsAvailable` | `public static bool IsAvailable()` | True when the native library loads. |
+| `Listen` | `public bool Listen(string ip, int port, int maxPeers, out int boundPort)` |  |
+| `Poll` | `public bool Poll(out NetTransportEvent ev)` |  |
+| `Send` | `public bool Send(long peer, bool reliable, byte[] data)` |  |
+
+<a id="netcodec"></a>
 
 ### NetCodec
 
 `public static class NetCodec` - Encodes and decodes the value types replication supports: bool, the integer and float types, string, byte[], enums, Vec3, Quat and one-dimensional arrays of those.
 
-- `public static bool IsSupported(Type t)` - Whether t can cross the wire.
-- `public static void Write(NetWriter w, Type t, object? v)`
-- `public static object? Read(NetReader r, Type t)`
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `IsSupported` | `public static bool IsSupported(Type t)` | Whether t can cross the wire. |
+| `Read` | `public static object? Read(NetReader r, Type t)` |  |
+| `Write` | `public static void Write(NetWriter w, Type t, object? v)` |  |
+
+<a id="netconnection"></a>
 
 ### NetConnection
 
 `public sealed class NetConnection` - A client as the server sees it.
 
-- `public uint Id { get; }` - 1 and up, assigned when the handshake completes; never reused within a session.
-- `public string UserData { get; }` - What the client sent in its hello (a name, a token).
-- `public Vec3 ViewPosition` - Where the client's player is looking from; the game sets it for distance relevance.
-- `public object? Tag` - Anything the game wants to hang on the connection.
-- `public bool Authenticated { get; }`
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Authenticated` | `public bool Authenticated { get; }` |  |
+| `Id` | `public uint Id { get; }` | 1 and up, assigned when the handshake completes; never reused within a session. |
+| `UserData` | `public string UserData { get; }` | What the client sent in its hello (a name, a token). |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Tag` | `public object? Tag` | Anything the game wants to hang on the connection. |
+| `ViewPosition` | `public Vec3 ViewPosition` | Where the client's player is looking from; the game sets it for distance relevance. |
+
+<a id="netformatexception"></a>
 
 ### NetFormatException
 
 `public sealed class NetFormatException : Exception` - A packet that is truncated, oversized or otherwise not what the codec expects.
 
-- `public NetFormatException(string message)`
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `NetFormatException` | `public NetFormatException(string message)` |  |
+
+<a id="netobject"></a>
 
 ### NetObject
 
 `public abstract class NetObject` - An object a NetSession replicates.
 
-- `public uint NetId { get; }` - The id both sides know it by (0 until spawned).
-- `public NetSession? Session { get; }`
-- `public uint OwnerId { get; }` - The connection that owns it: 0 is the server (nobody), otherwise a Id.
-- `public bool HasAuthority { get; }` - True on the server (and on an object with no session).
-- `public bool IsOwner { get; }` - True where this process is the owner: the owning client, or the server for an object it owns itself.
-- `public virtual bool AlwaysRelevant { get; }` - Whether the object stays in a client's world no matter how far away it is.
-- `public virtual Vec3 NetPosition { get; }` - Where the object is, for distance relevance (see Distance).
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AlwaysRelevant` | `public virtual bool AlwaysRelevant { get; }` | Whether the object stays in a client's world no matter how far away it is. |
+| `HasAuthority` | `public bool HasAuthority { get; }` | True on the server (and on an object with no session). |
+| `IsOwner` | `public bool IsOwner { get; }` | True where this process is the owner: the owning client, or the server for an object it owns itself. |
+| `NetId` | `public uint NetId { get; }` | The id both sides know it by (0 until spawned). |
+| `NetPosition` | `public virtual Vec3 NetPosition { get; }` | Where the object is, for distance relevance (see Distance). |
+| `OwnerId` | `public uint OwnerId { get; }` | The connection that owns it: 0 is the server (nobody), otherwise a Id. |
+| `Session` | `public NetSession? Session { get; }` |  |
+
+<a id="netreader"></a>
 
 ### NetReader
 
 `public sealed class NetReader` - Reads what NetWriter wrote; every read checks the bounds and throws NetFormatException.
 
-- `public NetReader(byte[] buffer, int start = 0)`
-- `public int Remaining { get; }`
-- `public byte U8()`
-- `public ushort U16()`
-- `public uint U32()`
-- `public ulong U64()`
-- `public float F32()`
-- `public double F64()`
-- `public uint Var()`
-- `public byte[] Bytes()`
-- `public string Str()`
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `NetReader` | `public NetReader(byte[] buffer, int start = 0)` |  |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Remaining` | `public int Remaining { get; }` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Bytes` | `public byte[] Bytes()` |  |
+| `F32` | `public float F32()` |  |
+| `F64` | `public double F64()` |  |
+| `Str` | `public string Str()` |  |
+| `U16` | `public ushort U16()` |  |
+| `U32` | `public uint U32()` |  |
+| `U64` | `public ulong U64()` |  |
+| `U8` | `public byte U8()` |  |
+| `Var` | `public uint Var()` |  |
+
+<a id="netrelevance"></a>
 
 ### NetRelevance
 
 `public static class NetRelevance` - Ready-made relevance rules for RelevanceFilter.
 
-- `public static Func<NetObject, NetConnection, bool> Distance(float radius)` - An object is relevant to a connection when it is within radius of the connection's ViewPosition, or always relevant, or owned by that connection.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Distance` | `public static Func<NetObject, NetConnection, bool> Distance(float radius)` | An object is relevant to a connection when it is within radius of the connection's ViewPosition, or always relevant, or owned by that connection. |
+
+<a id="netrole"></a>
 
 ### NetRole
 
 `public enum NetRole`
 
-Values: `None`, `Server`, `Client`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Client` | `Client` |  |
+| `None` | `None` |  |
+| `Server` | `Server` |  |
+
+<a id="netrpcrejection"></a>
 
 ### NetRpcRejection
 
 `public readonly record struct NetRpcRejection(NetObject? Object, string Method, NetConnection? From, string Reason)` - An RPC the receiver refused: the sender does not own the object, the method is unknown, the arguments do not decode.
 
+<a id="netsession"></a>
+
 ### NetSession
 
 `public sealed class NetSession : IDisposable`
 
-- `public const uint ProtocolVersion = 1` - Bumped whenever the wire format changes; a client with another version is refused at the handshake.
-- `public NetRole Role { get; }`
-- `public NetSessionState State { get; }`
-- `public bool IsServer { get; }`
-- `public bool IsClient { get; }`
-- `public uint LocalConnectionId { get; }` - 0 on the server; on a client the id the server assigned (0 until connected).
-- `public NetStats Stats { get; }`
-- `public int SendIntervalMs { get; set; }` - Minimum time between replication passes; 0 replicates on every Tick.
-- `public int UnreliableResyncMs { get; set; }` - How often unreliable properties are resent in full, so a lost packet only delays convergence.
-- `public bool DestroyOwnedOnDisconnect { get; set; }` - The objects a client owns are destroyed when it leaves (default); when false they stay, owned by nobody.
-- `public Func<NetConnection, string?>? ConnectionApproval { get; set; }` - Server: returns null to accept a connecting client, or the reason to refuse it.
-- `public Func<NetObject, NetConnection, bool>? RelevanceFilter { get; set; }` - Server: whether an object is replicated to a connection.
-- `public event Action<NetConnection>? ClientConnected` - Server: a client finished the handshake.
-- `public event Action<NetConnection>? ClientDisconnected` - Server: an authenticated client left (its owned objects are already handled).
-- `public event Action? Connected` - Client: the handshake finished and LocalConnectionId is set.
-- `public event Action<string>? Disconnected` - Client: the connection ended or never completed; the argument says why.
-- `public event Action<NetObject>? ObjectSpawned` - Client: a replicated object arrived, initial state applied.
-- `public event Action<NetObject>? ObjectDestroyed` - Client: a replicated object went away (destroyed, out of relevance, or the connection ended).
-- `public event Action<NetRpcRejection>? RpcRejected`
-- `public NetSession(INetTransport transport)`
-- `public IEnumerable<NetObject> Objects { get; }`
-- `public IReadOnlyCollection<NetConnection> Connections { get; }`
-- `public NetObject? Find(uint netId)`
-- `public NetConnection? FindConnection(uint id)`
-- `public bool StartServer(string ip, int port, int maxClients, out int boundPort)`
-- `public bool StartClient(string ip, int port, string helloData = "")`
-- `public void Kick(NetConnection conn, string? reason = null)` - Server: sends the client away (it is told why when reason is given).
-- `public void Stop()` - Ends the session: a client leaves, a server drops every client.
-- `public void Dispose()`
-- `public void Tick(long nowMs = -1)` - Moves the network, handles what arrived, and (on a server, at SendIntervalMs) replicates.
-- `public NetObject Spawn(string typeName, uint ownerId = 0)` - Server: makes an object of a registered type and replicates it to the connections it is relevant to.
-- `public T Spawn<T>(uint ownerId = 0) where T : NetObject`
-- `public void Destroy(NetObject o)` - Server: removes the object here and on every client that has it.
-- `public void SetOwner(NetObject o, uint ownerId)` - Server: hands the object to another connection (0 = the server).
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `NetSession` | `public NetSession(INetTransport transport)` |  |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ConnectionApproval` | `public Func<NetConnection, string?>? ConnectionApproval { get; set; }` | Server: returns null to accept a connecting client, or the reason to refuse it. |
+| `Connections` | `public IReadOnlyCollection<NetConnection> Connections { get; }` |  |
+| `DestroyOwnedOnDisconnect` | `public bool DestroyOwnedOnDisconnect { get; set; }` | The objects a client owns are destroyed when it leaves (default); when false they stay, owned by nobody. |
+| `IsClient` | `public bool IsClient { get; }` |  |
+| `IsServer` | `public bool IsServer { get; }` |  |
+| `LocalConnectionId` | `public uint LocalConnectionId { get; }` | 0 on the server; on a client the id the server assigned (0 until connected). |
+| `Objects` | `public IEnumerable<NetObject> Objects { get; }` |  |
+| `RelevanceFilter` | `public Func<NetObject, NetConnection, bool>? RelevanceFilter { get; set; }` | Server: whether an object is replicated to a connection. |
+| `Role` | `public NetRole Role { get; }` |  |
+| `SendIntervalMs` | `public int SendIntervalMs { get; set; }` | Minimum time between replication passes; 0 replicates on every Tick. |
+| `State` | `public NetSessionState State { get; }` |  |
+| `Stats` | `public NetStats Stats { get; }` |  |
+| `UnreliableResyncMs` | `public int UnreliableResyncMs { get; set; }` | How often unreliable properties are resent in full, so a lost packet only delays convergence. |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ProtocolVersion` | `public const uint ProtocolVersion = 1` | Bumped whenever the wire format changes; a client with another version is refused at the handshake. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Destroy` | `public void Destroy(NetObject o)` | Server: removes the object here and on every client that has it. |
+| `Dispose` | `public void Dispose()` |  |
+| `Find` | `public NetObject? Find(uint netId)` |  |
+| `FindConnection` | `public NetConnection? FindConnection(uint id)` |  |
+| `Kick` | `public void Kick(NetConnection conn, string? reason = null)` | Server: sends the client away (it is told why when reason is given). |
+| `SetOwner` | `public void SetOwner(NetObject o, uint ownerId)` | Server: hands the object to another connection (0 = the server). |
+| `Spawn` | `public NetObject Spawn(string typeName, uint ownerId = 0)` | Server: makes an object of a registered type and replicates it to the connections it is relevant to. |
+| `Spawn` | `public T Spawn<T>(uint ownerId = 0) where T : NetObject` |  |
+| `StartClient` | `public bool StartClient(string ip, int port, string helloData = "")` |  |
+| `StartServer` | `public bool StartServer(string ip, int port, int maxClients, out int boundPort)` |  |
+| `Stop` | `public void Stop()` | Ends the session: a client leaves, a server drops every client. |
+| `Tick` | `public void Tick(long nowMs = -1)` | Moves the network, handles what arrived, and (on a server, at SendIntervalMs) replicates. |
+
+**Events**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ClientConnected` | `public event Action<NetConnection>? ClientConnected` | Server: a client finished the handshake. |
+| `ClientDisconnected` | `public event Action<NetConnection>? ClientDisconnected` | Server: an authenticated client left (its owned objects are already handled). |
+| `Connected` | `public event Action? Connected` | Client: the handshake finished and LocalConnectionId is set. |
+| `Disconnected` | `public event Action<string>? Disconnected` | Client: the connection ended or never completed; the argument says why. |
+| `ObjectDestroyed` | `public event Action<NetObject>? ObjectDestroyed` | Client: a replicated object went away (destroyed, out of relevance, or the connection ended). |
+| `ObjectSpawned` | `public event Action<NetObject>? ObjectSpawned` | Client: a replicated object arrived, initial state applied. |
+| `RpcRejected` | `public event Action<NetRpcRejection>? RpcRejected` |  |
+
+<a id="netsessionstate"></a>
 
 ### NetSessionState
 
 `public enum NetSessionState`
 
-Values: `Idle`, `Connecting`, `Handshaking`, `Connected`, `Disconnected`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Connected` | `Connected` |  |
+| `Connecting` | `Connecting` |  |
+| `Disconnected` | `Disconnected` |  |
+| `Handshaking` | `Handshaking` |  |
+| `Idle` | `Idle` |  |
+
+<a id="netstats"></a>
 
 ### NetStats
 
 `public sealed class NetStats`
 
-- `public long PacketsSent, PacketsReceived, SpawnsSent, DestroysSent, PropMessagesSent, UnreliablePropMessagesSent, RpcsSent, RpcsExecuted, RpcsRejected, Malformed`
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Malformed` | `public long PacketsSent, PacketsReceived, SpawnsSent, DestroysSent, PropMessagesSent, UnreliablePropMessagesSent, RpcsSent, RpcsExecuted, RpcsRejected, Malformed` |  |
+
+<a id="nettransportevent"></a>
 
 ### NetTransportEvent
 
 `public struct NetTransportEvent` - One thing the transport saw.
 
-- `public NetTransportEventType Type`
-- `public long Peer`
-- `public int Channel`
-- `public byte[]? Data`
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Channel` | `public int Channel` |  |
+| `Data` | `public byte[]? Data` |  |
+| `Peer` | `public long Peer` |  |
+| `Type` | `public NetTransportEventType Type` |  |
+
+<a id="nettransporteventtype"></a>
 
 ### NetTransportEventType
 
 `public enum NetTransportEventType`
 
-Values: `Connect = 1`, `Disconnect = 2`, `Data = 3`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Connect` | `Connect = 1` |  |
+| `Data` | `Data = 3` |  |
+| `Disconnect` | `Disconnect = 2` |  |
+
+<a id="nettypeattribute"></a>
 
 ### NetTypeAttribute
 
 `public sealed class NetTypeAttribute : Attribute` - Registers a NetObject subclass under the name that crosses the wire.
 
-- `public NetTypeAttribute(string name)`
-- `public string Name { get; }`
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `NetTypeAttribute` | `public NetTypeAttribute(string name)` |  |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Name` | `public string Name { get; }` |  |
+
+<a id="nettypes"></a>
 
 ### NetTypes
 
 `public static class NetTypes` - The type registry: names to classes, and the per-class property and RPC tables built once by reflection.
 
-- `public static void Register<T>(string? name = null) where T : NetObject, new()`
-- `public static void Register(Type type, string? name = null)`
-- `public static void RegisterAssembly(Assembly assembly)` - Registers every [NetType] class in assembly.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Register` | `public static void Register(Type type, string? name = null)` |  |
+| `Register` | `public static void Register<T>(string? name = null) where T : NetObject, new()` |  |
+| `RegisterAssembly` | `public static void RegisterAssembly(Assembly assembly)` | Registers every [NetType] class in assembly. |
+
+<a id="netwriter"></a>
 
 ### NetWriter
 
 `public sealed class NetWriter` - Appends little-endian values to a growing buffer.
 
-- `public int Length { get; }`
-- `public byte[] ToArray()`
-- `public void U8(byte v)`
-- `public void U16(ushort v)`
-- `public void U32(uint v)`
-- `public void U64(ulong v)`
-- `public void F32(float v)`
-- `public void F64(double v)`
-- `public void Var(uint v)` - A length (7 bits per byte, low first).
-- `public void Bytes(ReadOnlySpan<byte> v)`
-- `public void Raw(ReadOnlySpan<byte> v)`
-- `public void Str(string v)`
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Length` | `public int Length { get; }` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Bytes` | `public void Bytes(ReadOnlySpan<byte> v)` |  |
+| `F32` | `public void F32(float v)` |  |
+| `F64` | `public void F64(double v)` |  |
+| `Raw` | `public void Raw(ReadOnlySpan<byte> v)` |  |
+| `Str` | `public void Str(string v)` |  |
+| `ToArray` | `public byte[] ToArray()` |  |
+| `U16` | `public void U16(ushort v)` |  |
+| `U32` | `public void U32(uint v)` |  |
+| `U64` | `public void U64(ulong v)` |  |
+| `U8` | `public void U8(byte v)` |  |
+| `Var` | `public void Var(uint v)` | A length (7 bits per byte, low first). |
+
+<a id="replicatedattribute"></a>
 
 ### ReplicatedAttribute
 
 `public sealed class ReplicatedAttribute : Attribute` - Marks a field or property of a NetObject as server-to-client state.
 
-- `public bool Reliable { get; init; }` - Sent reliably (default).
-- `public bool OwnerOnly { get; init; }` - Only the owning client (and the server) gets the value.
-- `public string? OnChanged { get; init; }` - Name of a parameterless method (or one taking the previous value) called on a client after a received change.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `OnChanged` | `public string? OnChanged { get; init; }` | Name of a parameterless method (or one taking the previous value) called on a client after a received change. |
+| `OwnerOnly` | `public bool OwnerOnly { get; init; }` | Only the owning client (and the server) gets the value. |
+| `Reliable` | `public bool Reliable { get; init; }` | Sent reliably (default). |
+
+<a id="rpcattribute"></a>
 
 ### RpcAttribute
 
 `public sealed class RpcAttribute : Attribute` - Marks a method of a NetObject as callable across the network with CallRpc.
 
-- `public RpcAttribute(RpcTarget target)`
-- `public RpcTarget Target { get; }`
-- `public bool Reliable { get; init; }` - Acknowledged and ordered with spawns and property changes (default).
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `RpcAttribute` | `public RpcAttribute(RpcTarget target)` |  |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Reliable` | `public bool Reliable { get; init; }` | Acknowledged and ordered with spawns and property changes (default). |
+| `Target` | `public RpcTarget Target { get; }` |  |
+
+<a id="rpctarget"></a>
 
 ### RpcTarget
 
 `public enum RpcTarget` - Where a [Rpc] method runs.
 
-Values: `Server = 0`, `Client = 1`, `Multicast = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Client` | `Client = 1` |  |
+| `Multicast` | `Multicast = 2` |  |
+| `Server` | `Server = 0` |  |

@@ -18,13 +18,15 @@ Four nodes that play a `.ocsnd` on the **audio thread** and steer it while it pl
 - The voice pin works with the audio-control nodes: Set Voice Volume, Set Voice Position, Is Voice Playing, Stop Voice.
 - Voice pitch does not apply to a graph voice; make the pitch a `Parameter` that feeds an oscillator or a `WavePlayer`.
 
+Contents: 4 nodes sorted A-Z by type (`AN_` prefix ignored); categories: Audio. [All nodes A-Z](index.md).
+
 4 nodes. Rows: `scripting/csharp/Aver.Graph/GraphProceduralSoundNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsProceduralSound.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
 | Type | Display | Category | Path | Pins | Attributes | C# |
 |---|---|---|---|---|---|---|
-| `AN_NoteOffSoundGraph` | Note Off Sound Graph | Audio | P | in: `exec` exec, `voice` int<br>out: `then` exec, `success` bool | none | `ProceduralSoundGraph.NoteOffSoundGraphForGraph`<br>AN_NoteOffSoundGraph: the note-off. |
-| `AN_PlaySoundGraph` | Play Sound Graph | Audio | P | in: `exec` exec, `volume` float = 1, `looping` bool, `bus` int, `seed` int<br>out: `then` exec, `voice` int, `success` bool | `sound` | `ProceduralSoundGraph.PlaySoundGraphForGraph`<br>AN_PlaySoundGraph: plays the sound= .ocsnd flat on the audio thread. |
-| `AN_PlaySoundGraphAt` | Play Sound Graph At | Audio | P | in: `exec` exec, `x` float, `y` float, `z` float, `volume` float = 1, `looping` bool, `bus` int, `innerCm` float = 200, `outerCm` float = 2000, `seed` int<br>out: `then` exec, `voice` int, `success` bool | `sound` | `ProceduralSoundGraph.PlaySoundGraphAtForGraph`<br>AN_PlaySoundGraphAt: the positioned counterpart (centimetres; full volume inside innerCm, silent beyond outerCm). |
-| `AN_SetSoundGraphParam` | Set Sound Graph Input | Audio | P | in: `exec` exec, `voice` int, `value` float<br>out: `then` exec, `success` bool | `param` | `ProceduralSoundGraph.SetSoundGraphParamForGraph`<br>AN_SetSoundGraphParam: sets the voice's named live input (the param= attribute); the graph smooths toward it. |
+| <a id="an_noteoffsoundgraph"></a>`AN_NoteOffSoundGraph` | Note Off Sound Graph | Audio | P | in: `exec` exec, `voice` int<br>out: `then` exec, `success` bool | none | `ProceduralSoundGraph.NoteOffSoundGraphForGraph`<br>AN_NoteOffSoundGraph: the note-off. |
+| <a id="an_playsoundgraph"></a>`AN_PlaySoundGraph` | Play Sound Graph | Audio | P | in: `exec` exec, `volume` float = 1, `looping` bool, `bus` int, `seed` int<br>out: `then` exec, `voice` int, `success` bool | `sound` | `ProceduralSoundGraph.PlaySoundGraphForGraph`<br>AN_PlaySoundGraph: plays the sound= .ocsnd flat on the audio thread. |
+| <a id="an_playsoundgraphat"></a>`AN_PlaySoundGraphAt` | Play Sound Graph At | Audio | P | in: `exec` exec, `x` float, `y` float, `z` float, `volume` float = 1, `looping` bool, `bus` int, `innerCm` float = 200, `outerCm` float = 2000, `seed` int<br>out: `then` exec, `voice` int, `success` bool | `sound` | `ProceduralSoundGraph.PlaySoundGraphAtForGraph`<br>AN_PlaySoundGraphAt: the positioned counterpart (centimetres; full volume inside innerCm, silent beyond outerCm). |
+| <a id="an_setsoundgraphparam"></a>`AN_SetSoundGraphParam` | Set Sound Graph Input | Audio | P | in: `exec` exec, `voice` int, `value` float<br>out: `then` exec, `success` bool | `param` | `ProceduralSoundGraph.SetSoundGraphParamForGraph`<br>AN_SetSoundGraphParam: sets the voice's named live input (the param= attribute); the graph smooths toward it. |

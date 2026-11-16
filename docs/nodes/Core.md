@@ -4,326 +4,328 @@
 
 The nodes the parser (`OcGraphParser.AddDefaultPins`) and the compiler know by hand, plus palette entries that are not table rows. Read from the editor palette (`sandbox/src/GraphNodeDefs*.hpp`); the parser is the ground truth for a pin shape (`docs/AVER_NODE_NODES.md`).
 
+Contents: 249 gameplay nodes and 65 material-graph nodes, each section grouped by palette category and sorted A-Z within it. [All nodes A-Z](index.md).
+
 ## Gameplay (249)
 
 | Type | Display | Category | Pins | Attributes |
 |---|---|---|---|---|
-| `CharacterMove` | Character Move | Actor | in: `exec` exec, `entity` int, `dt` float, `forward` float, `right` float, `yawDelta` float, `pitchDelta` float<br>out: `then` exec, `success` bool | none |
-| `FireEvent` | Fire Event | Actor | in: `exec` exec, `target` int<br>out: `then` exec, `fired` bool | `event` |
-| `GetSynapsePerception` | Get Synapse Perception | Actor | in: `entity` int<br>out: `canSeeTarget` bool, `lastKnownTarget` int, `timeSinceSeen` float, `success` bool | none |
-| `GetSynapseTarget` | Get Synapse Target | Actor | in: `entity` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
-| `Jump` | Jump | Actor | in: `exec` exec, `entity` int<br>out: `then` exec, `jumped` bool | none |
-| `SetViewEntity` | Set View Entity | Actor | in: `entity` int | none |
-| `Spawn` | Spawn | Actor | in: `exec` exec, `x` float, `y` float, `z` float<br>out: `then` exec, `entity` int | `class` |
-| `SynapseSteer` | Synapse Steer | Actor | in: `entity` int, `dt` float, `targetX` float, `targetY` float, `targetZ` float, `turnRate` float, `arriveRadius` float<br>out: `forward` float, `right` float, `yawDelta` float, `arrived` bool, `success` bool | none |
-| `ArrayAdd` | Array Add | Array | in: `exec` exec, `item` float<br>out: `then` exec | `var`, `of` |
-| `ArrayClear` | Array Clear | Array | in: `exec` exec<br>out: `then` exec | `var`, `of` |
-| `ArrayContains` | Array Contains | Array | in: `array` float[], `item` float<br>out: `result` bool | `of` |
-| `ArrayFind` | Array Find | Array | in: `array` float[], `item` float<br>out: `index` int | `of` |
-| `ArrayGet` | Array Get | Array | in: `array` float[], `index` int<br>out: `item` float | `of` |
-| `ArrayLength` | Array Length | Array | in: `array` float[]<br>out: `length` int | `of` |
-| `ArrayRemoveAt` | Array Remove At | Array | in: `exec` exec, `index` int<br>out: `then` exec | `var`, `of` |
-| `ArraySet` | Array Set | Array | in: `exec` exec, `index` int, `item` float<br>out: `then` exec | `var`, `of` |
-| `ForEachInArray` | For Each In Array | Array | in: `exec` exec, `array` float[]<br>out: `loop` exec, `element` float, `index` int, `completed` exec | `of` |
-| `MakeArray` | Make Array | Array | in: `item0` float, `item1` float, `item2` float, `item3` float<br>out: `array` float[] | `of` |
-| `IsSoundPlaying` | Is Sound Playing | Audio | in: `voice` int<br>out: `playing` bool | none |
-| `PlaySound` | Play Sound | Audio | in: `exec` exec, `volume` float, `pitch` float, `looping` bool, `bus` int<br>out: `then` exec, `voice` int, `success` bool | `sound` |
-| `PlaySoundAt` | Play Sound At | Audio | in: `exec` exec, `x` float, `y` float, `z` float, `volume` float, `pitch` float, `looping` bool, `bus` int, `innerCm` float, `outerCm` float<br>out: `then` exec, `voice` int, `success` bool | `sound` |
-| `SetBusVolume` | Set Bus Volume | Audio | in: `exec` exec, `bus` int, `volume` float<br>out: `then` exec, `success` bool | none |
-| `SetListener` | Set Listener | Audio | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none |
-| `StopSound` | Stop Sound | Audio | in: `exec` exec, `voice` int<br>out: `then` exec, `success` bool | none |
-| `CharacterCanStand` | Character Can Stand | Character | in: `entity` int, `radius` float, `halfHeight` float<br>out: `canStand` bool, `success` bool | none |
-| `GetVelocity` | Get Velocity | Character | in: `entity` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
-| `IsGrounded` | Is Grounded | Character | in: `entity` int<br>out: `grounded` bool | none |
-| `SetVelocity` | Set Velocity | Character | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
-| `Teleport` | Teleport | Character | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
-| `ConstBool` | Const Bool | Const | out: `value` bool | `value` |
-| `ConstFloat` | Const Float | Const | out: `value` float | `value` |
-| `ConstInt` | Const Int | Const | out: `value` int | `value` |
-| `ConstString` | Const String | Const | out: `value` string | `value` |
-| `ConstVector` | Const Vector | Const | out: `value` float3 | `value` |
-| `BoolToFloat` | Bool To Float | Convert | in: `a` bool<br>out: `result` float | none |
-| `FloatToInt` | Float To Int | Convert | in: `a` float<br>out: `result` int | none |
-| `IntToFloat` | Int To Float | Convert | in: `a` int<br>out: `result` float | none |
-| `Print` | Print | Debug | in: `exec` exec, `value` float<br>out: `then` exec | none |
-| `PrintInt` | Print Int | Debug | in: `exec` exec, `value` int<br>out: `then` exec | none |
-| `PrintString` | Print String | Debug | in: `exec` exec<br>out: `then` exec | `text` |
-| `PrintText` | Print Text | Debug | in: `exec` exec, `text` string<br>out: `then` exec | none |
-| `CustomEvent` | Custom Event | Event | out: `exec` exec | none |
-| `OnHit` | On Hit | Event | out: `exec` exec | none |
-| `OnStart` | On Start | Event | out: `exec` exec | none |
-| `OnTick` | On Tick | Event | out: `exec` exec | none |
-| `Branch` | Branch | Flow | in: `exec` exec, `cond` bool<br>out: `true` exec, `false` exec, `tookTrue` bool | none |
-| `DoOnce` | Do Once | Flow | in: `exec` exec, `reset` bool<br>out: `then` exec | none |
-| `FlipFlop` | Flip Flop | Flow | in: `exec` exec<br>out: `a` exec, `b` exec, `isA` bool | none |
-| `ForEach` | For Each (counted) | Flow | in: `exec` exec, `count` int<br>out: `loop` exec, `index` int, `done` exec | none |
-| `Gate` | Gate | Flow | in: `exec` exec, `open` bool, `close` bool<br>out: `then` exec | none |
-| `Reroute` | Reroute | Flow | in: `in` float<br>out: `out` float | none |
-| `RerouteBool` | Reroute (Bool) | Flow | in: `a` bool<br>out: `result` bool | none |
-| `RerouteExec` | Reroute (Exec) | Flow | in: `exec` exec<br>out: `then` exec | none |
-| `RerouteFloat` | Reroute (Float) | Flow | in: `a` float<br>out: `result` float | none |
-| `RerouteInt` | Reroute (Int) | Flow | in: `a` int<br>out: `result` int | none |
-| `Sequence` | Sequence | Flow | in: `exec` exec<br>out: `then0` exec, `then1` exec, `fireLog` int | none |
-| `SwitchInt` | Switch on Int | Flow | in: `exec` exec, `selector` int<br>out: `case0` exec, `case1` exec, `case2` exec, `case3` exec, `default` exec, `taken` int | none |
-| `While` | While | Flow | in: `exec` exec, `cond` bool<br>out: `loop` exec, `done` exec, `iterations` int | none |
-| `CallFunc` | Call Function | Function | none | none |
-| `FuncEntry` | Function Entry | Function | none | none |
-| `FuncReturn` | Return | Function | none | none |
-| `GetGameMode` | Get Game Mode | Game | out: `entity` int | none |
-| `GetPlayerController` | Get Player Controller | Game | in: `index` int<br>out: `entity` int | none |
-| `GetPlayerPawn` | Get Player Pawn | Game | in: `index` int<br>out: `entity` int | none |
-| `IsPlaying` | Is Playing | Game | out: `playing` bool | none |
-| `LoadGame` | Load Game | Game | in: `exec` exec<br>out: `then` exec, `success` bool | `path` |
-| `Possess` | Possess | Game | in: `exec` exec, `controller` int, `pawn` int<br>out: `then` exec, `success` bool | none |
-| `SaveGame` | Save Game | Game | in: `exec` exec<br>out: `then` exec, `success` bool | `path` |
-| `Unpossess` | Unpossess | Game | in: `exec` exec, `controller` int<br>out: `then` exec, `success` bool | none |
-| `GetActionKey` | Get Action Key | Input | in: `slot` int<br>out: `key` int, `bound` bool | `action` |
-| `GetPressedKey` | Get Pressed Key | Input | out: `key` int, `pressed` bool | none |
-| `InputAction` | Input Action | Input | in: `action` int<br>out: `x` float, `y` float, `held` bool | `action` |
-| `InputActionPressed` | Input Action Pressed | Input | in: `action` int<br>out: `triggered` bool | `action` |
-| `InputActionReleased` | Input Action Released | Input | in: `action` int<br>out: `triggered` bool | `action` |
-| `InputKey` | Input Key | Input | in: `key` int<br>out: `down` bool | none |
-| `InputKeyPressed` | Input Key Pressed | Input | in: `key` int<br>out: `triggered` bool | none |
-| `InputKeyReleased` | Input Key Released | Input | in: `key` int<br>out: `triggered` bool | none |
-| `LoadInputBindings` | Load Input Bindings | Input | in: `exec` exec<br>out: `then` exec, `success` bool | none |
-| `MouseDelta` | Mouse Delta | Input | in: `exec` exec<br>out: `then` exec, `deltaX` float, `deltaY` float, `wheel` float | none |
-| `MoveAxis` | Move Axis | Input | in: `exec` exec<br>out: `then` exec, `forward` float, `right` float | none |
-| `RebindAction` | Rebind Action | Input | in: `exec` exec, `slot` int, `key` int<br>out: `then` exec, `success` bool | `action` |
-| `ResetInputBindings` | Reset Input Bindings | Input | in: `exec` exec<br>out: `then` exec, `success` bool | none |
-| `SaveInputBindings` | Save Input Bindings | Input | in: `exec` exec<br>out: `then` exec, `success` bool | none |
-| `And` | AND | Logic | in: `a` bool, `b` bool<br>out: `result` bool | none |
-| `Compare` | Compare | Logic | in: `a` float, `b` float<br>out: `result` bool | none |
-| `Equal` | a == b | Logic | in: `a` float, `b` float<br>out: `result` bool | none |
-| `Greater` | a &gt; b | Logic | in: `a` float, `b` float<br>out: `result` bool | none |
-| `GreaterEqual` | a &gt;= b | Logic | in: `a` float, `b` float<br>out: `result` bool | none |
-| `Less` | a &lt; b | Logic | in: `a` float, `b` float<br>out: `result` bool | none |
-| `LessEqual` | a &lt;= b | Logic | in: `a` float, `b` float<br>out: `result` bool | none |
-| `Not` | NOT | Logic | in: `a` bool<br>out: `result` bool | none |
-| `NotEqual` | a != b | Logic | in: `a` float, `b` float<br>out: `result` bool | none |
-| `Or` | OR | Logic | in: `a` bool, `b` bool<br>out: `result` bool | none |
-| `Select` | Select | Logic | in: `cond` bool, `ifTrue` float, `ifFalse` float<br>out: `result` float | none |
-| `Xor` | XOR | Logic | in: `a` bool, `b` bool<br>out: `result` bool | none |
-| `MacroInput` | Macro Input | Macro | none | none |
-| `MacroInstance` | Macro | Macro | none | none |
-| `MacroOutput` | Macro Output | Macro | none | none |
-| `Abs` | Absolute | Math | in: `a` float<br>out: `result` float | none |
-| `Add` | Add | Math | in: `a` float, `b` float<br>out: `result` float | none |
-| `Ceil` | Ceiling | Math | in: `a` float<br>out: `result` float | none |
-| `Clamp` | Clamp | Math | in: `a` float, `min` float, `max` float<br>out: `result` float | none |
-| `Cos` | Cos | Math | in: `a` float<br>out: `result` float | none |
-| `Divide` | Divide | Math | in: `a` float, `b` float<br>out: `result` float | none |
-| `Floor` | Floor | Math | in: `a` float<br>out: `result` float | none |
-| `Lerp` | Lerp | Math | in: `a` float, `b` float, `t` float<br>out: `result` float | none |
-| `Max` | Max | Math | in: `a` float, `b` float<br>out: `result` float | none |
-| `Min` | Min | Math | in: `a` float, `b` float<br>out: `result` float | none |
-| `Mod` | Modulo | Math | in: `a` float, `b` float<br>out: `result` float | none |
-| `Multiply` | Multiply | Math | in: `a` float, `b` float<br>out: `result` float | none |
-| `Negate` | Negate | Math | in: `a` float<br>out: `result` float | none |
-| `Pow` | Power | Math | in: `a` float, `b` float<br>out: `result` float | none |
-| `Round` | Round | Math | in: `a` float<br>out: `result` float | none |
-| `Saturate` | Saturate (0..1) | Math | in: `a` float<br>out: `result` float | none |
-| `Sin` | Sin | Math | in: `a` float<br>out: `result` float | none |
-| `Sqrt` | Square Root | Math | in: `a` float<br>out: `result` float | none |
-| `Subtract` | Subtract | Math | in: `a` float, `b` float<br>out: `result` float | none |
-| `Param` | Param | Param | out: `value` float | `param` |
-| `Self` | Self | Param | out: `value` int | none |
-| `ActivateBody` | Activate Body | Physics | in: `exec` exec, `body` int<br>out: `then` exec, `success` bool | none |
-| `AddAngularImpulse` | Add Angular Impulse | Physics | in: `exec` exec, `body` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
-| `AddBodyVelocity` | Add Body Velocity | Physics | in: `exec` exec, `body` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
-| `AddDynamicBox` | Add Dynamic Box | Physics | in: `exec` exec, `cx` float, `cy` float, `cz` float, `hx` float, `hy` float, `hz` float, `mass` float<br>out: `then` exec, `body` int | none |
-| `AddDynamicSphere` | Add Dynamic Sphere | Physics | in: `exec` exec, `cx` float, `cy` float, `cz` float, `radius` float, `mass` float<br>out: `then` exec, `body` int | none |
-| `AddForce` | Add Force | Physics | in: `exec` exec, `body` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
-| `AddImpulse` | Add Impulse | Physics | in: `exec` exec, `body` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
-| `AddSensorBox` | Add Sensor Box | Physics | in: `exec` exec, `cx` float, `cy` float, `cz` float, `hx` float, `hy` float, `hz` float<br>out: `then` exec, `body` int | none |
-| `AddSensorSphere` | Add Sensor Sphere | Physics | in: `exec` exec, `cx` float, `cy` float, `cz` float, `radius` float<br>out: `then` exec, `body` int | none |
-| `AddStaticBox` | Add Static Box | Physics | in: `exec` exec, `cx` float, `cy` float, `cz` float, `hx` float, `hy` float, `hz` float<br>out: `then` exec, `body` int | none |
-| `AddTorque` | Add Torque | Physics | in: `exec` exec, `body` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
-| `BodiesAtPoint` | Bodies At Point | Physics | in: `exec` exec, `x` float, `y` float, `z` float, `layerMask` int, `ignoreBody` int, `includeSensors` bool<br>out: `then` exec, `count` int, `body` int | none |
-| `BoxCast` | Box Cast | Physics | in: `exec` exec, `cx` float, `cy` float, `cz` float, `hx` float, `hy` float, `hz` float, `yaw` float, `pitch` float, `roll` float, `dirX` float, `dirY` float, `dirZ` float, `maxDist` float, `layerMask` int, `ignoreBody` int, `includeSensors` bool<br>out: `then` exec, `hit` bool, `body` int, `distance` float, `pointX` float, `pointY` float, `pointZ` float, `normalX` float, `normalY` float, `normalZ` float | none |
-| `CapsuleCast` | Capsule Cast | Physics | in: `exec` exec, `cx` float, `cy` float, `cz` float, `radius` float, `height` float, `yaw` float, `pitch` float, `roll` float, `dirX` float, `dirY` float, `dirZ` float, `maxDist` float, `layerMask` int, `ignoreBody` int, `includeSensors` bool<br>out: `then` exec, `hit` bool, `body` int, `distance` float, `pointX` float, `pointY` float, `pointZ` float, `normalX` float, `normalY` float, `normalZ` float | none |
-| `DestroyBody` | Destroy Body | Physics | in: `exec` exec, `body` int<br>out: `then` exec, `success` bool | none |
-| `GetBodyAngularVelocity` | Get Body Angular Velocity | Physics | in: `body` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
-| `GetBodyCount` | Body Count | Physics | out: `count` int | none |
-| `GetBodyLayer` | Get Body Layer | Physics | in: `body` int<br>out: `layer` int, `success` bool | none |
-| `GetBodyMass` | Get Body Mass | Physics | in: `body` int<br>out: `mass` float, `success` bool | none |
-| `GetBodyMotionType` | Get Body Motion Type | Physics | in: `body` int<br>out: `motionType` int, `success` bool | none |
-| `GetBodyPosition` | Get Body Position | Physics | in: `body` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
-| `GetBodyVelocity` | Get Body Velocity | Physics | in: `body` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
-| `GetFixedStep` | Fixed Step | Physics | out: `seconds` float | none |
-| `GetJointValue` | Get Joint Value | Physics | in: `joint` int<br>out: `value` float, `success` bool | none |
-| `IsBodyActive` | Is Body Active | Physics | in: `body` int<br>out: `active` bool | none |
-| `IsBodyValid` | Is Body Valid | Physics | in: `body` int<br>out: `valid` bool | none |
-| `IsPhysicsReady` | Is Physics Ready | Physics | out: `ready` bool | none |
-| `JointDistance` | Joint: Distance | Physics | in: `exec` exec, `bodyA` int, `bodyB` int, `paX` float, `paY` float, `paZ` float, `pbX` float, `pbY` float, `pbZ` float, `minDist` float, `maxDist` float<br>out: `then` exec, `joint` int | none |
-| `JointFixed` | Joint: Fixed | Physics | in: `exec` exec, `bodyA` int, `bodyB` int, `px` float, `py` float, `pz` float, `axX` float, `axY` float, `axZ` float, `ayX` float, `ayY` float, `ayZ` float<br>out: `then` exec, `joint` int | none |
-| `JointHinge` | Joint: Hinge | Physics | in: `exec` exec, `bodyA` int, `bodyB` int, `px` float, `py` float, `pz` float, `hx` float, `hy` float, `hz` float, `nx` float, `ny` float, `nz` float, `minAngleRad` float, `maxAngleRad` float<br>out: `then` exec, `joint` int | none |
-| `JointPoint` | Joint: Point | Physics | in: `exec` exec, `bodyA` int, `bodyB` int, `px` float, `py` float, `pz` float<br>out: `then` exec, `joint` int | none |
-| `JointRemove` | Joint Remove | Physics | in: `exec` exec, `joint` int<br>out: `then` exec, `success` bool | none |
-| `JointSetEnabled` | Joint Set Enabled | Physics | in: `exec` exec, `joint` int, `enabled` bool<br>out: `then` exec, `success` bool | none |
-| `JointSetMotor` | Joint Set Motor | Physics | in: `exec` exec, `joint` int, `state` int, `target` float<br>out: `then` exec, `success` bool | none |
-| `JointSlider` | Joint: Slider | Physics | in: `exec` exec, `bodyA` int, `bodyB` int, `px` float, `py` float, `pz` float, `sx` float, `sy` float, `sz` float, `nx` float, `ny` float, `nz` float, `minCm` float, `maxCm` float<br>out: `then` exec, `joint` int | none |
-| `OverlapBox` | Overlap Box | Physics | in: `exec` exec, `cx` float, `cy` float, `cz` float, `hx` float, `hy` float, `hz` float, `yaw` float, `pitch` float, `roll` float, `layerMask` int, `ignoreBody` int, `includeSensors` bool<br>out: `then` exec, `count` int, `body` int | none |
-| `RaycastAll` | Raycast All | Physics | in: `exec` exec, `originX` float, `originY` float, `originZ` float, `dirX` float, `dirY` float, `dirZ` float, `maxDist` float, `layerMask` int, `ignoreBody` int, `includeSensors` bool<br>out: `then` exec, `count` int, `body` int, `distance` float, `pointX` float, `pointY` float, `pointZ` float | none |
-| `RaycastAny` | Raycast Any | Physics | in: `originX` float, `originY` float, `originZ` float, `dirX` float, `dirY` float, `dirZ` float, `maxDist` float<br>out: `hit` bool | none |
-| `SetBodyAngularVelocity` | Set Body Angular Velocity | Physics | in: `exec` exec, `body` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
-| `SetBodyEntity` | Set Body Entity | Physics | in: `exec` exec, `body` int, `entity` int<br>out: `then` exec, `success` bool | none |
-| `SetBodyFriction` | Set Body Friction | Physics | in: `exec` exec, `body` int, `friction` float<br>out: `then` exec, `success` bool | none |
-| `SetBodyGravityFactor` | Set Body Gravity Factor | Physics | in: `exec` exec, `body` int, `factor` float<br>out: `then` exec, `success` bool | none |
-| `SetBodyLayer` | Set Body Layer | Physics | in: `exec` exec, `body` int, `layer` int<br>out: `then` exec, `success` bool | none |
-| `SetBodyMass` | Set Body Mass | Physics | in: `exec` exec, `body` int, `mass` float<br>out: `then` exec, `success` bool | none |
-| `SetBodyMotionType` | Set Body Motion Type | Physics | in: `exec` exec, `body` int, `motionType` int<br>out: `then` exec, `success` bool | none |
-| `SetBodyPosition` | Set Body Position | Physics | in: `exec` exec, `body` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
-| `SetBodyRestitution` | Set Body Restitution | Physics | in: `exec` exec, `body` int, `restitution` float<br>out: `then` exec, `success` bool | none |
-| `SetBodyVelocity` | Set Body Velocity | Physics | in: `exec` exec, `body` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
-| `SetCcd` | Set CCD | Physics | in: `exec` exec, `body` int, `enabled` bool<br>out: `then` exec, `success` bool | none |
-| `SetGravity` | Set Gravity | Physics | in: `exec` exec, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
-| `SetJointBreakable` | Set Joint Breakable | Physics | in: `exec` exec, `joint` int, `maxForceN` float, `maxTorqueNm` float<br>out: `then` exec, `success` bool | none |
-| `SetLayerCollision` | Set Layer Collision | Physics | in: `exec` exec, `layerA` int, `layerB` int, `collide` bool<br>out: `then` exec, `success` bool | none |
-| `SetLockedAxes` | Set Locked Axes | Physics | in: `exec` exec, `body` int, `lockX` bool, `lockY` bool, `lockZ` bool, `lockRotX` bool, `lockRotY` bool, `lockRotZ` bool<br>out: `then` exec, `success` bool | none |
-| `SphereCast` | Sphere Cast | Physics | in: `exec` exec, `originX` float, `originY` float, `originZ` float, `dirX` float, `dirY` float, `dirZ` float, `maxDist` float, `radius` float<br>out: `then` exec, `hit` bool, `body` int, `pointX` float, `pointY` float, `pointZ` float | none |
-| `AddTag` | Add Tag | Scene | in: `exec` exec, `entity` int, `mask` int<br>out: `then` exec, `success` bool | none |
-| `AttachToSocket` | Attach To Socket | Scene | in: `entity` int, `parent` int<br>out: `success` bool | `socket` |
-| `CreateEntity` | Create Entity | Scene | in: `exec` exec<br>out: `then` exec, `entity` int, `success` bool | `name` |
-| `FindEntity` | Find Entity | Scene | out: `entity` int, `found` bool | `name` |
-| `GetAnimCurve` | Get Anim Curve | Scene | in: `entity` int<br>out: `value` float | `curve` |
-| `GetEntityLocation` | Get Entity Location | Scene | in: `e` entity<br>out: `location` float3 | none |
-| `GetField` | Get Field | Scene | in: `entity` int<br>out: `value` float | `field` |
-| `GetFieldVec3` | Get Field (Vec3) | Scene | in: `entity` int<br>out: `x` float, `y` float, `z` float | `field` |
-| `GetForward` | Get Forward (Look) | Scene | in: `entity` int<br>out: `x` float, `y` float, `z` float, `eyeX` float, `eyeY` float, `eyeZ` float, `success` bool | none |
-| `GetTags` | Get Tags | Scene | in: `entity` int<br>out: `mask` int | none |
-| `GetViewEntity` | Get View Entity | Scene | in: `entity` int<br>out: `view` int, `success` bool | none |
-| `HasTag` | Has Tag | Scene | in: `entity` int, `mask` int<br>out: `has` bool | none |
-| `IsValidEntity` | Is Valid Entity | Scene | in: `e` entity<br>out: `result` bool | none |
-| `PlayAnimation` | Play Animation | Scene | in: `entity` int, `loop` bool = true<br>out: `success` bool | `clip` |
-| `RagdollImpulse` | Ragdoll Impulse | Scene | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | `bone` |
-| `RagdollStart` | Ragdoll Start | Scene | in: `exec` exec, `entity` int, `mode` int, `blend` float<br>out: `then` exec, `success` bool | none |
-| `RagdollStop` | Ragdoll Stop | Scene | in: `exec` exec, `entity` int, `blend` float<br>out: `then` exec, `success` bool | none |
-| `Raycast` | Raycast | Scene | in: `exec` exec, `originX` float, `originY` float, `originZ` float, `dirX` float, `dirY` float, `dirZ` float, `maxDist` float<br>out: `then` exec, `hit` bool, `entity` int, `pointX` float, `pointY` float, `pointZ` float | none |
-| `RaycastVector` | Raycast Vector | Scene | in: `exec` exec, `origin` float3, `direction` float3, `maxDist` float = 10000<br>out: `then` exec, `hit` bool, `entity` entity, `point` float3 | none |
-| `RemoveTag` | Remove Tag | Scene | in: `exec` exec, `entity` int, `mask` int<br>out: `then` exec, `success` bool | none |
-| `SetControlRig` | Set Control Rig | Scene | in: `entity` int, `weight` float = 1<br>out: `success` bool | `rig` |
-| `SetEntityLocation` | Set Entity Location | Scene | in: `exec` exec, `e` entity, `location` float3<br>out: `then` exec | none |
-| `SetField` | Set Field | Scene | in: `entity` int, `value` float<br>out: `success` bool | `field` |
-| `SetFieldVec3` | Set Field (Vec3) | Scene | in: `entity` int, `x` float, `y` float, `z` float<br>out: `success` bool | `field` |
-| `SetMaterial` | Set Material | Scene | in: `entity` int<br>out: `success` bool | `material` |
-| `SetMesh` | Set Mesh | Scene | in: `entity` int<br>out: `success` bool | `mesh` |
-| `SetName` | Set Name | Scene | in: `entity` int<br>out: `success` bool | `name` |
-| `SetParent` | Set Parent | Scene | in: `child` int, `parent` int<br>out: `success` bool | none |
-| `SetRagdollStrength` | Set Ragdoll Strength | Scene | in: `exec` exec, `entity` int, `strength` float<br>out: `then` exec, `success` bool | none |
-| `SetSkeleton` | Set Skeleton | Scene | in: `entity` int<br>out: `success` bool | `skeleton` |
-| `SetVisible` | Set Visible | Scene | in: `exec` exec, `entity` int, `visible` bool<br>out: `then` exec, `success` bool | none |
-| `BoolToString` | Bool To String | String | in: `a` bool<br>out: `result` string | none |
-| `FloatToString` | Float To String | String | in: `a` float<br>out: `result` string | none |
-| `IntToString` | Int To String | String | in: `a` int<br>out: `result` string | none |
-| `StringAppend` | String Append | String | in: `a` string, `b` string<br>out: `result` string | none |
-| `StringEquals` | String Equals | String | in: `a` string, `b` string<br>out: `result` bool | none |
-| `StringLength` | String Length | String | in: `s` string<br>out: `result` int | none |
-| `VectorToString` | Vector To String | String | in: `v` float3<br>out: `result` string | none |
-| `BreakStruct` | Break Struct | Struct | none | `struct` |
-| `MakeStruct` | Make Struct | Struct | none | `struct` |
-| `SetStructField` | Set Struct Field | Struct | none | `struct`, `field` |
-| `DestroyEntity` | Destroy Entity | Transform | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none |
-| `GetEntityForward` | Get Forward Axis | Transform | in: `entity` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
-| `GetEntityRight` | Get Right Axis | Transform | in: `entity` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
-| `GetEntityUp` | Get Up Axis | Transform | in: `entity` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
-| `GetLocalScale` | Get Local Scale | Transform | in: `entity` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
-| `GetWorldPosition` | Get World Position | Transform | in: `entity` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
-| `IsActor` | Is Actor | Transform | in: `entity` int<br>out: `isActor` bool | none |
-| `IsAlive` | Is Alive | Transform | in: `entity` int<br>out: `alive` bool | none |
-| `LookAt` | Look At | Transform | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
-| `SetLocalPosition` | Set Local Position | Transform | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
-| `SetLocalRotation` | Set Local Rotation | Transform | in: `exec` exec, `entity` int, `yaw` float, `pitch` float, `roll` float<br>out: `then` exec, `success` bool | none |
-| `SetLocalScale` | Set Local Scale | Transform | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
-| `Translate` | Translate | Transform | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
-| `GetVar` | Get Var | Var | out: `value` float | `var` |
-| `SetVar` | Set Var | Var | in: `exec` exec, `value` float<br>out: `then` exec | `var` |
-| `BreakVector` | Break Vector | Vector | in: `v` float3<br>out: `x` float, `y` float, `z` float | none |
-| `MakeVector` | Make Vector | Vector | in: `x` float, `y` float, `z` float<br>out: `v` float3 | none |
-| `VecAdd` | Vec Add | Vector | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `x` float, `y` float, `z` float | none |
-| `VecCross` | Vec Cross | Vector | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `x` float, `y` float, `z` float | none |
-| `VecDistance` | Vec Distance | Vector | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `result` float | none |
-| `VecDot` | Vec Dot | Vector | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `result` float | none |
-| `VecLength` | Vec Length | Vector | in: `ax` float, `ay` float, `az` float<br>out: `result` float | none |
-| `VecLerp` | Vec Lerp | Vector | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float, `t` float<br>out: `x` float, `y` float, `z` float | none |
-| `VecNormalize` | Vec Normalize | Vector | in: `ax` float, `ay` float, `az` float<br>out: `x` float, `y` float, `z` float | none |
-| `VecScale` | Vec Scale | Vector | in: `ax` float, `ay` float, `az` float, `s` float<br>out: `x` float, `y` float, `z` float | none |
-| `VecSub` | Vec Subtract | Vector | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `x` float, `y` float, `z` float | none |
-| `VectorAdd` | Vector Add | Vector | in: `a` float3, `b` float3<br>out: `result` float3 | none |
-| `VectorCross` | Vector Cross | Vector | in: `a` float3, `b` float3<br>out: `result` float3 | none |
-| `VectorDistance` | Vector Distance | Vector | in: `a` float3, `b` float3<br>out: `result` float | none |
-| `VectorDot` | Vector Dot | Vector | in: `a` float3, `b` float3<br>out: `result` float | none |
-| `VectorLength` | Vector Length | Vector | in: `v` float3<br>out: `result` float | none |
-| `VectorLerp` | Vector Lerp | Vector | in: `a` float3, `b` float3, `t` float<br>out: `result` float3 | none |
-| `VectorNormalize` | Vector Normalize | Vector | in: `v` float3<br>out: `result` float3 | none |
-| `VectorScale` | Vector Scale | Vector | in: `v` float3, `s` float = 1<br>out: `result` float3 | none |
-| `VectorSubtract` | Vector Subtract | Vector | in: `a` float3, `b` float3<br>out: `result` float3 | none |
+| <a id="charactermove"></a>`CharacterMove` | Character Move | Actor | in: `exec` exec, `entity` int, `dt` float, `forward` float, `right` float, `yawDelta` float, `pitchDelta` float<br>out: `then` exec, `success` bool | none |
+| <a id="fireevent"></a>`FireEvent` | Fire Event | Actor | in: `exec` exec, `target` int<br>out: `then` exec, `fired` bool | `event` |
+| <a id="getsynapseperception"></a>`GetSynapsePerception` | Get Synapse Perception | Actor | in: `entity` int<br>out: `canSeeTarget` bool, `lastKnownTarget` int, `timeSinceSeen` float, `success` bool | none |
+| <a id="getsynapsetarget"></a>`GetSynapseTarget` | Get Synapse Target | Actor | in: `entity` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
+| <a id="jump"></a>`Jump` | Jump | Actor | in: `exec` exec, `entity` int<br>out: `then` exec, `jumped` bool | none |
+| <a id="setviewentity"></a>`SetViewEntity` | Set View Entity | Actor | in: `entity` int | none |
+| <a id="spawn"></a>`Spawn` | Spawn | Actor | in: `exec` exec, `x` float, `y` float, `z` float<br>out: `then` exec, `entity` int | `class` |
+| <a id="synapsesteer"></a>`SynapseSteer` | Synapse Steer | Actor | in: `entity` int, `dt` float, `targetX` float, `targetY` float, `targetZ` float, `turnRate` float, `arriveRadius` float<br>out: `forward` float, `right` float, `yawDelta` float, `arrived` bool, `success` bool | none |
+| <a id="arrayadd"></a>`ArrayAdd` | Array Add | Array | in: `exec` exec, `item` float<br>out: `then` exec | `var`, `of` |
+| <a id="arrayclear"></a>`ArrayClear` | Array Clear | Array | in: `exec` exec<br>out: `then` exec | `var`, `of` |
+| <a id="arraycontains"></a>`ArrayContains` | Array Contains | Array | in: `array` float[], `item` float<br>out: `result` bool | `of` |
+| <a id="arrayfind"></a>`ArrayFind` | Array Find | Array | in: `array` float[], `item` float<br>out: `index` int | `of` |
+| <a id="arrayget"></a>`ArrayGet` | Array Get | Array | in: `array` float[], `index` int<br>out: `item` float | `of` |
+| <a id="arraylength"></a>`ArrayLength` | Array Length | Array | in: `array` float[]<br>out: `length` int | `of` |
+| <a id="arrayremoveat"></a>`ArrayRemoveAt` | Array Remove At | Array | in: `exec` exec, `index` int<br>out: `then` exec | `var`, `of` |
+| <a id="arrayset"></a>`ArraySet` | Array Set | Array | in: `exec` exec, `index` int, `item` float<br>out: `then` exec | `var`, `of` |
+| <a id="foreachinarray"></a>`ForEachInArray` | For Each In Array | Array | in: `exec` exec, `array` float[]<br>out: `loop` exec, `element` float, `index` int, `completed` exec | `of` |
+| <a id="makearray"></a>`MakeArray` | Make Array | Array | in: `item0` float, `item1` float, `item2` float, `item3` float<br>out: `array` float[] | `of` |
+| <a id="issoundplaying"></a>`IsSoundPlaying` | Is Sound Playing | Audio | in: `voice` int<br>out: `playing` bool | none |
+| <a id="playsound"></a>`PlaySound` | Play Sound | Audio | in: `exec` exec, `volume` float, `pitch` float, `looping` bool, `bus` int<br>out: `then` exec, `voice` int, `success` bool | `sound` |
+| <a id="playsoundat"></a>`PlaySoundAt` | Play Sound At | Audio | in: `exec` exec, `x` float, `y` float, `z` float, `volume` float, `pitch` float, `looping` bool, `bus` int, `innerCm` float, `outerCm` float<br>out: `then` exec, `voice` int, `success` bool | `sound` |
+| <a id="setbusvolume"></a>`SetBusVolume` | Set Bus Volume | Audio | in: `exec` exec, `bus` int, `volume` float<br>out: `then` exec, `success` bool | none |
+| <a id="setlistener"></a>`SetListener` | Set Listener | Audio | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none |
+| <a id="stopsound"></a>`StopSound` | Stop Sound | Audio | in: `exec` exec, `voice` int<br>out: `then` exec, `success` bool | none |
+| <a id="charactercanstand"></a>`CharacterCanStand` | Character Can Stand | Character | in: `entity` int, `radius` float, `halfHeight` float<br>out: `canStand` bool, `success` bool | none |
+| <a id="getvelocity"></a>`GetVelocity` | Get Velocity | Character | in: `entity` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
+| <a id="isgrounded"></a>`IsGrounded` | Is Grounded | Character | in: `entity` int<br>out: `grounded` bool | none |
+| <a id="setvelocity"></a>`SetVelocity` | Set Velocity | Character | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
+| <a id="teleport"></a>`Teleport` | Teleport | Character | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
+| <a id="constbool"></a>`ConstBool` | Const Bool | Const | out: `value` bool | `value` |
+| <a id="constfloat"></a>`ConstFloat` | Const Float | Const | out: `value` float | `value` |
+| <a id="constint"></a>`ConstInt` | Const Int | Const | out: `value` int | `value` |
+| <a id="conststring"></a>`ConstString` | Const String | Const | out: `value` string | `value` |
+| <a id="constvector"></a>`ConstVector` | Const Vector | Const | out: `value` float3 | `value` |
+| <a id="booltofloat"></a>`BoolToFloat` | Bool To Float | Convert | in: `a` bool<br>out: `result` float | none |
+| <a id="floattoint"></a>`FloatToInt` | Float To Int | Convert | in: `a` float<br>out: `result` int | none |
+| <a id="inttofloat"></a>`IntToFloat` | Int To Float | Convert | in: `a` int<br>out: `result` float | none |
+| <a id="print"></a>`Print` | Print | Debug | in: `exec` exec, `value` float<br>out: `then` exec | none |
+| <a id="printint"></a>`PrintInt` | Print Int | Debug | in: `exec` exec, `value` int<br>out: `then` exec | none |
+| <a id="printstring"></a>`PrintString` | Print String | Debug | in: `exec` exec<br>out: `then` exec | `text` |
+| <a id="printtext"></a>`PrintText` | Print Text | Debug | in: `exec` exec, `text` string<br>out: `then` exec | none |
+| <a id="customevent"></a>`CustomEvent` | Custom Event | Event | out: `exec` exec | none |
+| <a id="onhit"></a>`OnHit` | On Hit | Event | out: `exec` exec | none |
+| <a id="onstart"></a>`OnStart` | On Start | Event | out: `exec` exec | none |
+| <a id="ontick"></a>`OnTick` | On Tick | Event | out: `exec` exec | none |
+| <a id="branch"></a>`Branch` | Branch | Flow | in: `exec` exec, `cond` bool<br>out: `true` exec, `false` exec, `tookTrue` bool | none |
+| <a id="doonce"></a>`DoOnce` | Do Once | Flow | in: `exec` exec, `reset` bool<br>out: `then` exec | none |
+| <a id="flipflop"></a>`FlipFlop` | Flip Flop | Flow | in: `exec` exec<br>out: `a` exec, `b` exec, `isA` bool | none |
+| <a id="foreach"></a>`ForEach` | For Each (counted) | Flow | in: `exec` exec, `count` int<br>out: `loop` exec, `index` int, `done` exec | none |
+| <a id="gate"></a>`Gate` | Gate | Flow | in: `exec` exec, `open` bool, `close` bool<br>out: `then` exec | none |
+| <a id="reroute"></a>`Reroute` | Reroute | Flow | in: `in` float<br>out: `out` float | none |
+| <a id="reroutebool"></a>`RerouteBool` | Reroute (Bool) | Flow | in: `a` bool<br>out: `result` bool | none |
+| <a id="rerouteexec"></a>`RerouteExec` | Reroute (Exec) | Flow | in: `exec` exec<br>out: `then` exec | none |
+| <a id="reroutefloat"></a>`RerouteFloat` | Reroute (Float) | Flow | in: `a` float<br>out: `result` float | none |
+| <a id="rerouteint"></a>`RerouteInt` | Reroute (Int) | Flow | in: `a` int<br>out: `result` int | none |
+| <a id="sequence"></a>`Sequence` | Sequence | Flow | in: `exec` exec<br>out: `then0` exec, `then1` exec, `fireLog` int | none |
+| <a id="switchint"></a>`SwitchInt` | Switch on Int | Flow | in: `exec` exec, `selector` int<br>out: `case0` exec, `case1` exec, `case2` exec, `case3` exec, `default` exec, `taken` int | none |
+| <a id="while"></a>`While` | While | Flow | in: `exec` exec, `cond` bool<br>out: `loop` exec, `done` exec, `iterations` int | none |
+| <a id="callfunc"></a>`CallFunc` | Call Function | Function | none | none |
+| <a id="funcentry"></a>`FuncEntry` | Function Entry | Function | none | none |
+| <a id="funcreturn"></a>`FuncReturn` | Return | Function | none | none |
+| <a id="getgamemode"></a>`GetGameMode` | Get Game Mode | Game | out: `entity` int | none |
+| <a id="getplayercontroller"></a>`GetPlayerController` | Get Player Controller | Game | in: `index` int<br>out: `entity` int | none |
+| <a id="getplayerpawn"></a>`GetPlayerPawn` | Get Player Pawn | Game | in: `index` int<br>out: `entity` int | none |
+| <a id="isplaying"></a>`IsPlaying` | Is Playing | Game | out: `playing` bool | none |
+| <a id="loadgame"></a>`LoadGame` | Load Game | Game | in: `exec` exec<br>out: `then` exec, `success` bool | `path` |
+| <a id="possess"></a>`Possess` | Possess | Game | in: `exec` exec, `controller` int, `pawn` int<br>out: `then` exec, `success` bool | none |
+| <a id="savegame"></a>`SaveGame` | Save Game | Game | in: `exec` exec<br>out: `then` exec, `success` bool | `path` |
+| <a id="unpossess"></a>`Unpossess` | Unpossess | Game | in: `exec` exec, `controller` int<br>out: `then` exec, `success` bool | none |
+| <a id="getactionkey"></a>`GetActionKey` | Get Action Key | Input | in: `slot` int<br>out: `key` int, `bound` bool | `action` |
+| <a id="getpressedkey"></a>`GetPressedKey` | Get Pressed Key | Input | out: `key` int, `pressed` bool | none |
+| <a id="inputaction"></a>`InputAction` | Input Action | Input | in: `action` int<br>out: `x` float, `y` float, `held` bool | `action` |
+| <a id="inputactionpressed"></a>`InputActionPressed` | Input Action Pressed | Input | in: `action` int<br>out: `triggered` bool | `action` |
+| <a id="inputactionreleased"></a>`InputActionReleased` | Input Action Released | Input | in: `action` int<br>out: `triggered` bool | `action` |
+| <a id="inputkey"></a>`InputKey` | Input Key | Input | in: `key` int<br>out: `down` bool | none |
+| <a id="inputkeypressed"></a>`InputKeyPressed` | Input Key Pressed | Input | in: `key` int<br>out: `triggered` bool | none |
+| <a id="inputkeyreleased"></a>`InputKeyReleased` | Input Key Released | Input | in: `key` int<br>out: `triggered` bool | none |
+| <a id="loadinputbindings"></a>`LoadInputBindings` | Load Input Bindings | Input | in: `exec` exec<br>out: `then` exec, `success` bool | none |
+| <a id="mousedelta"></a>`MouseDelta` | Mouse Delta | Input | in: `exec` exec<br>out: `then` exec, `deltaX` float, `deltaY` float, `wheel` float | none |
+| <a id="moveaxis"></a>`MoveAxis` | Move Axis | Input | in: `exec` exec<br>out: `then` exec, `forward` float, `right` float | none |
+| <a id="rebindaction"></a>`RebindAction` | Rebind Action | Input | in: `exec` exec, `slot` int, `key` int<br>out: `then` exec, `success` bool | `action` |
+| <a id="resetinputbindings"></a>`ResetInputBindings` | Reset Input Bindings | Input | in: `exec` exec<br>out: `then` exec, `success` bool | none |
+| <a id="saveinputbindings"></a>`SaveInputBindings` | Save Input Bindings | Input | in: `exec` exec<br>out: `then` exec, `success` bool | none |
+| <a id="and"></a>`And` | AND | Logic | in: `a` bool, `b` bool<br>out: `result` bool | none |
+| <a id="compare"></a>`Compare` | Compare | Logic | in: `a` float, `b` float<br>out: `result` bool | none |
+| <a id="equal"></a>`Equal` | a == b | Logic | in: `a` float, `b` float<br>out: `result` bool | none |
+| <a id="greater"></a>`Greater` | a &gt; b | Logic | in: `a` float, `b` float<br>out: `result` bool | none |
+| <a id="greaterequal"></a>`GreaterEqual` | a &gt;= b | Logic | in: `a` float, `b` float<br>out: `result` bool | none |
+| <a id="less"></a>`Less` | a &lt; b | Logic | in: `a` float, `b` float<br>out: `result` bool | none |
+| <a id="lessequal"></a>`LessEqual` | a &lt;= b | Logic | in: `a` float, `b` float<br>out: `result` bool | none |
+| <a id="not"></a>`Not` | NOT | Logic | in: `a` bool<br>out: `result` bool | none |
+| <a id="notequal"></a>`NotEqual` | a != b | Logic | in: `a` float, `b` float<br>out: `result` bool | none |
+| <a id="or"></a>`Or` | OR | Logic | in: `a` bool, `b` bool<br>out: `result` bool | none |
+| <a id="select"></a>`Select` | Select | Logic | in: `cond` bool, `ifTrue` float, `ifFalse` float<br>out: `result` float | none |
+| <a id="xor"></a>`Xor` | XOR | Logic | in: `a` bool, `b` bool<br>out: `result` bool | none |
+| <a id="macroinput"></a>`MacroInput` | Macro Input | Macro | none | none |
+| <a id="macroinstance"></a>`MacroInstance` | Macro | Macro | none | none |
+| <a id="macrooutput"></a>`MacroOutput` | Macro Output | Macro | none | none |
+| <a id="abs"></a>`Abs` | Absolute | Math | in: `a` float<br>out: `result` float | none |
+| <a id="add"></a>`Add` | Add | Math | in: `a` float, `b` float<br>out: `result` float | none |
+| <a id="ceil"></a>`Ceil` | Ceiling | Math | in: `a` float<br>out: `result` float | none |
+| <a id="clamp"></a>`Clamp` | Clamp | Math | in: `a` float, `min` float, `max` float<br>out: `result` float | none |
+| <a id="cos"></a>`Cos` | Cos | Math | in: `a` float<br>out: `result` float | none |
+| <a id="divide"></a>`Divide` | Divide | Math | in: `a` float, `b` float<br>out: `result` float | none |
+| <a id="floor"></a>`Floor` | Floor | Math | in: `a` float<br>out: `result` float | none |
+| <a id="lerp"></a>`Lerp` | Lerp | Math | in: `a` float, `b` float, `t` float<br>out: `result` float | none |
+| <a id="max"></a>`Max` | Max | Math | in: `a` float, `b` float<br>out: `result` float | none |
+| <a id="min"></a>`Min` | Min | Math | in: `a` float, `b` float<br>out: `result` float | none |
+| <a id="mod"></a>`Mod` | Modulo | Math | in: `a` float, `b` float<br>out: `result` float | none |
+| <a id="multiply"></a>`Multiply` | Multiply | Math | in: `a` float, `b` float<br>out: `result` float | none |
+| <a id="negate"></a>`Negate` | Negate | Math | in: `a` float<br>out: `result` float | none |
+| <a id="pow"></a>`Pow` | Power | Math | in: `a` float, `b` float<br>out: `result` float | none |
+| <a id="round"></a>`Round` | Round | Math | in: `a` float<br>out: `result` float | none |
+| <a id="saturate"></a>`Saturate` | Saturate (0..1) | Math | in: `a` float<br>out: `result` float | none |
+| <a id="sin"></a>`Sin` | Sin | Math | in: `a` float<br>out: `result` float | none |
+| <a id="sqrt"></a>`Sqrt` | Square Root | Math | in: `a` float<br>out: `result` float | none |
+| <a id="subtract"></a>`Subtract` | Subtract | Math | in: `a` float, `b` float<br>out: `result` float | none |
+| <a id="param"></a>`Param` | Param | Param | out: `value` float | `param` |
+| <a id="self"></a>`Self` | Self | Param | out: `value` int | none |
+| <a id="activatebody"></a>`ActivateBody` | Activate Body | Physics | in: `exec` exec, `body` int<br>out: `then` exec, `success` bool | none |
+| <a id="addangularimpulse"></a>`AddAngularImpulse` | Add Angular Impulse | Physics | in: `exec` exec, `body` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
+| <a id="addbodyvelocity"></a>`AddBodyVelocity` | Add Body Velocity | Physics | in: `exec` exec, `body` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
+| <a id="adddynamicbox"></a>`AddDynamicBox` | Add Dynamic Box | Physics | in: `exec` exec, `cx` float, `cy` float, `cz` float, `hx` float, `hy` float, `hz` float, `mass` float<br>out: `then` exec, `body` int | none |
+| <a id="adddynamicsphere"></a>`AddDynamicSphere` | Add Dynamic Sphere | Physics | in: `exec` exec, `cx` float, `cy` float, `cz` float, `radius` float, `mass` float<br>out: `then` exec, `body` int | none |
+| <a id="addforce"></a>`AddForce` | Add Force | Physics | in: `exec` exec, `body` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
+| <a id="addimpulse"></a>`AddImpulse` | Add Impulse | Physics | in: `exec` exec, `body` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
+| <a id="addsensorbox"></a>`AddSensorBox` | Add Sensor Box | Physics | in: `exec` exec, `cx` float, `cy` float, `cz` float, `hx` float, `hy` float, `hz` float<br>out: `then` exec, `body` int | none |
+| <a id="addsensorsphere"></a>`AddSensorSphere` | Add Sensor Sphere | Physics | in: `exec` exec, `cx` float, `cy` float, `cz` float, `radius` float<br>out: `then` exec, `body` int | none |
+| <a id="addstaticbox"></a>`AddStaticBox` | Add Static Box | Physics | in: `exec` exec, `cx` float, `cy` float, `cz` float, `hx` float, `hy` float, `hz` float<br>out: `then` exec, `body` int | none |
+| <a id="addtorque"></a>`AddTorque` | Add Torque | Physics | in: `exec` exec, `body` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
+| <a id="bodiesatpoint"></a>`BodiesAtPoint` | Bodies At Point | Physics | in: `exec` exec, `x` float, `y` float, `z` float, `layerMask` int, `ignoreBody` int, `includeSensors` bool<br>out: `then` exec, `count` int, `body` int | none |
+| <a id="boxcast"></a>`BoxCast` | Box Cast | Physics | in: `exec` exec, `cx` float, `cy` float, `cz` float, `hx` float, `hy` float, `hz` float, `yaw` float, `pitch` float, `roll` float, `dirX` float, `dirY` float, `dirZ` float, `maxDist` float, `layerMask` int, `ignoreBody` int, `includeSensors` bool<br>out: `then` exec, `hit` bool, `body` int, `distance` float, `pointX` float, `pointY` float, `pointZ` float, `normalX` float, `normalY` float, `normalZ` float | none |
+| <a id="capsulecast"></a>`CapsuleCast` | Capsule Cast | Physics | in: `exec` exec, `cx` float, `cy` float, `cz` float, `radius` float, `height` float, `yaw` float, `pitch` float, `roll` float, `dirX` float, `dirY` float, `dirZ` float, `maxDist` float, `layerMask` int, `ignoreBody` int, `includeSensors` bool<br>out: `then` exec, `hit` bool, `body` int, `distance` float, `pointX` float, `pointY` float, `pointZ` float, `normalX` float, `normalY` float, `normalZ` float | none |
+| <a id="destroybody"></a>`DestroyBody` | Destroy Body | Physics | in: `exec` exec, `body` int<br>out: `then` exec, `success` bool | none |
+| <a id="getbodyangularvelocity"></a>`GetBodyAngularVelocity` | Get Body Angular Velocity | Physics | in: `body` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
+| <a id="getbodycount"></a>`GetBodyCount` | Body Count | Physics | out: `count` int | none |
+| <a id="getbodylayer"></a>`GetBodyLayer` | Get Body Layer | Physics | in: `body` int<br>out: `layer` int, `success` bool | none |
+| <a id="getbodymass"></a>`GetBodyMass` | Get Body Mass | Physics | in: `body` int<br>out: `mass` float, `success` bool | none |
+| <a id="getbodymotiontype"></a>`GetBodyMotionType` | Get Body Motion Type | Physics | in: `body` int<br>out: `motionType` int, `success` bool | none |
+| <a id="getbodyposition"></a>`GetBodyPosition` | Get Body Position | Physics | in: `body` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
+| <a id="getbodyvelocity"></a>`GetBodyVelocity` | Get Body Velocity | Physics | in: `body` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
+| <a id="getfixedstep"></a>`GetFixedStep` | Fixed Step | Physics | out: `seconds` float | none |
+| <a id="getjointvalue"></a>`GetJointValue` | Get Joint Value | Physics | in: `joint` int<br>out: `value` float, `success` bool | none |
+| <a id="isbodyactive"></a>`IsBodyActive` | Is Body Active | Physics | in: `body` int<br>out: `active` bool | none |
+| <a id="isbodyvalid"></a>`IsBodyValid` | Is Body Valid | Physics | in: `body` int<br>out: `valid` bool | none |
+| <a id="isphysicsready"></a>`IsPhysicsReady` | Is Physics Ready | Physics | out: `ready` bool | none |
+| <a id="jointdistance"></a>`JointDistance` | Joint: Distance | Physics | in: `exec` exec, `bodyA` int, `bodyB` int, `paX` float, `paY` float, `paZ` float, `pbX` float, `pbY` float, `pbZ` float, `minDist` float, `maxDist` float<br>out: `then` exec, `joint` int | none |
+| <a id="jointfixed"></a>`JointFixed` | Joint: Fixed | Physics | in: `exec` exec, `bodyA` int, `bodyB` int, `px` float, `py` float, `pz` float, `axX` float, `axY` float, `axZ` float, `ayX` float, `ayY` float, `ayZ` float<br>out: `then` exec, `joint` int | none |
+| <a id="jointhinge"></a>`JointHinge` | Joint: Hinge | Physics | in: `exec` exec, `bodyA` int, `bodyB` int, `px` float, `py` float, `pz` float, `hx` float, `hy` float, `hz` float, `nx` float, `ny` float, `nz` float, `minAngleRad` float, `maxAngleRad` float<br>out: `then` exec, `joint` int | none |
+| <a id="jointpoint"></a>`JointPoint` | Joint: Point | Physics | in: `exec` exec, `bodyA` int, `bodyB` int, `px` float, `py` float, `pz` float<br>out: `then` exec, `joint` int | none |
+| <a id="jointremove"></a>`JointRemove` | Joint Remove | Physics | in: `exec` exec, `joint` int<br>out: `then` exec, `success` bool | none |
+| <a id="jointsetenabled"></a>`JointSetEnabled` | Joint Set Enabled | Physics | in: `exec` exec, `joint` int, `enabled` bool<br>out: `then` exec, `success` bool | none |
+| <a id="jointsetmotor"></a>`JointSetMotor` | Joint Set Motor | Physics | in: `exec` exec, `joint` int, `state` int, `target` float<br>out: `then` exec, `success` bool | none |
+| <a id="jointslider"></a>`JointSlider` | Joint: Slider | Physics | in: `exec` exec, `bodyA` int, `bodyB` int, `px` float, `py` float, `pz` float, `sx` float, `sy` float, `sz` float, `nx` float, `ny` float, `nz` float, `minCm` float, `maxCm` float<br>out: `then` exec, `joint` int | none |
+| <a id="overlapbox"></a>`OverlapBox` | Overlap Box | Physics | in: `exec` exec, `cx` float, `cy` float, `cz` float, `hx` float, `hy` float, `hz` float, `yaw` float, `pitch` float, `roll` float, `layerMask` int, `ignoreBody` int, `includeSensors` bool<br>out: `then` exec, `count` int, `body` int | none |
+| <a id="raycastall"></a>`RaycastAll` | Raycast All | Physics | in: `exec` exec, `originX` float, `originY` float, `originZ` float, `dirX` float, `dirY` float, `dirZ` float, `maxDist` float, `layerMask` int, `ignoreBody` int, `includeSensors` bool<br>out: `then` exec, `count` int, `body` int, `distance` float, `pointX` float, `pointY` float, `pointZ` float | none |
+| <a id="raycastany"></a>`RaycastAny` | Raycast Any | Physics | in: `originX` float, `originY` float, `originZ` float, `dirX` float, `dirY` float, `dirZ` float, `maxDist` float<br>out: `hit` bool | none |
+| <a id="setbodyangularvelocity"></a>`SetBodyAngularVelocity` | Set Body Angular Velocity | Physics | in: `exec` exec, `body` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
+| <a id="setbodyentity"></a>`SetBodyEntity` | Set Body Entity | Physics | in: `exec` exec, `body` int, `entity` int<br>out: `then` exec, `success` bool | none |
+| <a id="setbodyfriction"></a>`SetBodyFriction` | Set Body Friction | Physics | in: `exec` exec, `body` int, `friction` float<br>out: `then` exec, `success` bool | none |
+| <a id="setbodygravityfactor"></a>`SetBodyGravityFactor` | Set Body Gravity Factor | Physics | in: `exec` exec, `body` int, `factor` float<br>out: `then` exec, `success` bool | none |
+| <a id="setbodylayer"></a>`SetBodyLayer` | Set Body Layer | Physics | in: `exec` exec, `body` int, `layer` int<br>out: `then` exec, `success` bool | none |
+| <a id="setbodymass"></a>`SetBodyMass` | Set Body Mass | Physics | in: `exec` exec, `body` int, `mass` float<br>out: `then` exec, `success` bool | none |
+| <a id="setbodymotiontype"></a>`SetBodyMotionType` | Set Body Motion Type | Physics | in: `exec` exec, `body` int, `motionType` int<br>out: `then` exec, `success` bool | none |
+| <a id="setbodyposition"></a>`SetBodyPosition` | Set Body Position | Physics | in: `exec` exec, `body` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
+| <a id="setbodyrestitution"></a>`SetBodyRestitution` | Set Body Restitution | Physics | in: `exec` exec, `body` int, `restitution` float<br>out: `then` exec, `success` bool | none |
+| <a id="setbodyvelocity"></a>`SetBodyVelocity` | Set Body Velocity | Physics | in: `exec` exec, `body` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
+| <a id="setccd"></a>`SetCcd` | Set CCD | Physics | in: `exec` exec, `body` int, `enabled` bool<br>out: `then` exec, `success` bool | none |
+| <a id="setgravity"></a>`SetGravity` | Set Gravity | Physics | in: `exec` exec, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
+| <a id="setjointbreakable"></a>`SetJointBreakable` | Set Joint Breakable | Physics | in: `exec` exec, `joint` int, `maxForceN` float, `maxTorqueNm` float<br>out: `then` exec, `success` bool | none |
+| <a id="setlayercollision"></a>`SetLayerCollision` | Set Layer Collision | Physics | in: `exec` exec, `layerA` int, `layerB` int, `collide` bool<br>out: `then` exec, `success` bool | none |
+| <a id="setlockedaxes"></a>`SetLockedAxes` | Set Locked Axes | Physics | in: `exec` exec, `body` int, `lockX` bool, `lockY` bool, `lockZ` bool, `lockRotX` bool, `lockRotY` bool, `lockRotZ` bool<br>out: `then` exec, `success` bool | none |
+| <a id="spherecast"></a>`SphereCast` | Sphere Cast | Physics | in: `exec` exec, `originX` float, `originY` float, `originZ` float, `dirX` float, `dirY` float, `dirZ` float, `maxDist` float, `radius` float<br>out: `then` exec, `hit` bool, `body` int, `pointX` float, `pointY` float, `pointZ` float | none |
+| <a id="addtag"></a>`AddTag` | Add Tag | Scene | in: `exec` exec, `entity` int, `mask` int<br>out: `then` exec, `success` bool | none |
+| <a id="attachtosocket"></a>`AttachToSocket` | Attach To Socket | Scene | in: `entity` int, `parent` int<br>out: `success` bool | `socket` |
+| <a id="createentity"></a>`CreateEntity` | Create Entity | Scene | in: `exec` exec<br>out: `then` exec, `entity` int, `success` bool | `name` |
+| <a id="findentity"></a>`FindEntity` | Find Entity | Scene | out: `entity` int, `found` bool | `name` |
+| <a id="getanimcurve"></a>`GetAnimCurve` | Get Anim Curve | Scene | in: `entity` int<br>out: `value` float | `curve` |
+| <a id="getentitylocation"></a>`GetEntityLocation` | Get Entity Location | Scene | in: `e` entity<br>out: `location` float3 | none |
+| <a id="getfield"></a>`GetField` | Get Field | Scene | in: `entity` int<br>out: `value` float | `field` |
+| <a id="getfieldvec3"></a>`GetFieldVec3` | Get Field (Vec3) | Scene | in: `entity` int<br>out: `x` float, `y` float, `z` float | `field` |
+| <a id="getforward"></a>`GetForward` | Get Forward (Look) | Scene | in: `entity` int<br>out: `x` float, `y` float, `z` float, `eyeX` float, `eyeY` float, `eyeZ` float, `success` bool | none |
+| <a id="gettags"></a>`GetTags` | Get Tags | Scene | in: `entity` int<br>out: `mask` int | none |
+| <a id="getviewentity"></a>`GetViewEntity` | Get View Entity | Scene | in: `entity` int<br>out: `view` int, `success` bool | none |
+| <a id="hastag"></a>`HasTag` | Has Tag | Scene | in: `entity` int, `mask` int<br>out: `has` bool | none |
+| <a id="isvalidentity"></a>`IsValidEntity` | Is Valid Entity | Scene | in: `e` entity<br>out: `result` bool | none |
+| <a id="playanimation"></a>`PlayAnimation` | Play Animation | Scene | in: `entity` int, `loop` bool = true<br>out: `success` bool | `clip` |
+| <a id="ragdollimpulse"></a>`RagdollImpulse` | Ragdoll Impulse | Scene | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | `bone` |
+| <a id="ragdollstart"></a>`RagdollStart` | Ragdoll Start | Scene | in: `exec` exec, `entity` int, `mode` int, `blend` float<br>out: `then` exec, `success` bool | none |
+| <a id="ragdollstop"></a>`RagdollStop` | Ragdoll Stop | Scene | in: `exec` exec, `entity` int, `blend` float<br>out: `then` exec, `success` bool | none |
+| <a id="raycast"></a>`Raycast` | Raycast | Scene | in: `exec` exec, `originX` float, `originY` float, `originZ` float, `dirX` float, `dirY` float, `dirZ` float, `maxDist` float<br>out: `then` exec, `hit` bool, `entity` int, `pointX` float, `pointY` float, `pointZ` float | none |
+| <a id="raycastvector"></a>`RaycastVector` | Raycast Vector | Scene | in: `exec` exec, `origin` float3, `direction` float3, `maxDist` float = 10000<br>out: `then` exec, `hit` bool, `entity` entity, `point` float3 | none |
+| <a id="removetag"></a>`RemoveTag` | Remove Tag | Scene | in: `exec` exec, `entity` int, `mask` int<br>out: `then` exec, `success` bool | none |
+| <a id="setcontrolrig"></a>`SetControlRig` | Set Control Rig | Scene | in: `entity` int, `weight` float = 1<br>out: `success` bool | `rig` |
+| <a id="setentitylocation"></a>`SetEntityLocation` | Set Entity Location | Scene | in: `exec` exec, `e` entity, `location` float3<br>out: `then` exec | none |
+| <a id="setfield"></a>`SetField` | Set Field | Scene | in: `entity` int, `value` float<br>out: `success` bool | `field` |
+| <a id="setfieldvec3"></a>`SetFieldVec3` | Set Field (Vec3) | Scene | in: `entity` int, `x` float, `y` float, `z` float<br>out: `success` bool | `field` |
+| <a id="setmaterial"></a>`SetMaterial` | Set Material | Scene | in: `entity` int<br>out: `success` bool | `material` |
+| <a id="setmesh"></a>`SetMesh` | Set Mesh | Scene | in: `entity` int<br>out: `success` bool | `mesh` |
+| <a id="setname"></a>`SetName` | Set Name | Scene | in: `entity` int<br>out: `success` bool | `name` |
+| <a id="setparent"></a>`SetParent` | Set Parent | Scene | in: `child` int, `parent` int<br>out: `success` bool | none |
+| <a id="setragdollstrength"></a>`SetRagdollStrength` | Set Ragdoll Strength | Scene | in: `exec` exec, `entity` int, `strength` float<br>out: `then` exec, `success` bool | none |
+| <a id="setskeleton"></a>`SetSkeleton` | Set Skeleton | Scene | in: `entity` int<br>out: `success` bool | `skeleton` |
+| <a id="setvisible"></a>`SetVisible` | Set Visible | Scene | in: `exec` exec, `entity` int, `visible` bool<br>out: `then` exec, `success` bool | none |
+| <a id="booltostring"></a>`BoolToString` | Bool To String | String | in: `a` bool<br>out: `result` string | none |
+| <a id="floattostring"></a>`FloatToString` | Float To String | String | in: `a` float<br>out: `result` string | none |
+| <a id="inttostring"></a>`IntToString` | Int To String | String | in: `a` int<br>out: `result` string | none |
+| <a id="stringappend"></a>`StringAppend` | String Append | String | in: `a` string, `b` string<br>out: `result` string | none |
+| <a id="stringequals"></a>`StringEquals` | String Equals | String | in: `a` string, `b` string<br>out: `result` bool | none |
+| <a id="stringlength"></a>`StringLength` | String Length | String | in: `s` string<br>out: `result` int | none |
+| <a id="vectortostring"></a>`VectorToString` | Vector To String | String | in: `v` float3<br>out: `result` string | none |
+| <a id="breakstruct"></a>`BreakStruct` | Break Struct | Struct | none | `struct` |
+| <a id="makestruct"></a>`MakeStruct` | Make Struct | Struct | none | `struct` |
+| <a id="setstructfield"></a>`SetStructField` | Set Struct Field | Struct | none | `struct`, `field` |
+| <a id="destroyentity"></a>`DestroyEntity` | Destroy Entity | Transform | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none |
+| <a id="getentityforward"></a>`GetEntityForward` | Get Forward Axis | Transform | in: `entity` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
+| <a id="getentityright"></a>`GetEntityRight` | Get Right Axis | Transform | in: `entity` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
+| <a id="getentityup"></a>`GetEntityUp` | Get Up Axis | Transform | in: `entity` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
+| <a id="getlocalscale"></a>`GetLocalScale` | Get Local Scale | Transform | in: `entity` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
+| <a id="getworldposition"></a>`GetWorldPosition` | Get World Position | Transform | in: `entity` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
+| <a id="isactor"></a>`IsActor` | Is Actor | Transform | in: `entity` int<br>out: `isActor` bool | none |
+| <a id="isalive"></a>`IsAlive` | Is Alive | Transform | in: `entity` int<br>out: `alive` bool | none |
+| <a id="lookat"></a>`LookAt` | Look At | Transform | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
+| <a id="setlocalposition"></a>`SetLocalPosition` | Set Local Position | Transform | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
+| <a id="setlocalrotation"></a>`SetLocalRotation` | Set Local Rotation | Transform | in: `exec` exec, `entity` int, `yaw` float, `pitch` float, `roll` float<br>out: `then` exec, `success` bool | none |
+| <a id="setlocalscale"></a>`SetLocalScale` | Set Local Scale | Transform | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
+| <a id="translate"></a>`Translate` | Translate | Transform | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
+| <a id="getvar"></a>`GetVar` | Get Var | Var | out: `value` float | `var` |
+| <a id="setvar"></a>`SetVar` | Set Var | Var | in: `exec` exec, `value` float<br>out: `then` exec | `var` |
+| <a id="breakvector"></a>`BreakVector` | Break Vector | Vector | in: `v` float3<br>out: `x` float, `y` float, `z` float | none |
+| <a id="makevector"></a>`MakeVector` | Make Vector | Vector | in: `x` float, `y` float, `z` float<br>out: `v` float3 | none |
+| <a id="vecadd"></a>`VecAdd` | Vec Add | Vector | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `x` float, `y` float, `z` float | none |
+| <a id="veccross"></a>`VecCross` | Vec Cross | Vector | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `x` float, `y` float, `z` float | none |
+| <a id="vecdistance"></a>`VecDistance` | Vec Distance | Vector | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `result` float | none |
+| <a id="vecdot"></a>`VecDot` | Vec Dot | Vector | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `result` float | none |
+| <a id="veclength"></a>`VecLength` | Vec Length | Vector | in: `ax` float, `ay` float, `az` float<br>out: `result` float | none |
+| <a id="veclerp"></a>`VecLerp` | Vec Lerp | Vector | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float, `t` float<br>out: `x` float, `y` float, `z` float | none |
+| <a id="vecnormalize"></a>`VecNormalize` | Vec Normalize | Vector | in: `ax` float, `ay` float, `az` float<br>out: `x` float, `y` float, `z` float | none |
+| <a id="vecscale"></a>`VecScale` | Vec Scale | Vector | in: `ax` float, `ay` float, `az` float, `s` float<br>out: `x` float, `y` float, `z` float | none |
+| <a id="vecsub"></a>`VecSub` | Vec Subtract | Vector | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `x` float, `y` float, `z` float | none |
+| <a id="vectoradd"></a>`VectorAdd` | Vector Add | Vector | in: `a` float3, `b` float3<br>out: `result` float3 | none |
+| <a id="vectorcross"></a>`VectorCross` | Vector Cross | Vector | in: `a` float3, `b` float3<br>out: `result` float3 | none |
+| <a id="vectordistance"></a>`VectorDistance` | Vector Distance | Vector | in: `a` float3, `b` float3<br>out: `result` float | none |
+| <a id="vectordot"></a>`VectorDot` | Vector Dot | Vector | in: `a` float3, `b` float3<br>out: `result` float | none |
+| <a id="vectorlength"></a>`VectorLength` | Vector Length | Vector | in: `v` float3<br>out: `result` float | none |
+| <a id="vectorlerp"></a>`VectorLerp` | Vector Lerp | Vector | in: `a` float3, `b` float3, `t` float<br>out: `result` float3 | none |
+| <a id="vectornormalize"></a>`VectorNormalize` | Vector Normalize | Vector | in: `v` float3<br>out: `result` float3 | none |
+| <a id="vectorscale"></a>`VectorScale` | Vector Scale | Vector | in: `v` float3, `s` float = 1<br>out: `result` float3 | none |
+| <a id="vectorsubtract"></a>`VectorSubtract` | Vector Subtract | Vector | in: `a` float3, `b` float3<br>out: `result` float3 | none |
 
 ## Material graph (65)
 
 | Type | Display | Category | Pins | Attributes |
 |---|---|---|---|---|
-| `ConstFloat` | Const Float | Const | out: `value` float | none |
-| `ConstFloat2` | Const Float2 | Const | out: `value` float2 | none |
-| `ConstFloat3` | Const Float3 | Const | out: `value` float3 | none |
-| `ConstFloat4` | Const Float4 | Const | out: `value` float4 | none |
-| `CallFunction` | Call Function | Function | none | `function` |
-| `FunctionInput` | Function Input | Function | out: `value` float | `name` |
-| `FunctionOutput` | Function Output | Function | in: `value` float | `name` |
-| `CameraPosition` | Camera Position | Input | out: `xyz` float3 | none |
-| `ObjectPosition` | Object Position | Input | out: `xyz` float3 | none |
-| `UV` | UV | Input | out: `uv` float2 | none |
-| `ViewDirection` | View Direction | Input | out: `xyz` float3 | none |
-| `WorldNormal` | World Normal | Input | out: `xyz` float3 | none |
-| `WorldPosition` | World Position | Input | out: `xyz` float3 | none |
-| `Abs` | Abs | Math | in: `x` float3<br>out: `result` float3 | none |
-| `Add` | Add | Math | in: `a` float3, `b` float3<br>out: `result` float3 | none |
-| `Ceil` | Ceil | Math | in: `x` float3<br>out: `result` float3 | none |
-| `Clamp` | Clamp | Math | in: `x` float3, `lo` float = 0, `hi` float = 1<br>out: `result` float3 | none |
-| `Cos` | Cos | Math | in: `x` float3<br>out: `result` float3 | none |
-| `Divide` | Divide | Math | in: `a` float3, `b` float3<br>out: `result` float3 | none |
-| `Exp` | Exp | Math | in: `x` float3<br>out: `result` float3 | none |
-| `Floor` | Floor | Math | in: `x` float3<br>out: `result` float3 | none |
-| `Frac` | Frac | Math | in: `x` float3<br>out: `result` float3 | none |
-| `Lerp` | Lerp | Math | in: `a` float3, `b` float3, `t` float = 0.5<br>out: `result` float3 | none |
-| `Log` | Log | Math | in: `x` float3<br>out: `result` float3 | none |
-| `Max` | Max | Math | in: `a` float3, `b` float3<br>out: `result` float3 | none |
-| `Min` | Min | Math | in: `a` float3, `b` float3<br>out: `result` float3 | none |
-| `Modulo` | Modulo | Math | in: `a` float3, `b` float3<br>out: `result` float3 | none |
-| `Multiply` | Multiply | Math | in: `a` float3, `b` float3<br>out: `result` float3 | none |
-| `Normalize` | Normalize | Math | in: `x` float3<br>out: `result` float3 | none |
-| `OneMinus` | One Minus | Math | in: `x` float3<br>out: `result` float3 | none |
-| `Power` | Power | Math | in: `a` float3, `b` float3<br>out: `result` float3 | none |
-| `Remap` | Remap | Math | in: `x` float, `inMin` float = 0, `inMax` float = 1, `outMin` float = 0, `outMax` float = 1<br>out: `result` float | none |
-| `Saturate` | Saturate | Math | in: `x` float3<br>out: `result` float3 | none |
-| `Sign` | Sign | Math | in: `x` float3<br>out: `result` float3 | none |
-| `Sin` | Sin | Math | in: `x` float3<br>out: `result` float3 | none |
-| `Smoothstep` | Smoothstep | Math | in: `edge0` float = 0, `edge1` float = 1, `x` float<br>out: `result` float | none |
-| `Sqrt` | Sqrt | Math | in: `x` float3<br>out: `result` float3 | none |
-| `Step` | Step | Math | in: `edge` float = 0.5, `x` float<br>out: `result` float | none |
-| `Subtract` | Subtract | Math | in: `a` float3, `b` float3<br>out: `result` float3 | none |
-| `Tan` | Tan | Math | in: `x` float3<br>out: `result` float3 | none |
-| `MaterialOutput` | Material Output | Output | in: `BaseColor` float3, `Metallic` float, `Roughness` float, `Normal` float3, `Emissive` float3, `Occlusion` float, `Opacity` float, `AlphaCutoff` float, `SubsurfaceWeight` float, `SubsurfaceRadius` float, `SubsurfaceColor` float3, `Ior` float, `Transmission` float, `AttenuationColor` float3, `AttenuationDistance` float, `ScatterColor` float3, `ScatterAnisotropy` float, `CoatWeight` float, `CoatRoughness` float, `CoatF0` float | none |
-| `ScalarParameter` | Scalar Parameter | Parameter | out: `value` float | `name` |
-| `VectorParameter` | Vector Parameter | Parameter | out: `value` float4 | `name` |
-| `Checker` | Checker | Procedural | in: `uv` float2, `scale` float = 8<br>out: `result` float | none |
-| `Noise` | Noise | Procedural | in: `uv` float2, `scale` float = 8<br>out: `result` float | none |
-| `SampleTexture` | Sample Texture | Texture | in: `uv` float2<br>out: `rgb` float3, `a` float, `rgba` float4 | `slot` |
-| `Fresnel` | Fresnel | Utility | in: `power` float = 5<br>out: `result` float | none |
-| `If` | If | Utility | in: `a` float, `b` float, `ifTrue` float3, `ifFalse` float3<br>out: `result` float3 | none |
-| `Time` | Time | Utility | out: `time` float, `raw` float, `delta` float | none |
-| `Panner` | Panner | UV | in: `uv` float2, `speed` float2 = 0,0, `time` float<br>out: `result` float2 | none |
-| `Rotator` | Rotator | UV | in: `uv` float2, `centre` float2 = 0.5,0.5, `angle` float = 0<br>out: `result` float2 | none |
-| `TilingOffset` | Tiling / Offset | UV | in: `uv` float2, `tiling` float2 = 1,1, `offset` float2 = 0,0<br>out: `result` float2 | none |
-| `BlendNormals` | Blend Normals | Vector | in: `a` float3, `b` float3<br>out: `result` float3 | none |
-| `Cross` | Cross | Vector | in: `a` float3, `b` float3<br>out: `result` float3 | none |
-| `Distance` | Distance | Vector | in: `a` float3, `b` float3<br>out: `result` float | none |
-| `Dot` | Dot | Vector | in: `a` float3, `b` float3<br>out: `result` float | none |
-| `Length` | Length | Vector | in: `x` float3<br>out: `result` float | none |
-| `MakeFloat2` | Make Float2 | Vector | in: `x` float, `y` float<br>out: `result` float2 | none |
-| `MakeFloat3` | Make Float3 | Vector | in: `x` float, `y` float, `z` float<br>out: `result` float3 | none |
-| `MakeFloat4` | Make Float4 | Vector | in: `x` float, `y` float, `z` float, `w` float<br>out: `result` float4 | none |
-| `Reflect` | Reflect | Vector | in: `i` float3, `n` float3<br>out: `result` float3 | none |
-| `Split` | Split | Vector | in: `x` float3<br>out: `x` float, `y` float, `z` float, `w` float | none |
-| `Swizzle` | Swizzle | Vector | in: `x` float3<br>out: `result` float | `mask` |
-| `FlowNormal` | Flow Normal | Water | in: `position` float2, `flow` float2, `cycle` float = 1.5<br>out: `value` float3 | none |
-| `VertexFlow` | Vertex Flow | Water | out: `velocity` float2, `speed` float | none |
+| <a id="material-constfloat"></a>`ConstFloat` | Const Float | Const | out: `value` float | none |
+| <a id="material-constfloat2"></a>`ConstFloat2` | Const Float2 | Const | out: `value` float2 | none |
+| <a id="material-constfloat3"></a>`ConstFloat3` | Const Float3 | Const | out: `value` float3 | none |
+| <a id="material-constfloat4"></a>`ConstFloat4` | Const Float4 | Const | out: `value` float4 | none |
+| <a id="material-callfunction"></a>`CallFunction` | Call Function | Function | none | `function` |
+| <a id="material-functioninput"></a>`FunctionInput` | Function Input | Function | out: `value` float | `name` |
+| <a id="material-functionoutput"></a>`FunctionOutput` | Function Output | Function | in: `value` float | `name` |
+| <a id="material-cameraposition"></a>`CameraPosition` | Camera Position | Input | out: `xyz` float3 | none |
+| <a id="material-objectposition"></a>`ObjectPosition` | Object Position | Input | out: `xyz` float3 | none |
+| <a id="material-uv"></a>`UV` | UV | Input | out: `uv` float2 | none |
+| <a id="material-viewdirection"></a>`ViewDirection` | View Direction | Input | out: `xyz` float3 | none |
+| <a id="material-worldnormal"></a>`WorldNormal` | World Normal | Input | out: `xyz` float3 | none |
+| <a id="material-worldposition"></a>`WorldPosition` | World Position | Input | out: `xyz` float3 | none |
+| <a id="material-abs"></a>`Abs` | Abs | Math | in: `x` float3<br>out: `result` float3 | none |
+| <a id="material-add"></a>`Add` | Add | Math | in: `a` float3, `b` float3<br>out: `result` float3 | none |
+| <a id="material-ceil"></a>`Ceil` | Ceil | Math | in: `x` float3<br>out: `result` float3 | none |
+| <a id="material-clamp"></a>`Clamp` | Clamp | Math | in: `x` float3, `lo` float = 0, `hi` float = 1<br>out: `result` float3 | none |
+| <a id="material-cos"></a>`Cos` | Cos | Math | in: `x` float3<br>out: `result` float3 | none |
+| <a id="material-divide"></a>`Divide` | Divide | Math | in: `a` float3, `b` float3<br>out: `result` float3 | none |
+| <a id="material-exp"></a>`Exp` | Exp | Math | in: `x` float3<br>out: `result` float3 | none |
+| <a id="material-floor"></a>`Floor` | Floor | Math | in: `x` float3<br>out: `result` float3 | none |
+| <a id="material-frac"></a>`Frac` | Frac | Math | in: `x` float3<br>out: `result` float3 | none |
+| <a id="material-lerp"></a>`Lerp` | Lerp | Math | in: `a` float3, `b` float3, `t` float = 0.5<br>out: `result` float3 | none |
+| <a id="material-log"></a>`Log` | Log | Math | in: `x` float3<br>out: `result` float3 | none |
+| <a id="material-max"></a>`Max` | Max | Math | in: `a` float3, `b` float3<br>out: `result` float3 | none |
+| <a id="material-min"></a>`Min` | Min | Math | in: `a` float3, `b` float3<br>out: `result` float3 | none |
+| <a id="material-modulo"></a>`Modulo` | Modulo | Math | in: `a` float3, `b` float3<br>out: `result` float3 | none |
+| <a id="material-multiply"></a>`Multiply` | Multiply | Math | in: `a` float3, `b` float3<br>out: `result` float3 | none |
+| <a id="material-normalize"></a>`Normalize` | Normalize | Math | in: `x` float3<br>out: `result` float3 | none |
+| <a id="material-oneminus"></a>`OneMinus` | One Minus | Math | in: `x` float3<br>out: `result` float3 | none |
+| <a id="material-power"></a>`Power` | Power | Math | in: `a` float3, `b` float3<br>out: `result` float3 | none |
+| <a id="material-remap"></a>`Remap` | Remap | Math | in: `x` float, `inMin` float = 0, `inMax` float = 1, `outMin` float = 0, `outMax` float = 1<br>out: `result` float | none |
+| <a id="material-saturate"></a>`Saturate` | Saturate | Math | in: `x` float3<br>out: `result` float3 | none |
+| <a id="material-sign"></a>`Sign` | Sign | Math | in: `x` float3<br>out: `result` float3 | none |
+| <a id="material-sin"></a>`Sin` | Sin | Math | in: `x` float3<br>out: `result` float3 | none |
+| <a id="material-smoothstep"></a>`Smoothstep` | Smoothstep | Math | in: `edge0` float = 0, `edge1` float = 1, `x` float<br>out: `result` float | none |
+| <a id="material-sqrt"></a>`Sqrt` | Sqrt | Math | in: `x` float3<br>out: `result` float3 | none |
+| <a id="material-step"></a>`Step` | Step | Math | in: `edge` float = 0.5, `x` float<br>out: `result` float | none |
+| <a id="material-subtract"></a>`Subtract` | Subtract | Math | in: `a` float3, `b` float3<br>out: `result` float3 | none |
+| <a id="material-tan"></a>`Tan` | Tan | Math | in: `x` float3<br>out: `result` float3 | none |
+| <a id="material-materialoutput"></a>`MaterialOutput` | Material Output | Output | in: `BaseColor` float3, `Metallic` float, `Roughness` float, `Normal` float3, `Emissive` float3, `Occlusion` float, `Opacity` float, `AlphaCutoff` float, `SubsurfaceWeight` float, `SubsurfaceRadius` float, `SubsurfaceColor` float3, `Ior` float, `Transmission` float, `AttenuationColor` float3, `AttenuationDistance` float, `ScatterColor` float3, `ScatterAnisotropy` float, `CoatWeight` float, `CoatRoughness` float, `CoatF0` float | none |
+| <a id="material-scalarparameter"></a>`ScalarParameter` | Scalar Parameter | Parameter | out: `value` float | `name` |
+| <a id="material-vectorparameter"></a>`VectorParameter` | Vector Parameter | Parameter | out: `value` float4 | `name` |
+| <a id="material-checker"></a>`Checker` | Checker | Procedural | in: `uv` float2, `scale` float = 8<br>out: `result` float | none |
+| <a id="material-noise"></a>`Noise` | Noise | Procedural | in: `uv` float2, `scale` float = 8<br>out: `result` float | none |
+| <a id="material-sampletexture"></a>`SampleTexture` | Sample Texture | Texture | in: `uv` float2<br>out: `rgb` float3, `a` float, `rgba` float4 | `slot` |
+| <a id="material-fresnel"></a>`Fresnel` | Fresnel | Utility | in: `power` float = 5<br>out: `result` float | none |
+| <a id="material-if"></a>`If` | If | Utility | in: `a` float, `b` float, `ifTrue` float3, `ifFalse` float3<br>out: `result` float3 | none |
+| <a id="material-time"></a>`Time` | Time | Utility | out: `time` float, `raw` float, `delta` float | none |
+| <a id="material-panner"></a>`Panner` | Panner | UV | in: `uv` float2, `speed` float2 = 0,0, `time` float<br>out: `result` float2 | none |
+| <a id="material-rotator"></a>`Rotator` | Rotator | UV | in: `uv` float2, `centre` float2 = 0.5,0.5, `angle` float = 0<br>out: `result` float2 | none |
+| <a id="material-tilingoffset"></a>`TilingOffset` | Tiling / Offset | UV | in: `uv` float2, `tiling` float2 = 1,1, `offset` float2 = 0,0<br>out: `result` float2 | none |
+| <a id="material-blendnormals"></a>`BlendNormals` | Blend Normals | Vector | in: `a` float3, `b` float3<br>out: `result` float3 | none |
+| <a id="material-cross"></a>`Cross` | Cross | Vector | in: `a` float3, `b` float3<br>out: `result` float3 | none |
+| <a id="material-distance"></a>`Distance` | Distance | Vector | in: `a` float3, `b` float3<br>out: `result` float | none |
+| <a id="material-dot"></a>`Dot` | Dot | Vector | in: `a` float3, `b` float3<br>out: `result` float | none |
+| <a id="material-length"></a>`Length` | Length | Vector | in: `x` float3<br>out: `result` float | none |
+| <a id="material-makefloat2"></a>`MakeFloat2` | Make Float2 | Vector | in: `x` float, `y` float<br>out: `result` float2 | none |
+| <a id="material-makefloat3"></a>`MakeFloat3` | Make Float3 | Vector | in: `x` float, `y` float, `z` float<br>out: `result` float3 | none |
+| <a id="material-makefloat4"></a>`MakeFloat4` | Make Float4 | Vector | in: `x` float, `y` float, `z` float, `w` float<br>out: `result` float4 | none |
+| <a id="material-reflect"></a>`Reflect` | Reflect | Vector | in: `i` float3, `n` float3<br>out: `result` float3 | none |
+| <a id="material-split"></a>`Split` | Split | Vector | in: `x` float3<br>out: `x` float, `y` float, `z` float, `w` float | none |
+| <a id="material-swizzle"></a>`Swizzle` | Swizzle | Vector | in: `x` float3<br>out: `result` float | `mask` |
+| <a id="material-flownormal"></a>`FlowNormal` | Flow Normal | Water | in: `position` float2, `flow` float2, `cycle` float = 1.5<br>out: `value` float3 | none |
+| <a id="material-vertexflow"></a>`VertexFlow` | Vertex Flow | Water | out: `velocity` float2, `speed` float | none |

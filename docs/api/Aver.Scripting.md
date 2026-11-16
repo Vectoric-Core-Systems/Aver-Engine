@@ -2,206 +2,390 @@
 
 # Aver.Scripting public API
 
-18 public types and 153 public members, read from `scripting/csharp/Aver.Scripting/` (4 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+18 public types and 153 public members, read from `scripting/csharp/Aver.Scripting/` (4 source files). Members are grouped by kind and sorted alphabetically; signatures are single lines as declared, and the summary is the first sentence of the XML summary. Every type in every assembly: [index](index.md); every member: [members-a-z](members-a-z.md).
+
+## Contents
+
+**namespace Aver.Scripting**
+
+- Classes: [AverBehaviour](#averbehaviour), [Log](#log), [Pbr](#pbr), [Voxi](#voxi)
+- Structs: [Pbr.PbrMaterial](#pbr-pbrmaterial)
+- Enums: [Log.Level](#log-level), [PbrAlphaExtension](#pbralphaextension), [PbrAlphaMode](#pbralphamode), [PbrChannel](#pbrchannel), [PbrFeature](#pbrfeature), [PbrSamplerAddress](#pbrsampleraddress), [PbrSamplerFilter](#pbrsamplerfilter), [PbrStatus](#pbrstatus), [PbrTextureSlot](#pbrtextureslot), [PbrUvMode](#pbruvmode), [VoxiFeature](#voxifeature), [VoxiQuality](#voxiquality), [VoxiStatus](#voxistatus)
 
 ## namespace Aver.Scripting
+
+<a id="averbehaviour"></a>
 
 ### AverBehaviour
 
 `public abstract class AverBehaviour` - Base class for a gameplay script.
 
-- `public virtual void OnStart()` - Called once, immediately after the behaviour is constructed.
-- `public virtual void OnUpdate(float dt)` - Called once per frame.
-- `public virtual void OnShutdown()` - Called once as the host shuts down, or when the assembly is about to be unloaded.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `OnShutdown` | `public virtual void OnShutdown()` | Called once as the host shuts down, or when the assembly is about to be unloaded. |
+| `OnStart` | `public virtual void OnStart()` | Called once, immediately after the behaviour is constructed. |
+| `OnUpdate` | `public virtual void OnUpdate(float dt)` | Called once per frame. |
+
+<a id="log"></a>
 
 ### Log
 
 `public static class Log` - Script-facing logging.
 
-- `public delegate void Sink(Level level, string message)` - Receives every log call.
-- `public static void SetSink(Sink? sink)` - Installs (or clears, with null) the host's log sink.
-- `public static bool HasHost { get; }` - True when a host is receiving these messages rather than the console.
-- `public static void Trace(string message)` - Logs at Trace.
-- `public static void Info(string message)` - Logs at Info.
-- `public static void Warn(string message)` - Logs at Warn.
-- `public static void Error(string message)` - Logs at Error.
-- `public static void Critical(string message)` - Logs at Critical: the process is still running but is now a candidate to die.
-- `public static void Fatal(string message)` - Logs at Fatal.
-- `public static void Write(Level level, string message)` - Logs one message at a level.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `HasHost` | `public static bool HasHost { get; }` | True when a host is receiving these messages rather than the console. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Critical` | `public static void Critical(string message)` | Logs at Critical: the process is still running but is now a candidate to die. |
+| `Error` | `public static void Error(string message)` | Logs at Error. |
+| `Fatal` | `public static void Fatal(string message)` | Logs at Fatal. |
+| `Info` | `public static void Info(string message)` | Logs at Info. |
+| `SetSink` | `public static void SetSink(Sink? sink)` | Installs (or clears, with null) the host's log sink. |
+| `Trace` | `public static void Trace(string message)` | Logs at Trace. |
+| `Warn` | `public static void Warn(string message)` | Logs at Warn. |
+| `Write` | `public static void Write(Level level, string message)` | Logs one message at a level. |
+
+**Delegates**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Sink` | `public delegate void Sink(Level level, string message)` | Receives every log call. |
+
+<a id="log-level"></a>
 
 ### Log.Level
 
 `public enum Level` - Levels match aver::LogLevel and the AVER_SCRIPT_LOG_* codes in scripting_abi.h.
 
-Values: `Trace = 0`, `Info = 1`, `Warn = 2`, `Error = 3`, `Critical = 4`, `Fatal = 5`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Critical` | `Critical = 4` |  |
+| `Error` | `Error = 3` |  |
+| `Fatal` | `Fatal = 5` |  |
+| `Info` | `Info = 1` |  |
+| `Trace` | `Trace = 0` |  |
+| `Warn` | `Warn = 2` |  |
+
+<a id="pbr"></a>
 
 ### Pbr
 
 `public static class Pbr` - Creates and addresses PBR materials over the aver_pbr_* C ABI.
 
-- `public static int FeatureCount { get; }` - ---- feature introspection ----
-- `public static string NameOf(PbrFeature f)` - The feature's display name.
-- `public static PbrStatus StatusOf(PbrFeature f)` - Whether the feature reaches the screen.
-- `public static string StatusTextOf(PbrFeature f)` - One line explaining the feature's status.
-- `public static bool IsAvailable(PbrFeature f)` - True when the feature is Ready.
-- `public static string NameOf(PbrTextureSlot s)` - The .ocmat TEX slot name, e.g.
-- `public static string NameOf(PbrAlphaMode m)` - The .ocmat BLEND name, e.g.
-- `public static string NameOf(PbrUvMode m)` - The .ocmat UV mode name.
-- `public static PbrMaterial Create(string name)` - Creates a material with the glTF default surface.
-- `public static int Count { get; }` - Live materials.
-- `public static PbrMaterial At(int index)` - The material at an enumeration index.
-- `public static PbrMaterial Find(string name)` - The live material with this name (a material loaded from M_Wood.ocmat is named "M_Wood"): the instance a surface of that name draws with, so a property set on it reaches the screen on the next frame.
-- `public static PbrMaterial FromHandle(int handle)` - Wraps a raw ABI handle read earlier (Handle).
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Count` | `public static int Count { get; }` | Live materials. |
+| `FeatureCount` | `public static int FeatureCount { get; }` | ---- feature introspection ---- |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `At` | `public static PbrMaterial At(int index)` | The material at an enumeration index. |
+| `Create` | `public static PbrMaterial Create(string name)` | Creates a material with the glTF default surface. |
+| `Find` | `public static PbrMaterial Find(string name)` | The live material with this name (a material loaded from M_Wood.ocmat is named "M_Wood"): the instance a surface of that name draws with, so a property set on it reaches the screen on the next frame. |
+| `FromHandle` | `public static PbrMaterial FromHandle(int handle)` | Wraps a raw ABI handle read earlier (Handle). |
+| `IsAvailable` | `public static bool IsAvailable(PbrFeature f)` | True when the feature is Ready. |
+| `NameOf` | `public static string NameOf(PbrAlphaMode m)` | The .ocmat BLEND name, e.g. |
+| `NameOf` | `public static string NameOf(PbrFeature f)` | The feature's display name. |
+| `NameOf` | `public static string NameOf(PbrTextureSlot s)` | The .ocmat TEX slot name, e.g. |
+| `NameOf` | `public static string NameOf(PbrUvMode m)` | The .ocmat UV mode name. |
+| `StatusOf` | `public static PbrStatus StatusOf(PbrFeature f)` | Whether the feature reaches the screen. |
+| `StatusTextOf` | `public static string StatusTextOf(PbrFeature f)` | One line explaining the feature's status. |
+
+<a id="pbr-pbrmaterial"></a>
 
 ### Pbr.PbrMaterial
 
 `public readonly struct PbrMaterial : IEquatable<PbrMaterial>` - A generational handle to one material, with its properties.
 
-- `public int Handle { get; }` - The raw ABI handle.
-- `public bool IsValid { get; }`
-- `public bool Destroy()` - Destroys the material.
-- `public string Name { get; set; }`
-- `public (float R, float G, float B, float A) BaseColorFactor` - Base colour tint, rgba.
-- `public (float R, float G, float B) EmissiveFactor` - Emissive radiance, rgb.
-- `public float EmissiveEnergy { get; set; }` - A scale on the glow, multiplied into EmissiveFactor where the material is packed.
-- `public float MetallicFactor { get; set; }`
-- `public float RoughnessFactor { get; set; }` - Clamped away from 0: a perfect mirror collapses the GGX denominator.
-- `public float NormalScale { get; set; }`
-- `public float OcclusionStrength { get; set; }`
-- `public float Reflectance { get; set; }` - Normal-incidence reflectance of the DIELECTRIC substrate, in [0,1].
-- `public float F90 { get; set; }` - Reflectance at grazing incidence, in [0,1].
-- `public float Ior { get; set; }` - Refractive index of the substrate.
-- `public float Transmission { get; set; }` - [0,1] how optically see-through the substrate is, independent of where the camera stands.
-- `public float SubsurfaceWeight { get; set; }` - [0,1] how far light wraps past the terminator.
-- `public float CoatWeight { get; set; }` - [0,1] how much clear coat sits over the base material — car paint, varnish, a wet stone.
-- `public float CoatRoughness { get; set; }` - [0,1] the coat film's own roughness, independent of the base's.
-- `public float CoatF0 { get; set; }` - Normal-incidence reflectance of the coat film.
-- `public float SubsurfaceRadius { get; set; }` - [0,1] thickness PROXY that widens the back-scatter lobe — light entering the far side of the mesh and travelling toward the eye, which is what makes a leaf or an ear light up when the sun is behind it.
-- `public (float R, float G, float B) SubsurfaceColor` - sRGB tint the scattered light takes INSIDE the material, authored like BaseColorFactor and multiplied onto the diffuse albedo for the subsurface terms.
-- `public PbrAlphaMode AlphaMode { get; set; }`
-- `public float AlphaCutoff { get; set; }` - Read only under Mask.
-- `public bool TwoSided { get; set; }`
-- `public bool CastShadow { get; set; }`
-- `public PbrUvMode UvMode { get; set; }` - See PbrUvMode.
-- `public float UvTiling { get; set; }` - World CENTIMETRES per texture tile.
-- `public (float ScaleX, float ScaleY, float OffsetX, float OffsetY) Uv1Transform` - First-UV scale (x, y) and offset (x, y).
-- `public (float ScaleX, float ScaleY, float OffsetX, float OffsetY) Uv2Transform` - Second-UV scale and offset, read by the maps that ask for UV2 (needs a mesh with a second UV set).
-- `public PbrSamplerFilter SamplerFilter { get; set; }` - How this material's textures are filtered.
-- `public PbrSamplerAddress SamplerAddress { get; set; }` - What a lookup outside 0..1 does.
-- `public PbrChannel RoughnessChannel { get; set; }` - The channel of the metal-rough texture roughness is read from (default G).
-- `public PbrChannel MetallicChannel { get; set; }` - The channel of the metal-rough texture metallic is read from (default B).
-- `public bool VertexColor { get; set; }` - Whether the mesh's vertex colour tints the albedo and the opacity (only on a mesh that carries the colour stream).
-- `public bool VertexColorSrgb { get; set; }` - Whether the vertex colour is sRGB-encoded and is decoded to linear before it tints.
-- `public PbrAlphaExtension AlphaExtension { get; set; }` - Hashed or alpha-to-coverage-style coverage instead of blend or scissor.
-- `public string GetTexturePath(PbrTextureSlot slot)` - The authoring path bound to a slot.
-- `public bool SetTexturePath(PbrTextureSlot slot, string path)` - Binds an authoring path to a slot.
-- `public long GetTextureId(PbrTextureSlot slot)` - Opaque asset id (an ObjectId or an .octex GUID).
-- `public bool SetTextureId(PbrTextureSlot slot, long id)` - Binds an opaque asset id to a slot.
-- `public bool ClearTexture(PbrTextureSlot slot)` - Clears both the path and the id on a slot.
-- `public bool ConsumeDirty()` - True when this material owes the GPU an upload.
-- `public int EmbeddedRegisterCount { get; }` - How many 16-byte uniform registers the material carries; 0 for an ordinary material.
-- `public float[] GetEmbeddedRegisters()` - The uniform table, four floats a register (ints and bools are 32-bit patterns); empty for an ordinary material.
-- `public bool SetEmbeddedRegisters(float[] values)` - Replaces the whole table (an empty array clears it).
-- `public bool SetEmbeddedRegisterFloats(int firstFloat, float[] values)` - Overwrites a range of the table, starting at a float index.
-- `public bool Equals(PbrMaterial other)`
-- `public override bool Equals(object? obj)`
-- `public override int GetHashCode()`
-- `public override string ToString()`
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AlphaCutoff` | `public float AlphaCutoff { get; set; }` | Read only under Mask. |
+| `AlphaExtension` | `public PbrAlphaExtension AlphaExtension { get; set; }` | Hashed or alpha-to-coverage-style coverage instead of blend or scissor. |
+| `AlphaMode` | `public PbrAlphaMode AlphaMode { get; set; }` |  |
+| `CastShadow` | `public bool CastShadow { get; set; }` |  |
+| `CoatF0` | `public float CoatF0 { get; set; }` | Normal-incidence reflectance of the coat film. |
+| `CoatRoughness` | `public float CoatRoughness { get; set; }` | [0,1] the coat film's own roughness, independent of the base's. |
+| `CoatWeight` | `public float CoatWeight { get; set; }` | [0,1] how much clear coat sits over the base material — car paint, varnish, a wet stone. |
+| `EmbeddedRegisterCount` | `public int EmbeddedRegisterCount { get; }` | How many 16-byte uniform registers the material carries; 0 for an ordinary material. |
+| `EmissiveEnergy` | `public float EmissiveEnergy { get; set; }` | A scale on the glow, multiplied into EmissiveFactor where the material is packed. |
+| `F90` | `public float F90 { get; set; }` | Reflectance at grazing incidence, in [0,1]. |
+| `Handle` | `public int Handle { get; }` | The raw ABI handle. |
+| `Ior` | `public float Ior { get; set; }` | Refractive index of the substrate. |
+| `IsValid` | `public bool IsValid { get; }` |  |
+| `MetallicChannel` | `public PbrChannel MetallicChannel { get; set; }` | The channel of the metal-rough texture metallic is read from (default B). |
+| `MetallicFactor` | `public float MetallicFactor { get; set; }` |  |
+| `Name` | `public string Name { get; set; }` |  |
+| `NormalScale` | `public float NormalScale { get; set; }` |  |
+| `OcclusionStrength` | `public float OcclusionStrength { get; set; }` |  |
+| `Reflectance` | `public float Reflectance { get; set; }` | Normal-incidence reflectance of the DIELECTRIC substrate, in [0,1]. |
+| `RoughnessChannel` | `public PbrChannel RoughnessChannel { get; set; }` | The channel of the metal-rough texture roughness is read from (default G). |
+| `RoughnessFactor` | `public float RoughnessFactor { get; set; }` | Clamped away from 0: a perfect mirror collapses the GGX denominator. |
+| `SamplerAddress` | `public PbrSamplerAddress SamplerAddress { get; set; }` | What a lookup outside 0..1 does. |
+| `SamplerFilter` | `public PbrSamplerFilter SamplerFilter { get; set; }` | How this material's textures are filtered. |
+| `SubsurfaceRadius` | `public float SubsurfaceRadius { get; set; }` | [0,1] thickness PROXY that widens the back-scatter lobe — light entering the far side of the mesh and travelling toward the eye, which is what makes a leaf or an ear light up when the sun is behind it. |
+| `SubsurfaceWeight` | `public float SubsurfaceWeight { get; set; }` | [0,1] how far light wraps past the terminator. |
+| `Transmission` | `public float Transmission { get; set; }` | [0,1] how optically see-through the substrate is, independent of where the camera stands. |
+| `TwoSided` | `public bool TwoSided { get; set; }` |  |
+| `UvMode` | `public PbrUvMode UvMode { get; set; }` | See PbrUvMode. |
+| `UvTiling` | `public float UvTiling { get; set; }` | World CENTIMETRES per texture tile. |
+| `VertexColor` | `public bool VertexColor { get; set; }` | Whether the mesh's vertex colour tints the albedo and the opacity (only on a mesh that carries the colour stream). |
+| `VertexColorSrgb` | `public bool VertexColorSrgb { get; set; }` | Whether the vertex colour is sRGB-encoded and is decoded to linear before it tints. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ClearTexture` | `public bool ClearTexture(PbrTextureSlot slot)` | Clears both the path and the id on a slot. |
+| `ConsumeDirty` | `public bool ConsumeDirty()` | True when this material owes the GPU an upload. |
+| `Destroy` | `public bool Destroy()` | Destroys the material. |
+| `Equals` | `public bool Equals(PbrMaterial other)` |  |
+| `Equals` | `public override bool Equals(object? obj)` |  |
+| `GetEmbeddedRegisters` | `public float[] GetEmbeddedRegisters()` | The uniform table, four floats a register (ints and bools are 32-bit patterns); empty for an ordinary material. |
+| `GetHashCode` | `public override int GetHashCode()` |  |
+| `GetTextureId` | `public long GetTextureId(PbrTextureSlot slot)` | Opaque asset id (an ObjectId or an .octex GUID). |
+| `GetTexturePath` | `public string GetTexturePath(PbrTextureSlot slot)` | The authoring path bound to a slot. |
+| `public` | `public (float R, float G, float B) EmissiveFactor` | Emissive radiance, rgb. |
+| `public` | `public (float R, float G, float B) SubsurfaceColor` | sRGB tint the scattered light takes INSIDE the material, authored like BaseColorFactor and multiplied onto the diffuse albedo for the subsurface terms. |
+| `public` | `public (float R, float G, float B, float A) BaseColorFactor` | Base colour tint, rgba. |
+| `public` | `public (float ScaleX, float ScaleY, float OffsetX, float OffsetY) Uv1Transform` | First-UV scale (x, y) and offset (x, y). |
+| `public` | `public (float ScaleX, float ScaleY, float OffsetX, float OffsetY) Uv2Transform` | Second-UV scale and offset, read by the maps that ask for UV2 (needs a mesh with a second UV set). |
+| `SetEmbeddedRegisterFloats` | `public bool SetEmbeddedRegisterFloats(int firstFloat, float[] values)` | Overwrites a range of the table, starting at a float index. |
+| `SetEmbeddedRegisters` | `public bool SetEmbeddedRegisters(float[] values)` | Replaces the whole table (an empty array clears it). |
+| `SetTextureId` | `public bool SetTextureId(PbrTextureSlot slot, long id)` | Binds an opaque asset id to a slot. |
+| `SetTexturePath` | `public bool SetTexturePath(PbrTextureSlot slot, string path)` | Binds an authoring path to a slot. |
+| `ToString` | `public override string ToString()` |  |
+
+<a id="pbralphaextension"></a>
 
 ### PbrAlphaExtension
 
 `public enum PbrAlphaExtension` - How a material's coverage is discarded in raster draws (.ocmat FX alphaext).
 
-Values: `None = 0`, `Hash = 1`, `Antialias = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Antialias` | `Antialias = 2` |  |
+| `Hash` | `Hash = 1` |  |
+| `None` | `None = 0` |  |
+
+<a id="pbralphamode"></a>
 
 ### PbrAlphaMode
 
 `public enum PbrAlphaMode` - How base colour alpha is interpreted (.ocmat BLEND).
 
-Values: `Opaque = 0`, `Mask = 1`, `Blend = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Blend` | `Blend = 2` |  |
+| `Mask` | `Mask = 1` |  |
+| `Opaque` | `Opaque = 0` |  |
+
+<a id="pbrchannel"></a>
 
 ### PbrChannel
 
 `public enum PbrChannel` - Which channel of the metal-rough texture a scalar reads (.ocmat FX roughchan / metalchan).
 
-Values: `R = 0`, `G = 1`, `B = 2`, `A = 3`, `Gray = 4`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `A` | `A = 3` |  |
+| `B` | `B = 2` |  |
+| `G` | `G = 1` |  |
+| `Gray` | `Gray = 4` |  |
+| `R` | `R = 0` |  |
+
+<a id="pbrfeature"></a>
 
 ### PbrFeature
 
 `public enum PbrFeature` - The parts of a material, reported individually.
 
-Values: `Factors = 0`, `BaseColorMap = 1`, `MetalRoughMap = 2`, `NormalMap = 3`, `OcclusionMap = 4`, `EmissiveMap = 5`, `AlphaMask = 6`, `AlphaBlend = 7`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AlphaBlend` | `AlphaBlend = 7` |  |
+| `AlphaMask` | `AlphaMask = 6` |  |
+| `BaseColorMap` | `BaseColorMap = 1` |  |
+| `EmissiveMap` | `EmissiveMap = 5` |  |
+| `Factors` | `Factors = 0` |  |
+| `MetalRoughMap` | `MetalRoughMap = 2` |  |
+| `NormalMap` | `NormalMap = 3` |  |
+| `OcclusionMap` | `OcclusionMap = 4` |  |
+
+<a id="pbrsampleraddress"></a>
 
 ### PbrSamplerAddress
 
 `public enum PbrSamplerAddress` - What a texture lookup outside 0..1 does (.ocmat FX texaddr).
 
-Values: `Wrap = 0`, `Clamp = 1`, `Mirror = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Clamp` | `Clamp = 1` |  |
+| `Mirror` | `Mirror = 2` |  |
+| `Wrap` | `Wrap = 0` |  |
+
+<a id="pbrsamplerfilter"></a>
 
 ### PbrSamplerFilter
 
 `public enum PbrSamplerFilter` - How a material's textures are filtered (.ocmat FX texfilter).
 
-Values: `Anisotropic = 0`, `Trilinear = 1`, `Bilinear = 2`, `PointMip = 3`, `Point = 4`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Anisotropic` | `Anisotropic = 0` |  |
+| `Bilinear` | `Bilinear = 2` |  |
+| `Point` | `Point = 4` |  |
+| `PointMip` | `PointMip = 3` |  |
+| `Trilinear` | `Trilinear = 1` |  |
+
+<a id="pbrstatus"></a>
 
 ### PbrStatus
 
 `public enum PbrStatus` - Whether a material feature actually reaches the screen right now.
 
-Values: `Ready = 0`, `NotImplemented = 1`, `Unsupported = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `NotImplemented` | `NotImplemented = 1` |  |
+| `Ready` | `Ready = 0` |  |
+| `Unsupported` | `Unsupported = 2` |  |
+
+<a id="pbrtextureslot"></a>
 
 ### PbrTextureSlot
 
 `public enum PbrTextureSlot` - The glTF metallic-roughness texture set, matching the .ocmat TEX slots.
 
-Values: `BaseColor = 0`, `MetalRough = 1`, `Normal = 2`, `Occlusion = 3`, `Emissive = 4`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `BaseColor` | `BaseColor = 0` |  |
+| `Emissive` | `Emissive = 4` |  |
+| `MetalRough` | `MetalRough = 1` |  |
+| `Normal` | `Normal = 2` |  |
+| `Occlusion` | `Occlusion = 3` |  |
+
+<a id="pbruvmode"></a>
 
 ### PbrUvMode
 
 `public enum PbrUvMode` - Where texture coordinates come from: the mesh's UV set, or a world-axis projection.
 
-Values: `Mesh = 0`, `WorldAligned = 1`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Mesh` | `Mesh = 0` |  |
+| `WorldAligned` | `WorldAligned = 1` |  |
+
+<a id="voxi"></a>
 
 ### Voxi
 
 `public static class Voxi` - Reads and writes the global Voxi render settings over the aver_voxi_* C ABI.
 
-- `public static int FeatureCount { get; }` - ---- feature introspection ----
-- `public static string NameOf(VoxiFeature f)` - The feature's display name.
-- `public static VoxiStatus StatusOf(VoxiFeature f)` - Whether the feature can be used on this machine.
-- `public static string StatusTextOf(VoxiFeature f)` - One line explaining the feature's status.
-- `public static bool IsAvailable(VoxiFeature f)` - True when the feature is Ready.
-- `public static int Msaa { get; set; }` - MSAA sample count: 1 (off), 2, 4 or 8.
-- `public static IReadOnlyList<int> SupportedMsaaCounts { get; }` - The MSAA sample counts this GPU actually supports.
-- `public static VoxiQuality GetQuality(VoxiFeature f)` - The quality a ladder feature is set to.
-- `public static bool SetQuality(VoxiFeature f, VoxiQuality q)` - Returns true if the value was accepted (false when the feature is unavailable).
-- `public static VoxiQuality GlobalIllumination { get; set; }` - Voxel cone traced indirect lighting quality.
-- `public static VoxiQuality RayTracing { get; set; }` - Hardware ray tracing quality.
-- `public static VoxiQuality PathTracing { get; set; }` - Reference path tracer quality.
-- `public static int VoxelResolution { get; set; }` - Edge length of the cubic voxel grid used by GI (32..512).
-- `public static float GiIntensity { get; set; }` - Indirect bounce multiplier.
-- `public static float GiMaxDistance { get; set; }` - Cone trace range in centimetres.
-- `public static int GiUpdateInterval { get; set; }` - How many frames apart the GI volume is re-voxelised.
-- `public static int RayTracingTier { get; }` - 0 = none, 10 = DXR 1.0, 11 = DXR 1.1.
-- `public static int MaxMsaa { get; }` - Highest MSAA sample count the GPU supports.
-- `public static int MeshShaderTier { get; }` - 0 = none, 1 = Mesh Shader Tier 1 (D3D12 Ultimate).
-- `public static int ShaderModel { get; }` - Highest shader model, e.g.
-- `public static bool MeshShaders { get; set; }` - Submit geometry through mesh shaders instead of the classic VS/GS path.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `FeatureCount` | `public static int FeatureCount { get; }` | ---- feature introspection ---- |
+| `GiIntensity` | `public static float GiIntensity { get; set; }` | Indirect bounce multiplier. |
+| `GiMaxDistance` | `public static float GiMaxDistance { get; set; }` | Cone trace range in centimetres. |
+| `GiUpdateInterval` | `public static int GiUpdateInterval { get; set; }` | How many frames apart the GI volume is re-voxelised. |
+| `GlobalIllumination` | `public static VoxiQuality GlobalIllumination { get; set; }` | Voxel cone traced indirect lighting quality. |
+| `MaxMsaa` | `public static int MaxMsaa { get; }` | Highest MSAA sample count the GPU supports. |
+| `MeshShaders` | `public static bool MeshShaders { get; set; }` | Submit geometry through mesh shaders instead of the classic VS/GS path. |
+| `MeshShaderTier` | `public static int MeshShaderTier { get; }` | 0 = none, 1 = Mesh Shader Tier 1 (D3D12 Ultimate). |
+| `Msaa` | `public static int Msaa { get; set; }` | MSAA sample count: 1 (off), 2, 4 or 8. |
+| `PathTracing` | `public static VoxiQuality PathTracing { get; set; }` | Reference path tracer quality. |
+| `RayTracing` | `public static VoxiQuality RayTracing { get; set; }` | Hardware ray tracing quality. |
+| `RayTracingTier` | `public static int RayTracingTier { get; }` | 0 = none, 10 = DXR 1.0, 11 = DXR 1.1. |
+| `ShaderModel` | `public static int ShaderModel { get; }` | Highest shader model, e.g. |
+| `SupportedMsaaCounts` | `public static IReadOnlyList<int> SupportedMsaaCounts { get; }` | The MSAA sample counts this GPU actually supports. |
+| `VoxelResolution` | `public static int VoxelResolution { get; set; }` | Edge length of the cubic voxel grid used by GI (32..512). |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `GetQuality` | `public static VoxiQuality GetQuality(VoxiFeature f)` | The quality a ladder feature is set to. |
+| `IsAvailable` | `public static bool IsAvailable(VoxiFeature f)` | True when the feature is Ready. |
+| `NameOf` | `public static string NameOf(VoxiFeature f)` | The feature's display name. |
+| `SetQuality` | `public static bool SetQuality(VoxiFeature f, VoxiQuality q)` | Returns true if the value was accepted (false when the feature is unavailable). |
+| `StatusOf` | `public static VoxiStatus StatusOf(VoxiFeature f)` | Whether the feature can be used on this machine. |
+| `StatusTextOf` | `public static string StatusTextOf(VoxiFeature f)` | One line explaining the feature's status. |
+
+<a id="voxifeature"></a>
 
 ### VoxiFeature
 
 `public enum VoxiFeature` - Optional renderer features exposed by the Voxi module.
 
-Values: `Msaa = 0`, `GlobalIllumination = 1`, `RayTracing = 2`, `PathTracing = 3`, `MeshShaders = 4`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `GlobalIllumination` | `GlobalIllumination = 1` |  |
+| `MeshShaders` | `MeshShaders = 4` |  |
+| `Msaa` | `Msaa = 0` |  |
+| `PathTracing` | `PathTracing = 3` |  |
+| `RayTracing` | `RayTracing = 2` |  |
+
+<a id="voxiquality"></a>
 
 ### VoxiQuality
 
 `public enum VoxiQuality` - The quality ladder a Voxi feature is set on.
 
-Values: `Off = 0`, `Low = 1`, `Medium = 2`, `High = 3`, `Epic = 4`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Epic` | `Epic = 4` |  |
+| `High` | `High = 3` |  |
+| `Low` | `Low = 1` |  |
+| `Medium` | `Medium = 2` |  |
+| `Off` | `Off = 0` |  |
+
+<a id="voxistatus"></a>
 
 ### VoxiStatus
 
 `public enum VoxiStatus` - Whether a feature can actually be used on this machine right now.
 
-Values: `Ready = 0`, `NotImplemented = 1`, `Unsupported = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `NotImplemented` | `NotImplemented = 1` |  |
+| `Ready` | `Ready = 0` |  |
+| `Unsupported` | `Unsupported = 2` |  |

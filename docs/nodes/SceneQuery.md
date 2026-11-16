@@ -2,22 +2,24 @@
 
 # SceneQuery nodes
 
+Contents: 13 nodes sorted A-Z by type (`AN_` prefix ignored); categories: Scene. [All nodes A-Z](index.md).
+
 13 nodes. Rows: `scripting/csharp/Aver.Graph/GraphSceneQueryNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsSceneQuery.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
 | Type | Display | Category | Path | Pins | Attributes | C# |
 |---|---|---|---|---|---|---|
-| `AN_AddComponent` | Add Component | Scene | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `component` | `GraphSceneQueries.AddComponentForGraph`<br>Attaches the named component, zero-filled. |
-| `AN_CountActorsOfClass` | Count Actors Of Class | Scene | D | out: `count` int | `class` | `GraphSceneQueries.CountActorsOfClassForGraph`<br>How many live actors are of the named class or a class derived from it. |
-| `AN_CountActorsWithTag` | Count Actors With Tag | Scene | D | in: `mask` int<br>out: `count` int | none | `GraphSceneQueries.CountActorsWithTagForGraph`<br>How many entities carry every bit of the tag mask. |
-| `AN_GetActorCount` | Get Actor Count | Scene | D | out: `count` int | none | `GraphSceneQueries.GetActorCountForGraph`<br>How many live actors exist. |
-| `AN_GetActorOfClassAt` | Get Actor Of Class At | Scene | D | in: `index` int<br>out: `entity` int | `class` | `GraphSceneQueries.GetActorOfClassAtForGraph`<br>The actor at an index among those of the named class; 0 out of range. |
-| `AN_GetActorWithTagAt` | Get Actor With Tag At | Scene | D | in: `mask` int, `index` int<br>out: `entity` int | none | `GraphSceneQueries.GetActorWithTagAtForGraph`<br>The entity at an index among those carrying the tag mask; 0 out of range. |
-| `AN_GetChildAt` | Get Child At | Scene | D | in: `entity` int, `index` int<br>out: `child` int | none | `GraphSceneQueries.GetChildAtForGraph`<br>The child at an index in link order; 0 out of range. |
-| `AN_GetChildCount` | Get Child Count | Scene | D | in: `entity` int<br>out: `count` int | none | `GraphSceneQueries.GetChildCountForGraph`<br>How many immediate children an entity has; 0 for a dead handle. |
-| `AN_GetDistance` | Get Distance | Scene | D | in: `a` int, `b` int<br>out: `distance` float, `success` bool | none | `GraphSceneQueries.GetDistanceForGraph`<br>The world distance in centimetres between two entities; false when either is dead. |
-| `AN_GetParent` | Get Parent | Scene | D | in: `entity` int<br>out: `parent` int | none | `GraphSceneQueries.GetParentForGraph`<br>An entity's parent; 0 for a root or a dead handle. |
-| `AN_GetRagdollState` | Get Ragdoll State | Scene | D | in: `entity` int<br>out: `mode` int, `has` bool | none | `GraphSceneQueries.GetRagdollStateForGraph`<br>The ragdoll mode (-1 none, 0 Kinematic, 1 Limp, 2 Powered); the result is whether the entity has a ragdoll. |
-| `AN_HasComponent` | Has Component | Scene | D | in: `entity` int<br>out: `has` bool | `component` | `GraphSceneQueries.HasComponentForGraph`<br>True when the entity carries the named component (for example CLight). |
-| `AN_RaycastIgnoring` | Raycast Ignoring | Scene | P | in: `exec` exec, `originX` float, `originY` float, `originZ` float, `dirX` float, `dirY` float, `dirZ` float, `maxDist` float = 10000, `ignore` int<br>out: `then` exec, `hit` bool, `entity` int, `pointX` float, `pointY` float, `pointZ` float, `distance` float | none | `GraphSceneQueries.RaycastIgnoringForGraph`<br>A ray that never hits ignore's own body (its character capsule, else its rigid body), so a shot or sight line fired from inside the caster does not hit the caster. |
+| <a id="an_addcomponent"></a>`AN_AddComponent` | Add Component | Scene | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `component` | `GraphSceneQueries.AddComponentForGraph`<br>Attaches the named component, zero-filled. |
+| <a id="an_countactorsofclass"></a>`AN_CountActorsOfClass` | Count Actors Of Class | Scene | D | out: `count` int | `class` | `GraphSceneQueries.CountActorsOfClassForGraph`<br>How many live actors are of the named class or a class derived from it. |
+| <a id="an_countactorswithtag"></a>`AN_CountActorsWithTag` | Count Actors With Tag | Scene | D | in: `mask` int<br>out: `count` int | none | `GraphSceneQueries.CountActorsWithTagForGraph`<br>How many entities carry every bit of the tag mask. |
+| <a id="an_getactorcount"></a>`AN_GetActorCount` | Get Actor Count | Scene | D | out: `count` int | none | `GraphSceneQueries.GetActorCountForGraph`<br>How many live actors exist. |
+| <a id="an_getactorofclassat"></a>`AN_GetActorOfClassAt` | Get Actor Of Class At | Scene | D | in: `index` int<br>out: `entity` int | `class` | `GraphSceneQueries.GetActorOfClassAtForGraph`<br>The actor at an index among those of the named class; 0 out of range. |
+| <a id="an_getactorwithtagat"></a>`AN_GetActorWithTagAt` | Get Actor With Tag At | Scene | D | in: `mask` int, `index` int<br>out: `entity` int | none | `GraphSceneQueries.GetActorWithTagAtForGraph`<br>The entity at an index among those carrying the tag mask; 0 out of range. |
+| <a id="an_getchildat"></a>`AN_GetChildAt` | Get Child At | Scene | D | in: `entity` int, `index` int<br>out: `child` int | none | `GraphSceneQueries.GetChildAtForGraph`<br>The child at an index in link order; 0 out of range. |
+| <a id="an_getchildcount"></a>`AN_GetChildCount` | Get Child Count | Scene | D | in: `entity` int<br>out: `count` int | none | `GraphSceneQueries.GetChildCountForGraph`<br>How many immediate children an entity has; 0 for a dead handle. |
+| <a id="an_getdistance"></a>`AN_GetDistance` | Get Distance | Scene | D | in: `a` int, `b` int<br>out: `distance` float, `success` bool | none | `GraphSceneQueries.GetDistanceForGraph`<br>The world distance in centimetres between two entities; false when either is dead. |
+| <a id="an_getparent"></a>`AN_GetParent` | Get Parent | Scene | D | in: `entity` int<br>out: `parent` int | none | `GraphSceneQueries.GetParentForGraph`<br>An entity's parent; 0 for a root or a dead handle. |
+| <a id="an_getragdollstate"></a>`AN_GetRagdollState` | Get Ragdoll State | Scene | D | in: `entity` int<br>out: `mode` int, `has` bool | none | `GraphSceneQueries.GetRagdollStateForGraph`<br>The ragdoll mode (-1 none, 0 Kinematic, 1 Limp, 2 Powered); the result is whether the entity has a ragdoll. |
+| <a id="an_hascomponent"></a>`AN_HasComponent` | Has Component | Scene | D | in: `entity` int<br>out: `has` bool | `component` | `GraphSceneQueries.HasComponentForGraph`<br>True when the entity carries the named component (for example CLight). |
+| <a id="an_raycastignoring"></a>`AN_RaycastIgnoring` | Raycast Ignoring | Scene | P | in: `exec` exec, `originX` float, `originY` float, `originZ` float, `dirX` float, `dirY` float, `dirZ` float, `maxDist` float = 10000, `ignore` int<br>out: `then` exec, `hit` bool, `entity` int, `pointX` float, `pointY` float, `pointZ` float, `distance` float | none | `GraphSceneQueries.RaycastIgnoringForGraph`<br>A ray that never hits ignore's own body (its character capsule, else its rigid body), so a shot or sight line fired from inside the caster does not hit the caster. |

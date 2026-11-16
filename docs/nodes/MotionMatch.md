@@ -2,15 +2,17 @@
 
 # MotionMatch nodes
 
+Contents: 6 nodes sorted A-Z by type (`AN_` prefix ignored); categories: Animation. [All nodes A-Z](index.md).
+
 6 nodes. Rows: `scripting/csharp/Aver.Graph/GraphMotionMatchNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsMotionMatch.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
 | Type | Display | Category | Path | Pins | Attributes | C# |
 |---|---|---|---|---|---|---|
-| `GetMotionState` | Get Motion State | Animation | D | in: `entity` int<br>out: `found` bool, `clipTime` float, `cost` float, `switches` int | none | `MotionMatchGraphInterop.GetMotionStateForGraph` |
-| `IsMotionClip` | Is Motion Clip | Animation | D | in: `entity` int<br>out: `result` bool | `clip` | `MotionMatchGraphInterop.IsMotionClipForGraph` |
-| `RequestMotionSearch` | Request Motion Search | Animation | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none | `MotionMatchGraphInterop.RequestMotionSearchForGraph` |
-| `SetMotionInput` | Set Motion Input | Animation | P | in: `exec` exec, `entity` int, `velocityX` float, `velocityY` float, `facingYaw` float = 0<br>out: `then` exec, `success` bool | none | `MotionMatchGraphInterop.SetMotionInputForGraph` |
-| `SetMotionMatching` | Set Motion Matching | Animation | P | in: `exec` exec, `entity` int, `facing` int = 0, `drive` int = 0, `playRate` float = 1<br>out: `then` exec, `success` bool | `database` (optional) | `MotionMatchGraphInterop.SetMotionMatchingForGraph` |
-| `SetMotionTags` | Set Motion Tags | Animation | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `required` (optional), `excluded` (optional) | `MotionMatchGraphInterop.SetMotionTagsForGraph`<br>Comma-separated tag names, empty = none. |
+| <a id="getmotionstate"></a>`GetMotionState` | Get Motion State | Animation | D | in: `entity` int<br>out: `found` bool, `clipTime` float, `cost` float, `switches` int | none | `MotionMatchGraphInterop.GetMotionStateForGraph` |
+| <a id="ismotionclip"></a>`IsMotionClip` | Is Motion Clip | Animation | D | in: `entity` int<br>out: `result` bool | `clip` | `MotionMatchGraphInterop.IsMotionClipForGraph` |
+| <a id="requestmotionsearch"></a>`RequestMotionSearch` | Request Motion Search | Animation | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none | `MotionMatchGraphInterop.RequestMotionSearchForGraph` |
+| <a id="setmotioninput"></a>`SetMotionInput` | Set Motion Input | Animation | P | in: `exec` exec, `entity` int, `velocityX` float, `velocityY` float, `facingYaw` float = 0<br>out: `then` exec, `success` bool | none | `MotionMatchGraphInterop.SetMotionInputForGraph` |
+| <a id="setmotionmatching"></a>`SetMotionMatching` | Set Motion Matching | Animation | P | in: `exec` exec, `entity` int, `facing` int = 0, `drive` int = 0, `playRate` float = 1<br>out: `then` exec, `success` bool | `database` (optional) | `MotionMatchGraphInterop.SetMotionMatchingForGraph` |
+| <a id="setmotiontags"></a>`SetMotionTags` | Set Motion Tags | Animation | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `required` (optional), `excluded` (optional) | `MotionMatchGraphInterop.SetMotionTagsForGraph`<br>Comma-separated tag names, empty = none. |

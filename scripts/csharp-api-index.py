@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# The public C# scripting surface, indexed from source: one page per assembly under docs/api/, every public type and
-# member as a single-line signature with the first sentence of its XML summary. Stdlib only.
+# The public C# scripting surface, indexed from source: one page per assembly under docs/api/ (a contents table, then a
+# member table per type), plus index.md (types A-Z) and members-a-z.md. Stdlib only.
 #
 #   python scripts/csharp-api-index.py --write     # regenerate docs/api/*.md
 #   python scripts/csharp-api-index.py --check     # fail when a page is missing or stale (ctest CsharpApiIndexCheck)
@@ -424,53 +424,194 @@ def esc(s):
     return s.replace("<", "&lt;").replace(">", "&gt;")
 
 
-def assembly_page(assembly):
+KIND_ORDER = [("class", "Classes"), ("struct", "Structs"), ("interface", "Interfaces"), ("enum", "Enums"),
+              ("record", "Records"), ("delegate", "Delegates")]
+GROUP_ORDER = ["Constructors", "Properties", "Fields", "Methods", "Events", "Delegates", "Enum values"]
+MODIFIERS = {"public", "internal", "private", "protected", "static", "extern", "unsafe", "new", "readonly"}
+
+
+def cell(s):
+    return esc(s).replace("|", "\\|")
+
+
+def code_cell(s):
+    return "`%s`" % s.replace("|", "\\|") if s else ""
+
+
+def no_generics(s):
+    while True:
+        t = re.sub(r"<[^<>]*>", "", s)
+        if t == s:
+            return s
+        s = t
+
+
+def classify(t, sig):
+    """(group, member name) for a member signature of type t."""
+    simple = t.name.split(".")[-1]
+    if re.match(r"(?:\w+\s+)*delegate\b", sig):
+        pre = no_generics(sig.split("(")[0]).split()
+        return "Delegates", pre[-1] if pre else sig
+    if re.match(r"(?:\w+\s+)*event\b", sig):
+        return "Events", no_generics(sig.split(" = ")[0]).split()[-1].rstrip(";")
+    if re.search(r"\bthis\s*\[", sig):
+        return "Properties", "this[]"
+    if "(" in sig.split(" { ")[0].split(" = ")[0]:
+        pre = no_generics(sig.split("(")[0])
+        om = re.search(r"\boperator\b\s*(.*)$", pre)
+        if om:
+            return "Methods", "operator " + om.group(1).strip()
+        toks = pre.split()
+        name = toks[-1] if toks else sig
+        if name == simple and (len(toks) == 1 or toks[-2] in MODIFIERS):
+            return "Constructors", name
+        return "Methods", name
+    head = no_generics(sig.split(" { ")[0].split(" = ")[0]).split()
+    name = head[-1].rstrip(";,") if head else sig
+    return ("Properties" if " { " in sig else "Fields"), name
+
+
+def slug(s):
+    return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
+
+
+def type_anchors(ordered):
+    seen, anchors = {}, {}
+    for t in ordered:
+        seen[slug(t.name)] = seen.get(slug(t.name), 0) + 1
+    for t in ordered:
+        a = slug(t.name)
+        anchors[(t.ns, t.name)] = a if seen[a] == 1 else slug(t.ns + " " + t.name)
+    return anchors
+
+
+def type_rows(t):
+    """Rows (group, name, signature, summary) for every member of t, sorted by group then name."""
+    rows = []
+    for sig, summ in t.members:
+        g, nm = classify(t, sig)
+        rows.append((g, nm, sig, summ))
+    for v in t.values:
+        rows.append(("Enum values", v.split(" = ")[0], v, ""))
+    rows.sort(key=lambda r: (GROUP_ORDER.index(r[0]), r[1].lower(), r[1], r[2]))
+    return rows
+
+
+def scan_assembly(assembly):
     types = {}
     files = source_files(assembly)
     for f in files:
         scan_file(f, assembly, types)
     ordered = sorted(types.values(), key=lambda t: (t.ns, t.name.lower(), t.name))
+    return ordered, files
+
+
+def assembly_page(assembly):
+    ordered, files = scan_assembly(assembly)
     members = sum(len(t.members) + len(t.values) for t in ordered)
+    anchors = type_anchors(ordered)
     out = [MARK, "", "# %s public API" % assembly, "",
            "%d public types and %d public members, read from `%s/` (%d source files). "
-           "Signatures are single lines as declared; the sentence after each is the first line of its XML summary." % (
-               len(ordered), members, rel(assembly_dir(assembly)), len(files)), ""]
-    ns = None
+           "Members are grouped by kind and sorted alphabetically; signatures are single lines as declared, and the "
+           "summary is the first sentence of the XML summary. Every type in every assembly: [index](index.md); every "
+           "member: [members-a-z](members-a-z.md)." % (
+               len(ordered), members, rel(assembly_dir(assembly)), len(files)), "", "## Contents", ""]
+    nss = []
     for t in ordered:
-        if t.ns != ns:
-            ns = t.ns
-            out += ["## namespace %s" % (ns or "(global)"), ""]
-        out.append("### %s" % esc(t.name))
+        if t.ns not in nss:
+            nss.append(t.ns)
+    for ns in nss:
+        out += ["**namespace %s**" % (ns or "(global)"), ""]
+        for kind, title in KIND_ORDER:
+            ts = [t for t in ordered if t.ns == ns and t.kind == kind]
+            if ts:
+                out.append("- %s: " % title + ", ".join("[%s](#%s)" % (esc(t.name), anchors[(t.ns, t.name)]) for t in ts))
         out.append("")
-        out.append("`%s`" % t.header + (" - " + esc(t.summary) if t.summary else ""))
-        out.append("")
-        if t.values:
-            out.append("Values: " + ", ".join("`%s`" % v for v in t.values))
+    for ns in nss:
+        out += ["## namespace %s" % (ns or "(global)"), ""]
+        for t in [x for x in ordered if x.ns == ns]:
+            out.append('<a id="%s"></a>' % anchors[(t.ns, t.name)])
             out.append("")
-        for sig, summ in t.members:
-            out.append("- `%s`%s" % (sig, " - " + esc(summ) if summ else ""))
-        if t.members:
+            out.append("### %s" % esc(t.name))
             out.append("")
+            out.append("`%s`" % t.header + (" - " + cell(t.summary) if t.summary else ""))
+            out.append("")
+            rows = type_rows(t)
+            for g in GROUP_ORDER:
+                gr = [r for r in rows if r[0] == g]
+                if not gr:
+                    continue
+                out += ["**%s**" % g, "", "| Member | Signature | Summary |", "|---|---|---|"]
+                for _, nm, sig, summ in gr:
+                    out.append("| %s | %s | %s |" % (code_cell(nm), code_cell(sig), cell(summ)))
+                out.append("")
     return "\n".join(out), len(ordered), members
+
+
+def letter_of(name):
+    c = name.lstrip("_.")[:1].upper()
+    return c if c.isalpha() and c.isascii() else "#"
+
+
+def lettered(out, entries, header):
+    """entries: sorted list of (name, rowtext). Adds jump links and one table per letter."""
+    anchor = lambda l: "sym" if l == "#" else l.lower()
+    letters = []
+    for name, _ in entries:
+        l = letter_of(name)
+        if l not in letters:
+            letters.append(l)
+    out.append(" ".join("[%s](#%s)" % (l, anchor(l)) for l in letters))
+    out.append("")
+    cur = None
+    for name, text in entries:
+        l = letter_of(name)
+        if l != cur:
+            if cur is not None:
+                out.append("")
+            cur = l
+            out += ['<a id="%s"></a>' % anchor(l), "", "## %s" % l, "", header[0], header[1]]
+        out.append(text)
+    out.append("")
 
 
 def build_pages():
     pages = {}
     stats = []
+    all_types, all_members = [], []
     for a in ASSEMBLIES:
         if not os.path.isdir(assembly_dir(a)):
             continue
         text, nt, nm = assembly_page(a)
         pages[a + ".md"] = text
         stats.append((a, nt, nm))
+        ordered, _ = scan_assembly(a)
+        anchors = type_anchors(ordered)
+        for t in ordered:
+            anc = anchors[(t.ns, t.name)]
+            all_types.append((t, anc))
+            for _, nm_, sig, _s in type_rows(t):
+                all_members.append((nm_, t, anc, sig))
     idx = [MARK, "", "# C# API index", "",
            "Generated from source by `scripts/csharp-api-index.py`. Hand-written guides: `docs/SCRIPTING_API.md`, "
            "`docs/SCRIPTING.md`. Every Aver Node is a thin wrapper over a member listed here (`docs/nodes/`).", "",
            "| Assembly | Public types | Public members |", "|---|---|---|"]
     for a, nt, nm in stats:
         idx.append("| [%s](%s.md) | %d | %d |" % (a, a, nt, nm))
-    idx.append("")
+    idx += ["", "Every public member, alphabetically: [members-a-z.md](members-a-z.md).", "", "## Types A-Z", ""]
+    ents = sorted(all_types, key=lambda x: (x[0].name.lower(), x[0].name, x[0].assembly, x[0].ns))
+    lettered(idx, [(t.name, "| [%s](%s.md#%s) | %s | %s | %s |" % (esc(t.name), t.assembly, anc, t.kind, t.assembly,
+                                                                    t.ns or "(global)")) for t, anc in ents],
+             ("| Type | Kind | Assembly | Namespace |", "|---|---|---|---|"))
     pages["index.md"] = "\n".join(idx)
+    mem = [MARK, "", "# C# API members A-Z", "",
+           "Every public member of every assembly, alphabetically (%d members). Back to the [index](index.md)." %
+           len(all_members), ""]
+    ments = sorted(all_members, key=lambda x: (x[0].lower(), x[0], x[1].name, x[1].assembly, x[3]))
+    lettered(mem, [(nm_, "| %s | [%s](%s.md#%s) | %s |" % (code_cell(nm_), esc(t.name), t.assembly, anc, t.assembly))
+                   for nm_, t, anc, sig in ments],
+             ("| Member | Type | Assembly |", "|---|---|---|"))
+    pages["members-a-z.md"] = "\n".join(mem)
     return pages
 
 

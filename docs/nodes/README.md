@@ -6,6 +6,7 @@ list here cannot disagree with the code: if it did, `NodeCatalogCheck` would fai
 | Page | What it lists |
 |---|---|
 | `<Family>.md` | The table-driven nodes of one family (`scripting/csharp/Aver.Graph/Graph<Family>NodeTable.cs`): type, display name, palette category, path (D pure, P exec, X trigger), pins with defaults, attributes (optional ones marked), and the C# method each calls with the first sentence of its XML summary. `GameSystem.md` is the main table; the rest are one family each. |
+| [`index.md`](index.md) | Start here to look a node up: a table of families with categories and node counts, then every node A-Z (with letter jump links, family, category, summary and a link to its row). |
 | [`Core.md`](Core.md) | Every node the parser and compiler know by hand (the `OcGraphParser.AddDefaultPins` vocabulary) and every palette entry that has no table row, read from the palette: type, display name, category, pins, attributes. The material-graph vocabulary is a separate section at the end. |
 
 **Do not edit these pages.** To change one, change the C# row, the palette entry or the owner method's XML

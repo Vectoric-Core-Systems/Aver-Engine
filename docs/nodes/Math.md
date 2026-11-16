@@ -2,64 +2,66 @@
 
 # Math nodes
 
+Contents: 55 nodes sorted A-Z by type (`AN_` prefix ignored); categories: Integer, Math, Random, Rotator, Vector. [All nodes A-Z](index.md).
+
 55 nodes. Rows: `scripting/csharp/Aver.Graph/GraphMathNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsMath.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
 | Type | Display | Category | Path | Pins | Attributes | C# |
 |---|---|---|---|---|---|---|
-| `AN_Acos` | Acos | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.AcosForGraph`<br>Arc cosine in radians; the input is clamped to -1..1. |
-| `AN_Asin` | Asin | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.AsinForGraph`<br>Arc sine in radians; the input is clamped to -1..1. |
-| `AN_Atan` | Atan | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.AtanForGraph`<br>Arc tangent in radians. |
-| `AN_Atan2` | Atan2 | Math | D | in: `y` float, `x` float<br>out: `result` float | none | `MathGraph.Atan2ForGraph`<br>Angle in radians of the point (x, y) measured from +X. |
-| `AN_BitAnd` | Bit And | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.BitAndForGraph`<br>Bitwise and. |
-| `AN_BitOr` | Bit Or | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.BitOrForGraph`<br>Bitwise or. |
-| `AN_BitShiftLeft` | Bit Shift Left | Integer | D | in: `a` int, `count` int<br>out: `result` int | none | `MathGraph.BitShiftLeftForGraph`<br>Shifts left; the count is masked to 0..31. |
-| `AN_BitShiftRight` | Bit Shift Right | Integer | D | in: `a` int, `count` int<br>out: `result` int | none | `MathGraph.BitShiftRightForGraph`<br>Shifts right filling with zeros; the count is masked to 0..31. |
-| `AN_BitTest` | Bit Test | Integer | D | in: `value` int, `bit` int<br>out: `result` bool | none | `MathGraph.BitTestForGraph`<br>True when the given bit (0 is the lowest) of the value is set. |
-| `AN_BitXor` | Bit Xor | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.BitXorForGraph`<br>Bitwise exclusive or. |
-| `AN_DegToRad` | Deg To Rad | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.DegToRadForGraph`<br>Degrees to radians. |
-| `AN_DeltaAngle` | Delta Angle | Math | D | in: `a` float, `b` float<br>out: `result` float | none | `MathGraph.DeltaAngleForGraph`<br>The signed shortest turn in degrees from a to b. |
-| `AN_Exp` | Exp | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.ExpForGraph`<br>e raised to the input. |
-| `AN_ForwardToRotator` | Forward To Rotator | Rotator | D | in: `x` float, `y` float, `z` float<br>out: `yaw` float, `pitch` float | none | `MathGraph.ForwardToRotatorForGraph`<br>The yaw and pitch in degrees that point along a direction. |
-| `AN_Frac` | Frac | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.FracForGraph`<br>The fractional part, a minus floor(a). |
-| `AN_IntAbs` | Int Abs | Integer | D | in: `a` int<br>out: `result` int | none | `MathGraph.IntAbsForGraph`<br>Integer absolute value. |
-| `AN_IntAdd` | Int Add | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.IntAddForGraph`<br>Wrapping integer addition. |
-| `AN_IntClamp` | Int Clamp | Integer | D | in: `a` int, `min` int, `max` int<br>out: `result` int | none | `MathGraph.IntClampForGraph`<br>Clamps an integer into [min, max]. |
-| `AN_IntCompare` | Int Compare | Integer | D | in: `a` int, `b` int<br>out: `less` bool, `equal` bool, `greater` bool | none | `MathGraph.IntCompareForGraph`<br>Exact integer comparison (floats lose integers above 2^24). |
-| `AN_IntDivide` | Int Divide | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.IntDivideForGraph`<br>Integer division truncating toward zero; a zero divisor gives 0. |
-| `AN_InterpTo` | Interp To | Math | D | in: `current` float, `target` float, `deltaTime` float, `speed` float<br>out: `result` float | none | `MathGraph.InterpToForGraph`<br>One frame of exponential approach to a target that never overshoots; a speed of zero or less snaps to it. |
-| `AN_IntMax` | Int Max | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.IntMaxForGraph`<br>The larger integer. |
-| `AN_IntMin` | Int Min | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.IntMinForGraph`<br>The smaller integer. |
-| `AN_IntModulo` | Int Modulo | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.IntModuloForGraph`<br>Integer remainder, sign of the dividend; a zero divisor gives 0. |
-| `AN_IntMultiply` | Int Multiply | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.IntMultiplyForGraph`<br>Wrapping integer multiplication. |
-| `AN_IntSign` | Int Sign | Integer | D | in: `a` int<br>out: `result` int | none | `MathGraph.IntSignForGraph`<br>-1, 0 or 1 by the sign of an integer. |
-| `AN_IntSubtract` | Int Subtract | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.IntSubtractForGraph`<br>Wrapping integer subtraction. |
-| `AN_InverseLerp` | Inverse Lerp | Math | D | in: `a` float, `b` float, `value` float<br>out: `result` float | none | `MathGraph.InverseLerpForGraph`<br>Where the value sits between a and b, not clamped; equal ends give 0. |
-| `AN_IsFinite` | Is Finite | Math | D | in: `a` float<br>out: `result` bool | none | `MathGraph.IsFiniteForGraph`<br>True for any value that is not NaN or an infinity. |
-| `AN_LerpAngle` | Lerp Angle | Math | D | in: `a` float, `b` float, `t` float<br>out: `result` float | none | `MathGraph.LerpAngleForGraph`<br>Interpolates between two angles in degrees the short way round; the result is not wrapped to 0..360. |
-| `AN_Log` | Log | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.LogForGraph`<br>Natural logarithm; zero or negative input gives 0. |
-| `AN_LookAtRotation` | Look At Rotation | Rotator | D | in: `fromX` float, `fromY` float, `fromZ` float, `toX` float, `toY` float, `toZ` float<br>out: `yaw` float, `pitch` float | none | `MathGraph.LookAtRotationForGraph`<br>The yaw and pitch in degrees that turn an observer at one point to face another. |
-| `AN_MapRange` | Map Range | Math | D | in: `value` float, `inMin` float = 0, `inMax` float = 1, `outMin` float = 0, `outMax` float = 1, `clamp` bool = true<br>out: `result` float | none | `MathGraph.MapRangeForGraph`<br>Remaps a value from one range to another, optionally clamped; an empty input range gives the output minimum. |
-| `AN_NearlyEqual` | Nearly Equal | Math | D | in: `a` float, `b` float, `tolerance` float = 0.0001<br>out: `result` bool | none | `MathGraph.NearlyEqualForGraph`<br>True when the two values differ by no more than the tolerance. |
-| `AN_RadToDeg` | Rad To Deg | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.RadToDegForGraph`<br>Radians to degrees. |
-| `AN_RandomBool` | Random Bool | Random | P | in: `exec` exec, `chance` float = 0.5<br>out: `then` exec, `value` bool | none | `MathGraph.RandomBoolForGraph`<br>True with the given probability, 0..1. |
-| `AN_RandomFloat` | Random Float | Random | P | in: `exec` exec, `min` float = 0, `max` float = 1<br>out: `then` exec, `value` float | none | `MathGraph.RandomFloatForGraph`<br>A random float in [min, max) from the shared generator. |
-| `AN_RandomInt` | Random Int | Random | P | in: `exec` exec, `min` int = 0, `max` int = 1<br>out: `then` exec, `value` int | none | `MathGraph.RandomIntForGraph`<br>A random integer in [min, max], both ends included. |
-| `AN_RandomUnitVector` | Random Unit Vector | Random | P | in: `exec` exec<br>out: `then` exec, `x` float, `y` float, `z` float | none | `MathGraph.RandomUnitVectorForGraph`<br>A direction uniformly distributed over the unit sphere. |
-| `AN_RotateVector` | Rotate Vector | Rotator | D | in: `vx` float, `vy` float, `vz` float, `yaw` float, `pitch` float, `roll` float<br>out: `x` float, `y` float, `z` float | none | `MathGraph.RotateVectorForGraph`<br>Rotates a vector by yaw, pitch and roll in degrees. |
-| `AN_RotatorToForward` | Rotator To Forward | Rotator | D | in: `yaw` float, `pitch` float<br>out: `x` float, `y` float, `z` float | none | `MathGraph.RotatorToForwardForGraph`<br>The unit direction a yaw and pitch (degrees) point along. |
-| `AN_SetRandomSeed` | Set Random Seed | Random | P | in: `exec` exec, `seed` int<br>out: `then` exec | none | `MathGraph.SetRandomSeedForGraph`<br>Reseeds the shared generator so the same seed repeats the same sequence. |
-| `AN_Sign` | Sign | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.SignForGraph`<br>-1, 0 or 1 by the sign of the input. |
-| `AN_SmoothStep` | Smooth Step | Math | D | in: `edge0` float, `edge1` float, `x` float<br>out: `result` float | none | `MathGraph.SmoothStepForGraph`<br>Smooth 0 to 1 ramp between two edges; equal edges give a step. |
-| `AN_Tan` | Tan | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.TanForGraph`<br>Tangent of an angle in radians. |
-| `AN_Truncate` | Truncate | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.TruncateForGraph`<br>Drops the fractional part, rounding toward zero. |
-| `AN_VecAngle` | Vec Angle | Vector | D | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `result` float | none | `MathGraph.VecAngleForGraph`<br>The angle in degrees between two vectors; a zero vector gives 0. |
-| `AN_VecClampLength` | Vec Clamp Length | Vector | D | in: `vx` float, `vy` float, `vz` float, `maxLength` float<br>out: `x` float, `y` float, `z` float | none | `MathGraph.VecClampLengthForGraph`<br>Shortens a vector to at most the given length, keeping its direction. |
-| `AN_VecDistance2D` | Vec Distance 2D | Vector | D | in: `ax` float, `ay` float, `bx` float, `by` float<br>out: `result` float | none | `MathGraph.VecDistance2DForGraph`<br>Distance between two points ignoring Z. |
-| `AN_VecLength2D` | Vec Length 2D | Vector | D | in: `ax` float, `ay` float<br>out: `result` float | none | `MathGraph.VecLength2DForGraph`<br>Length of (x, y) ignoring Z. |
-| `AN_VecMultiply` | Vec Multiply | Vector | D | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `x` float, `y` float, `z` float | none | `MathGraph.VecMultiplyForGraph`<br>Component-wise product of two vectors. |
-| `AN_VecNegate` | Vec Negate | Vector | D | in: `ax` float, `ay` float, `az` float<br>out: `x` float, `y` float, `z` float | none | `MathGraph.VecNegateForGraph`<br>The negated vector. |
-| `AN_VecProject` | Vec Project | Vector | D | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `x` float, `y` float, `z` float | none | `MathGraph.VecProjectForGraph`<br>The part of a along b; a zero b gives zero. |
-| `AN_VecReflect` | Vec Reflect | Vector | D | in: `vx` float, `vy` float, `vz` float, `nx` float, `ny` float, `nz` float<br>out: `x` float, `y` float, `z` float | none | `MathGraph.VecReflectForGraph`<br>Mirrors a vector about a surface normal that need not be unit. |
-| `AN_Wrap` | Wrap | Math | D | in: `value` float, `min` float, `max` float<br>out: `result` float | none | `MathGraph.WrapForGraph`<br>Wraps a value into [min, max); an empty range gives min. |
+| <a id="an_acos"></a>`AN_Acos` | Acos | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.AcosForGraph`<br>Arc cosine in radians; the input is clamped to -1..1. |
+| <a id="an_asin"></a>`AN_Asin` | Asin | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.AsinForGraph`<br>Arc sine in radians; the input is clamped to -1..1. |
+| <a id="an_atan"></a>`AN_Atan` | Atan | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.AtanForGraph`<br>Arc tangent in radians. |
+| <a id="an_atan2"></a>`AN_Atan2` | Atan2 | Math | D | in: `y` float, `x` float<br>out: `result` float | none | `MathGraph.Atan2ForGraph`<br>Angle in radians of the point (x, y) measured from +X. |
+| <a id="an_bitand"></a>`AN_BitAnd` | Bit And | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.BitAndForGraph`<br>Bitwise and. |
+| <a id="an_bitor"></a>`AN_BitOr` | Bit Or | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.BitOrForGraph`<br>Bitwise or. |
+| <a id="an_bitshiftleft"></a>`AN_BitShiftLeft` | Bit Shift Left | Integer | D | in: `a` int, `count` int<br>out: `result` int | none | `MathGraph.BitShiftLeftForGraph`<br>Shifts left; the count is masked to 0..31. |
+| <a id="an_bitshiftright"></a>`AN_BitShiftRight` | Bit Shift Right | Integer | D | in: `a` int, `count` int<br>out: `result` int | none | `MathGraph.BitShiftRightForGraph`<br>Shifts right filling with zeros; the count is masked to 0..31. |
+| <a id="an_bittest"></a>`AN_BitTest` | Bit Test | Integer | D | in: `value` int, `bit` int<br>out: `result` bool | none | `MathGraph.BitTestForGraph`<br>True when the given bit (0 is the lowest) of the value is set. |
+| <a id="an_bitxor"></a>`AN_BitXor` | Bit Xor | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.BitXorForGraph`<br>Bitwise exclusive or. |
+| <a id="an_degtorad"></a>`AN_DegToRad` | Deg To Rad | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.DegToRadForGraph`<br>Degrees to radians. |
+| <a id="an_deltaangle"></a>`AN_DeltaAngle` | Delta Angle | Math | D | in: `a` float, `b` float<br>out: `result` float | none | `MathGraph.DeltaAngleForGraph`<br>The signed shortest turn in degrees from a to b. |
+| <a id="an_exp"></a>`AN_Exp` | Exp | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.ExpForGraph`<br>e raised to the input. |
+| <a id="an_forwardtorotator"></a>`AN_ForwardToRotator` | Forward To Rotator | Rotator | D | in: `x` float, `y` float, `z` float<br>out: `yaw` float, `pitch` float | none | `MathGraph.ForwardToRotatorForGraph`<br>The yaw and pitch in degrees that point along a direction. |
+| <a id="an_frac"></a>`AN_Frac` | Frac | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.FracForGraph`<br>The fractional part, a minus floor(a). |
+| <a id="an_intabs"></a>`AN_IntAbs` | Int Abs | Integer | D | in: `a` int<br>out: `result` int | none | `MathGraph.IntAbsForGraph`<br>Integer absolute value. |
+| <a id="an_intadd"></a>`AN_IntAdd` | Int Add | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.IntAddForGraph`<br>Wrapping integer addition. |
+| <a id="an_intclamp"></a>`AN_IntClamp` | Int Clamp | Integer | D | in: `a` int, `min` int, `max` int<br>out: `result` int | none | `MathGraph.IntClampForGraph`<br>Clamps an integer into [min, max]. |
+| <a id="an_intcompare"></a>`AN_IntCompare` | Int Compare | Integer | D | in: `a` int, `b` int<br>out: `less` bool, `equal` bool, `greater` bool | none | `MathGraph.IntCompareForGraph`<br>Exact integer comparison (floats lose integers above 2^24). |
+| <a id="an_intdivide"></a>`AN_IntDivide` | Int Divide | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.IntDivideForGraph`<br>Integer division truncating toward zero; a zero divisor gives 0. |
+| <a id="an_interpto"></a>`AN_InterpTo` | Interp To | Math | D | in: `current` float, `target` float, `deltaTime` float, `speed` float<br>out: `result` float | none | `MathGraph.InterpToForGraph`<br>One frame of exponential approach to a target that never overshoots; a speed of zero or less snaps to it. |
+| <a id="an_intmax"></a>`AN_IntMax` | Int Max | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.IntMaxForGraph`<br>The larger integer. |
+| <a id="an_intmin"></a>`AN_IntMin` | Int Min | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.IntMinForGraph`<br>The smaller integer. |
+| <a id="an_intmodulo"></a>`AN_IntModulo` | Int Modulo | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.IntModuloForGraph`<br>Integer remainder, sign of the dividend; a zero divisor gives 0. |
+| <a id="an_intmultiply"></a>`AN_IntMultiply` | Int Multiply | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.IntMultiplyForGraph`<br>Wrapping integer multiplication. |
+| <a id="an_intsign"></a>`AN_IntSign` | Int Sign | Integer | D | in: `a` int<br>out: `result` int | none | `MathGraph.IntSignForGraph`<br>-1, 0 or 1 by the sign of an integer. |
+| <a id="an_intsubtract"></a>`AN_IntSubtract` | Int Subtract | Integer | D | in: `a` int, `b` int<br>out: `result` int | none | `MathGraph.IntSubtractForGraph`<br>Wrapping integer subtraction. |
+| <a id="an_inverselerp"></a>`AN_InverseLerp` | Inverse Lerp | Math | D | in: `a` float, `b` float, `value` float<br>out: `result` float | none | `MathGraph.InverseLerpForGraph`<br>Where the value sits between a and b, not clamped; equal ends give 0. |
+| <a id="an_isfinite"></a>`AN_IsFinite` | Is Finite | Math | D | in: `a` float<br>out: `result` bool | none | `MathGraph.IsFiniteForGraph`<br>True for any value that is not NaN or an infinity. |
+| <a id="an_lerpangle"></a>`AN_LerpAngle` | Lerp Angle | Math | D | in: `a` float, `b` float, `t` float<br>out: `result` float | none | `MathGraph.LerpAngleForGraph`<br>Interpolates between two angles in degrees the short way round; the result is not wrapped to 0..360. |
+| <a id="an_log"></a>`AN_Log` | Log | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.LogForGraph`<br>Natural logarithm; zero or negative input gives 0. |
+| <a id="an_lookatrotation"></a>`AN_LookAtRotation` | Look At Rotation | Rotator | D | in: `fromX` float, `fromY` float, `fromZ` float, `toX` float, `toY` float, `toZ` float<br>out: `yaw` float, `pitch` float | none | `MathGraph.LookAtRotationForGraph`<br>The yaw and pitch in degrees that turn an observer at one point to face another. |
+| <a id="an_maprange"></a>`AN_MapRange` | Map Range | Math | D | in: `value` float, `inMin` float = 0, `inMax` float = 1, `outMin` float = 0, `outMax` float = 1, `clamp` bool = true<br>out: `result` float | none | `MathGraph.MapRangeForGraph`<br>Remaps a value from one range to another, optionally clamped; an empty input range gives the output minimum. |
+| <a id="an_nearlyequal"></a>`AN_NearlyEqual` | Nearly Equal | Math | D | in: `a` float, `b` float, `tolerance` float = 0.0001<br>out: `result` bool | none | `MathGraph.NearlyEqualForGraph`<br>True when the two values differ by no more than the tolerance. |
+| <a id="an_radtodeg"></a>`AN_RadToDeg` | Rad To Deg | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.RadToDegForGraph`<br>Radians to degrees. |
+| <a id="an_randombool"></a>`AN_RandomBool` | Random Bool | Random | P | in: `exec` exec, `chance` float = 0.5<br>out: `then` exec, `value` bool | none | `MathGraph.RandomBoolForGraph`<br>True with the given probability, 0..1. |
+| <a id="an_randomfloat"></a>`AN_RandomFloat` | Random Float | Random | P | in: `exec` exec, `min` float = 0, `max` float = 1<br>out: `then` exec, `value` float | none | `MathGraph.RandomFloatForGraph`<br>A random float in [min, max) from the shared generator. |
+| <a id="an_randomint"></a>`AN_RandomInt` | Random Int | Random | P | in: `exec` exec, `min` int = 0, `max` int = 1<br>out: `then` exec, `value` int | none | `MathGraph.RandomIntForGraph`<br>A random integer in [min, max], both ends included. |
+| <a id="an_randomunitvector"></a>`AN_RandomUnitVector` | Random Unit Vector | Random | P | in: `exec` exec<br>out: `then` exec, `x` float, `y` float, `z` float | none | `MathGraph.RandomUnitVectorForGraph`<br>A direction uniformly distributed over the unit sphere. |
+| <a id="an_rotatevector"></a>`AN_RotateVector` | Rotate Vector | Rotator | D | in: `vx` float, `vy` float, `vz` float, `yaw` float, `pitch` float, `roll` float<br>out: `x` float, `y` float, `z` float | none | `MathGraph.RotateVectorForGraph`<br>Rotates a vector by yaw, pitch and roll in degrees. |
+| <a id="an_rotatortoforward"></a>`AN_RotatorToForward` | Rotator To Forward | Rotator | D | in: `yaw` float, `pitch` float<br>out: `x` float, `y` float, `z` float | none | `MathGraph.RotatorToForwardForGraph`<br>The unit direction a yaw and pitch (degrees) point along. |
+| <a id="an_setrandomseed"></a>`AN_SetRandomSeed` | Set Random Seed | Random | P | in: `exec` exec, `seed` int<br>out: `then` exec | none | `MathGraph.SetRandomSeedForGraph`<br>Reseeds the shared generator so the same seed repeats the same sequence. |
+| <a id="an_sign"></a>`AN_Sign` | Sign | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.SignForGraph`<br>-1, 0 or 1 by the sign of the input. |
+| <a id="an_smoothstep"></a>`AN_SmoothStep` | Smooth Step | Math | D | in: `edge0` float, `edge1` float, `x` float<br>out: `result` float | none | `MathGraph.SmoothStepForGraph`<br>Smooth 0 to 1 ramp between two edges; equal edges give a step. |
+| <a id="an_tan"></a>`AN_Tan` | Tan | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.TanForGraph`<br>Tangent of an angle in radians. |
+| <a id="an_truncate"></a>`AN_Truncate` | Truncate | Math | D | in: `a` float<br>out: `result` float | none | `MathGraph.TruncateForGraph`<br>Drops the fractional part, rounding toward zero. |
+| <a id="an_vecangle"></a>`AN_VecAngle` | Vec Angle | Vector | D | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `result` float | none | `MathGraph.VecAngleForGraph`<br>The angle in degrees between two vectors; a zero vector gives 0. |
+| <a id="an_vecclamplength"></a>`AN_VecClampLength` | Vec Clamp Length | Vector | D | in: `vx` float, `vy` float, `vz` float, `maxLength` float<br>out: `x` float, `y` float, `z` float | none | `MathGraph.VecClampLengthForGraph`<br>Shortens a vector to at most the given length, keeping its direction. |
+| <a id="an_vecdistance2d"></a>`AN_VecDistance2D` | Vec Distance 2D | Vector | D | in: `ax` float, `ay` float, `bx` float, `by` float<br>out: `result` float | none | `MathGraph.VecDistance2DForGraph`<br>Distance between two points ignoring Z. |
+| <a id="an_veclength2d"></a>`AN_VecLength2D` | Vec Length 2D | Vector | D | in: `ax` float, `ay` float<br>out: `result` float | none | `MathGraph.VecLength2DForGraph`<br>Length of (x, y) ignoring Z. |
+| <a id="an_vecmultiply"></a>`AN_VecMultiply` | Vec Multiply | Vector | D | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `x` float, `y` float, `z` float | none | `MathGraph.VecMultiplyForGraph`<br>Component-wise product of two vectors. |
+| <a id="an_vecnegate"></a>`AN_VecNegate` | Vec Negate | Vector | D | in: `ax` float, `ay` float, `az` float<br>out: `x` float, `y` float, `z` float | none | `MathGraph.VecNegateForGraph`<br>The negated vector. |
+| <a id="an_vecproject"></a>`AN_VecProject` | Vec Project | Vector | D | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `x` float, `y` float, `z` float | none | `MathGraph.VecProjectForGraph`<br>The part of a along b; a zero b gives zero. |
+| <a id="an_vecreflect"></a>`AN_VecReflect` | Vec Reflect | Vector | D | in: `vx` float, `vy` float, `vz` float, `nx` float, `ny` float, `nz` float<br>out: `x` float, `y` float, `z` float | none | `MathGraph.VecReflectForGraph`<br>Mirrors a vector about a surface normal that need not be unit. |
+| <a id="an_wrap"></a>`AN_Wrap` | Wrap | Math | D | in: `value` float, `min` float, `max` float<br>out: `result` float | none | `MathGraph.WrapForGraph`<br>Wraps a value into [min, max); an empty range gives min. |

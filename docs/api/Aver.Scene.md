@@ -2,169 +2,317 @@
 
 # Aver.Scene public API
 
-10 public types and 123 public members, read from `scripting/csharp/Aver.Scene/` (4 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+10 public types and 123 public members, read from `scripting/csharp/Aver.Scene/` (4 source files). Members are grouped by kind and sorted alphabetically; signatures are single lines as declared, and the summary is the first sentence of the XML summary. Every type in every assembly: [index](index.md); every member: [members-a-z](members-a-z.md).
+
+## Contents
+
+**namespace Aver.Scene**
+
+- Classes: [Assets](#assets), [Decals](#decals), [Scene](#scene), [SceneIds](#sceneids)
+- Structs: [DecalDesc](#decaldesc), [Quat](#quat), [Rot](#rot), [Vec3](#vec3)
+- Enums: [DecalChannels](#decalchannels), [SceneError](#sceneerror)
 
 ## namespace Aver.Scene
+
+<a id="assets"></a>
 
 ### Assets
 
 `public static class Assets` - Asset identity: the same fnv1a64 the engine's Assets layer stamps on an asset.
 
-- `public static long ObjectIdOf(string path)` - fnv1a64 of the UTF-8 bytes of path.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ObjectIdOf` | `public static long ObjectIdOf(string path)` | fnv1a64 of the UTF-8 bytes of path. |
+
+<a id="decalchannels"></a>
 
 ### DecalChannels
 
 `public enum DecalChannels` - Channels a decal can opt out of (CDecal flag bits).
 
-Values: `None = 0`, `Colour = 0x2`, `Normal = 0x4`, `Roughness = 0x8`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Colour` | `Colour = 0x2` |  |
+| `None` | `None = 0` |  |
+| `Normal` | `Normal = 0x4` |  |
+| `Roughness` | `Roughness = 0x8` |  |
+
+<a id="decaldesc"></a>
 
 ### DecalDesc
 
 `public struct DecalDesc` - What a gameplay decal looks like.
 
-- `public Vec3 Position` - World position of the decal's centre, centimetres.
-- `public Vec3 Normal` - The surface normal the decal sits on.
-- `public Vec3 Up` - Up hint for a surface-aligned decal; zero means +Z.
-- `public float RollRadians` - Roll about the projection axis in radians (surface-aligned decals).
-- `public Quat Rotation` - Pose used when Normal is zero.
-- `public Vec3 SizeCm` - Full box size: X depth, Y width, Z height, centimetres.
-- `public Vec3 Tint` - Linear colour multiplying the base texture; all zero reads as white.
-- `public float Transparency` - 0 opaque ..
-- `public float NormalStrength`
-- `public float Roughness`
-- `public float Metallic`
-- `public float EdgeFade`
-- `public float AngleFadeStartDegrees`
-- `public float AngleFadeEndDegrees`
-- `public float FadeDistanceCm`
-- `public float UvScaleU, UvScaleV, UvOffsetU, UvOffsetV`
-- `public float LifetimeSeconds` - Seconds until the decal is gone; 0 keeps it until the pool recycles it.
-- `public float FadeOutSeconds` - Fade-out at the end of the lifetime.
-- `public int SortOrder`
-- `public DecalChannels Disable`
-- `public long BaseTexture, NormalTexture, OrmTexture` - Texture ObjectIds: ObjectIdOf of the content-relative path.
-- `public long EmissionTexture` - An sRGB image added to the surface's emission (drawn by the plain raster pipeline).
-- `public float EmissionEnergy` - Multiplies the emission image; zero reads as 1.
-- `public float AlbedoMix` - With UseAlbedoMix: the base colour's weight against the surface's, 0 to 1.
-- `public bool UseAlbedoMix`
-- `public float UpperFade, LowerFade` - With UseDepthFade: the exponent of (1 - |depth| / half) on the side the projector looks from (UpperFade) and on the far side.
-- `public bool UseDepthFade`
-- `public float NormalFade` - Above 0: the smoothstep start (0 to under 1) of the fade where the surface faces away from the projector.
-- `public static DecalDesc OnSurface(Vec3 position, Vec3 normal, Vec3 sizeCm)` - A decal at position on a surface with normal normal.
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AlbedoMix` | `public float AlbedoMix` | With UseAlbedoMix: the base colour's weight against the surface's, 0 to 1. |
+| `AngleFadeEndDegrees` | `public float AngleFadeEndDegrees` |  |
+| `AngleFadeStartDegrees` | `public float AngleFadeStartDegrees` |  |
+| `Disable` | `public DecalChannels Disable` |  |
+| `EdgeFade` | `public float EdgeFade` |  |
+| `EmissionEnergy` | `public float EmissionEnergy` | Multiplies the emission image; zero reads as 1. |
+| `EmissionTexture` | `public long EmissionTexture` | An sRGB image added to the surface's emission (drawn by the plain raster pipeline). |
+| `FadeDistanceCm` | `public float FadeDistanceCm` |  |
+| `FadeOutSeconds` | `public float FadeOutSeconds` | Fade-out at the end of the lifetime. |
+| `LifetimeSeconds` | `public float LifetimeSeconds` | Seconds until the decal is gone; 0 keeps it until the pool recycles it. |
+| `LowerFade` | `public float UpperFade, LowerFade` | With UseDepthFade: the exponent of (1 - \|depth\| / half) on the side the projector looks from (UpperFade) and on the far side. |
+| `Metallic` | `public float Metallic` |  |
+| `Normal` | `public Vec3 Normal` | The surface normal the decal sits on. |
+| `NormalFade` | `public float NormalFade` | Above 0: the smoothstep start (0 to under 1) of the fade where the surface faces away from the projector. |
+| `NormalStrength` | `public float NormalStrength` |  |
+| `OrmTexture` | `public long BaseTexture, NormalTexture, OrmTexture` | Texture ObjectIds: ObjectIdOf of the content-relative path. |
+| `Position` | `public Vec3 Position` | World position of the decal's centre, centimetres. |
+| `RollRadians` | `public float RollRadians` | Roll about the projection axis in radians (surface-aligned decals). |
+| `Rotation` | `public Quat Rotation` | Pose used when Normal is zero. |
+| `Roughness` | `public float Roughness` |  |
+| `SizeCm` | `public Vec3 SizeCm` | Full box size: X depth, Y width, Z height, centimetres. |
+| `SortOrder` | `public int SortOrder` |  |
+| `Tint` | `public Vec3 Tint` | Linear colour multiplying the base texture; all zero reads as white. |
+| `Transparency` | `public float Transparency` | 0 opaque .. |
+| `Up` | `public Vec3 Up` | Up hint for a surface-aligned decal; zero means +Z. |
+| `UseAlbedoMix` | `public bool UseAlbedoMix` |  |
+| `UseDepthFade` | `public bool UseDepthFade` |  |
+| `UvOffsetV` | `public float UvScaleU, UvScaleV, UvOffsetU, UvOffsetV` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `OnSurface` | `public static DecalDesc OnSurface(Vec3 position, Vec3 normal, Vec3 sizeCm)` | A decal at position on a surface with normal normal. |
+
+<a id="decals"></a>
 
 ### Decals
 
 `public static class Decals` - The pooled gameplay-decal API: impacts, footprints, scorch marks.
 
-- `public const int ComponentId = 16` - The fixed component id of CDecal (Components.hpp).
-- `public static int AbiVersion { get; }` - The ABI version the DLL was built with.
-- `public static int SetCapacity(int capacity)` - Sets how many pooled decals may be alive at once (default 256), dropping the current ones.
-- `public static int Spawn(in DecalDesc d)` - Spawns a decal and returns its entity, or 0 when the pool is disabled.
-- `public static bool Release(int entity)` - Gives one decal back now.
-- `public static void Clear()` - Releases every pooled decal.
-- `public static void Tick(float deltaSeconds)` - Advances decal lifetimes; the game loop calls this once per frame.
-- `public static int ActiveCount { get; }` - Pooled decals currently visible.
-- `public static int Capacity { get; }` - The pool's capacity.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AbiVersion` | `public static int AbiVersion { get; }` | The ABI version the DLL was built with. |
+| `ActiveCount` | `public static int ActiveCount { get; }` | Pooled decals currently visible. |
+| `Capacity` | `public static int Capacity { get; }` | The pool's capacity. |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ComponentId` | `public const int ComponentId = 16` | The fixed component id of CDecal (Components.hpp). |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Clear` | `public static void Clear()` | Releases every pooled decal. |
+| `Release` | `public static bool Release(int entity)` | Gives one decal back now. |
+| `SetCapacity` | `public static int SetCapacity(int capacity)` | Sets how many pooled decals may be alive at once (default 256), dropping the current ones. |
+| `Spawn` | `public static int Spawn(in DecalDesc d)` | Spawns a decal and returns its entity, or 0 when the pool is disabled. |
+| `Tick` | `public static void Tick(float deltaSeconds)` | Advances decal lifetimes; the game loop calls this once per frame. |
+
+<a id="quat"></a>
 
 ### Quat
 
 `public struct Quat : System.IEquatable<Quat>` - A rotation as a unit quaternion (x, y, z, w), the form the scene stores in CLocal.rotation.
 
-- `public float X`
-- `public float Y`
-- `public float Z`
-- `public float W`
-- `public Quat(float x, float y, float z, float w)`
-- `public static Quat Identity { get; }`
-- `public static Quat FromAxisAngle(Vec3 axis, float radians)` - A rotation of radians about unit axis.
-- `public static Quat operator *(Quat a, Quat b)`
-- `public float YawDegrees()` - The yaw component in degrees.
-- `public bool Equals(Quat o)`
-- `public override bool Equals(object? o)`
-- `public override int GetHashCode()`
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Quat` | `public Quat(float x, float y, float z, float w)` |  |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Identity` | `public static Quat Identity { get; }` |  |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `W` | `public float W` |  |
+| `X` | `public float X` |  |
+| `Y` | `public float Y` |  |
+| `Z` | `public float Z` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Equals` | `public bool Equals(Quat o)` |  |
+| `Equals` | `public override bool Equals(object? o)` |  |
+| `FromAxisAngle` | `public static Quat FromAxisAngle(Vec3 axis, float radians)` | A rotation of radians about unit axis. |
+| `GetHashCode` | `public override int GetHashCode()` |  |
+| `operator *` | `public static Quat operator *(Quat a, Quat b)` |  |
+| `YawDegrees` | `public float YawDegrees()` | The yaw component in degrees. |
+
+<a id="rot"></a>
 
 ### Rot
 
 `public struct Rot : System.IEquatable<Rot>` - Rotation in degrees: yaw about Up (+Z), pitch about Right (+Y), roll about Forward (+X).
 
-- `public float Yaw`
-- `public float Pitch`
-- `public float Roll`
-- `public Rot(float yaw, float pitch, float roll)`
-- `public static Rot Zero { get; }`
-- `public Quat ToQuat()` - The quaternion the scene stores.
-- `public bool Equals(Rot o)`
-- `public override bool Equals(object? o)`
-- `public override int GetHashCode()`
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Rot` | `public Rot(float yaw, float pitch, float roll)` |  |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Zero` | `public static Rot Zero { get; }` |  |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Pitch` | `public float Pitch` |  |
+| `Roll` | `public float Roll` |  |
+| `Yaw` | `public float Yaw` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Equals` | `public bool Equals(Rot o)` |  |
+| `Equals` | `public override bool Equals(object? o)` |  |
+| `GetHashCode` | `public override int GetHashCode()` |  |
+| `ToQuat` | `public Quat ToQuat()` | The quaternion the scene stores. |
+
+<a id="scene"></a>
 
 ### Scene
 
 `public static class Scene` - Reads the reason the last scene call failed.
 
-- `public static SceneError LastError { get; }` - Why the last scene call on this thread failed, or Ok.
-- `public static bool LastCallFailed { get; }` - True when the last scene call on this thread recorded a failure.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `LastCallFailed` | `public static bool LastCallFailed { get; }` | True when the last scene call on this thread recorded a failure. |
+| `LastError` | `public static SceneError LastError { get; }` | Why the last scene call on this thread failed, or Ok. |
+
+<a id="sceneerror"></a>
 
 ### SceneError
 
 `public enum SceneError` - Why a scene call failed, mirroring aver::AbiError in modules/core/include/aver/core/ErrorCodes.hpp.
 
-Values: `Ok = 0`, `BadHandle = -1`, `NullPointer = -2`, `NotInitialised = -3`, `OutOfRange = -4`, `Unsupported = -5`, `InvalidArgument = -6`, `AllocationFailed = -7`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AllocationFailed` | `AllocationFailed = -7` |  |
+| `BadHandle` | `BadHandle = -1` |  |
+| `InvalidArgument` | `InvalidArgument = -6` |  |
+| `NotInitialised` | `NotInitialised = -3` |  |
+| `NullPointer` | `NullPointer = -2` |  |
+| `Ok` | `Ok = 0` |  |
+| `OutOfRange` | `OutOfRange = -4` |  |
+| `Unsupported` | `Unsupported = -5` |  |
+
+<a id="sceneids"></a>
 
 ### SceneIds
 
 `public static class SceneIds` - The dense ids the C# surface addresses the scene by: the eight fixed built-in component ids, and field ids resolved once by qualified name and cached.
 
-- `public const int CLocal = 1` - Fixed component ids — constants because the built-ins register first (Components.hpp).
-- `public const int CWorld = 2`
-- `public const int CHierarchy = 3`
-- `public const int CName = 4`
-- `public const int CTags = 5`
-- `public const int CMeshRenderer = 6`
-- `public const int CLight = 7`
-- `public const int CCamera = 8`
-- `public const int CSkeletalMesh = 9`
-- `public const int CAnimator = 10`
-- `public const int CParticleEmitter = 11`
-- `public const int CAttachment = 12`
-- `public static int Field(string qualifiedName)` - Resolves and caches a dense field id by qualified name, e.g.
-- `public static int LocalPosition { get; }`
-- `public static int LocalRotation { get; }`
-- `public static int LocalScale { get; }`
-- `public static int MeshMesh { get; }`
-- `public static int MeshMaterial { get; }`
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `LocalPosition` | `public static int LocalPosition { get; }` |  |
+| `LocalRotation` | `public static int LocalRotation { get; }` |  |
+| `LocalScale` | `public static int LocalScale { get; }` |  |
+| `MeshMaterial` | `public static int MeshMaterial { get; }` |  |
+| `MeshMesh` | `public static int MeshMesh { get; }` |  |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `CAnimator` | `public const int CAnimator = 10` |  |
+| `CAttachment` | `public const int CAttachment = 12` |  |
+| `CCamera` | `public const int CCamera = 8` |  |
+| `CHierarchy` | `public const int CHierarchy = 3` |  |
+| `CLight` | `public const int CLight = 7` |  |
+| `CLocal` | `public const int CLocal = 1` | Fixed component ids — constants because the built-ins register first (Components.hpp). |
+| `CMeshRenderer` | `public const int CMeshRenderer = 6` |  |
+| `CName` | `public const int CName = 4` |  |
+| `CParticleEmitter` | `public const int CParticleEmitter = 11` |  |
+| `CSkeletalMesh` | `public const int CSkeletalMesh = 9` |  |
+| `CTags` | `public const int CTags = 5` |  |
+| `CWorld` | `public const int CWorld = 2` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Field` | `public static int Field(string qualifiedName)` | Resolves and caches a dense field id by qualified name, e.g. |
+
+<a id="vec3"></a>
 
 ### Vec3
 
 `public struct Vec3 : System.IEquatable<Vec3>` - A position or direction: centimetres, +X forward, +Y right, +Z up, left-handed.
 
-- `public float X`
-- `public float Y`
-- `public float Z`
-- `public Vec3(float x, float y, float z)`
-- `public static Vec3 Up { get; }`
-- `public static Vec3 Forward { get; }`
-- `public static Vec3 Right { get; }`
-- `public static Vec3 Zero { get; }`
-- `public static Vec3 One { get; }`
-- `public static Vec3 operator +(Vec3 a, Vec3 b)`
-- `public static Vec3 operator -(Vec3 a, Vec3 b)`
-- `public static Vec3 operator *(Vec3 a, float s)`
-- `public static Vec3 operator *(float s, Vec3 a)`
-- `public static Vec3 operator /(Vec3 a, float s)`
-- `public static Vec3 operator -(Vec3 a)`
-- `public static bool operator ==(Vec3 a, Vec3 b)`
-- `public static bool operator !=(Vec3 a, Vec3 b)`
-- `public float Length { get; }` - Length in centimetres.
-- `public float LengthSquared { get; }` - Length squared, in centimetres squared.
-- `public Vec3 Normalized { get; }` - This direction at unit length, or Zero if it is too short to have one.
-- `public bool IsNearlyZero { get; }` - True when this is within a hair of the zero vector.
-- `public static float Dot(Vec3 a, Vec3 b)` - The dot product.
-- `public static Vec3 Cross(Vec3 a, Vec3 b)` - The cross product, left-handed: Cross(Forward, Right) is Up.
-- `public static float Distance(Vec3 a, Vec3 b)` - Distance in centimetres.
-- `public static float DistanceSquared(Vec3 a, Vec3 b)` - Squared distance, for the same reason as LengthSquared.
-- `public static Vec3 Lerp(Vec3 a, Vec3 b, float t)` - Linear interpolation; t is clamped to 0..1.
-- `public static Vec3 MoveTowards(Vec3 a, Vec3 b, float maxDistance)` - Steps from a towards b by at most maxDistance centimetres, stopping on the target rather than overshooting.
-- `public bool Equals(Vec3 o)`
-- `public override bool Equals(object? o)`
-- `public override int GetHashCode()`
-- `public override string ToString()`
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Vec3` | `public Vec3(float x, float y, float z)` |  |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Forward` | `public static Vec3 Forward { get; }` |  |
+| `IsNearlyZero` | `public bool IsNearlyZero { get; }` | True when this is within a hair of the zero vector. |
+| `Length` | `public float Length { get; }` | Length in centimetres. |
+| `LengthSquared` | `public float LengthSquared { get; }` | Length squared, in centimetres squared. |
+| `Normalized` | `public Vec3 Normalized { get; }` | This direction at unit length, or Zero if it is too short to have one. |
+| `One` | `public static Vec3 One { get; }` |  |
+| `Right` | `public static Vec3 Right { get; }` |  |
+| `Up` | `public static Vec3 Up { get; }` |  |
+| `Zero` | `public static Vec3 Zero { get; }` |  |
+
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `X` | `public float X` |  |
+| `Y` | `public float Y` |  |
+| `Z` | `public float Z` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Cross` | `public static Vec3 Cross(Vec3 a, Vec3 b)` | The cross product, left-handed: Cross(Forward, Right) is Up. |
+| `Distance` | `public static float Distance(Vec3 a, Vec3 b)` | Distance in centimetres. |
+| `DistanceSquared` | `public static float DistanceSquared(Vec3 a, Vec3 b)` | Squared distance, for the same reason as LengthSquared. |
+| `Dot` | `public static float Dot(Vec3 a, Vec3 b)` | The dot product. |
+| `Equals` | `public bool Equals(Vec3 o)` |  |
+| `Equals` | `public override bool Equals(object? o)` |  |
+| `GetHashCode` | `public override int GetHashCode()` |  |
+| `Lerp` | `public static Vec3 Lerp(Vec3 a, Vec3 b, float t)` | Linear interpolation; t is clamped to 0..1. |
+| `MoveTowards` | `public static Vec3 MoveTowards(Vec3 a, Vec3 b, float maxDistance)` | Steps from a towards b by at most maxDistance centimetres, stopping on the target rather than overshooting. |
+| `operator !=` | `public static bool operator !=(Vec3 a, Vec3 b)` |  |
+| `operator *` | `public static Vec3 operator *(Vec3 a, float s)` |  |
+| `operator *` | `public static Vec3 operator *(float s, Vec3 a)` |  |
+| `operator +` | `public static Vec3 operator +(Vec3 a, Vec3 b)` |  |
+| `operator -` | `public static Vec3 operator -(Vec3 a)` |  |
+| `operator -` | `public static Vec3 operator -(Vec3 a, Vec3 b)` |  |
+| `operator /` | `public static Vec3 operator /(Vec3 a, float s)` |  |
+| `operator ==` | `public static bool operator ==(Vec3 a, Vec3 b)` |  |
+| `ToString` | `public override string ToString()` |  |

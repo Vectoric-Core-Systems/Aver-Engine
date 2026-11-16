@@ -2,20 +2,22 @@
 
 # LevelInstance nodes
 
+Contents: 11 nodes sorted A-Z by type (`AN_` prefix ignored); categories: Level Instance. [All nodes A-Z](index.md).
+
 11 nodes. Rows: `scripting/csharp/Aver.Graph/GraphLevelInstanceNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsLevelInstances.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
 | Type | Display | Category | Path | Pins | Attributes | C# |
 |---|---|---|---|---|---|---|
-| `AN_DestroyLevelInstance` | Destroy Level Instance | Level Instance | P | in: `exec` exec, `root` int<br>out: `then` exec, `success` bool | none | `GraphLevelInstances.DestroyForGraph`<br>AN_DestroyLevelInstance. |
-| `AN_FindLevelInstanceEntity` | Find Level Instance Entity | Level Instance | D | in: `root` int<br>out: `entity` int | `path` (optional) | `GraphLevelInstances.FindForGraph`<br>AN_FindLevelInstanceEntity: the entity at the id path inside the instance, 0 if none; an empty path is the root. |
-| `AN_GetLevelInstanceAt` | Get Level Instance At | Level Instance | D | in: `index` int<br>out: `root` int | none | `GraphLevelInstances.AtForGraph`<br>AN_GetLevelInstanceAt. |
-| `AN_GetLevelInstanceBounds` | Get Level Instance Bounds | Level Instance | D | in: `root` int<br>out: `minX` float, `minY` float, `minZ` float, `maxX` float, `maxY` float, `maxZ` float, `success` bool | none | `GraphLevelInstances.BoundsForGraph`<br>AN_GetLevelInstanceBounds: the world AABB, false when unknown (the outputs are then 0). |
-| `AN_GetLevelInstanceCount` | Get Level Instance Count | Level Instance | D | out: `count` int | none | `GraphLevelInstances.CountForGraph`<br>AN_GetLevelInstanceCount. |
-| `AN_GetLevelInstanceRoot` | Get Level Instance Root | Level Instance | D | in: `entity` int<br>out: `root` int | none | `GraphLevelInstances.RootOfForGraph`<br>AN_GetLevelInstanceRoot: the root of the instance the entity is part of, 0 if none. |
-| `AN_IsLevelInstanceLoaded` | Is Level Instance Loaded | Level Instance | D | in: `root` int<br>out: `loaded` bool | none | `GraphLevelInstances.IsLoadedForGraph`<br>AN_IsLevelInstanceLoaded. |
-| `AN_ReloadLevelInstance` | Reload Level Instance | Level Instance | P | in: `exec` exec, `root` int<br>out: `then` exec, `success` bool | none | `GraphLevelInstances.ReloadForGraph`<br>AN_ReloadLevelInstance. |
-| `AN_SetLevelInstanceLoaded` | Set Level Instance Loaded | Level Instance | P | in: `exec` exec, `root` int, `loaded` bool = true<br>out: `then` exec, `success` bool | none | `GraphLevelInstances.SetLoadedForGraph`<br>AN_SetLevelInstanceLoaded. |
-| `AN_SetLevelInstancePacked` | Set Level Instance Packed | Level Instance | P | in: `exec` exec, `root` int, `packed` bool<br>out: `then` exec, `success` bool | none | `GraphLevelInstances.SetPackedForGraph`<br>AN_SetLevelInstancePacked: true when the effective state matches the request. |
-| `AN_SpawnLevelInstance` | Spawn Level Instance | Level Instance | P | in: `exec` exec, `parent` int, `x` float, `y` float, `z` float, `yaw` float, `scale` float = 1, `packed` bool<br>out: `then` exec, `entity` int | `level` | `GraphLevelInstances.SpawnForGraph`<br>AN_SpawnLevelInstance: the new instance's root, 0 on failure. |
+| <a id="an_destroylevelinstance"></a>`AN_DestroyLevelInstance` | Destroy Level Instance | Level Instance | P | in: `exec` exec, `root` int<br>out: `then` exec, `success` bool | none | `GraphLevelInstances.DestroyForGraph`<br>AN_DestroyLevelInstance. |
+| <a id="an_findlevelinstanceentity"></a>`AN_FindLevelInstanceEntity` | Find Level Instance Entity | Level Instance | D | in: `root` int<br>out: `entity` int | `path` (optional) | `GraphLevelInstances.FindForGraph`<br>AN_FindLevelInstanceEntity: the entity at the id path inside the instance, 0 if none; an empty path is the root. |
+| <a id="an_getlevelinstanceat"></a>`AN_GetLevelInstanceAt` | Get Level Instance At | Level Instance | D | in: `index` int<br>out: `root` int | none | `GraphLevelInstances.AtForGraph`<br>AN_GetLevelInstanceAt. |
+| <a id="an_getlevelinstancebounds"></a>`AN_GetLevelInstanceBounds` | Get Level Instance Bounds | Level Instance | D | in: `root` int<br>out: `minX` float, `minY` float, `minZ` float, `maxX` float, `maxY` float, `maxZ` float, `success` bool | none | `GraphLevelInstances.BoundsForGraph`<br>AN_GetLevelInstanceBounds: the world AABB, false when unknown (the outputs are then 0). |
+| <a id="an_getlevelinstancecount"></a>`AN_GetLevelInstanceCount` | Get Level Instance Count | Level Instance | D | out: `count` int | none | `GraphLevelInstances.CountForGraph`<br>AN_GetLevelInstanceCount. |
+| <a id="an_getlevelinstanceroot"></a>`AN_GetLevelInstanceRoot` | Get Level Instance Root | Level Instance | D | in: `entity` int<br>out: `root` int | none | `GraphLevelInstances.RootOfForGraph`<br>AN_GetLevelInstanceRoot: the root of the instance the entity is part of, 0 if none. |
+| <a id="an_islevelinstanceloaded"></a>`AN_IsLevelInstanceLoaded` | Is Level Instance Loaded | Level Instance | D | in: `root` int<br>out: `loaded` bool | none | `GraphLevelInstances.IsLoadedForGraph`<br>AN_IsLevelInstanceLoaded. |
+| <a id="an_reloadlevelinstance"></a>`AN_ReloadLevelInstance` | Reload Level Instance | Level Instance | P | in: `exec` exec, `root` int<br>out: `then` exec, `success` bool | none | `GraphLevelInstances.ReloadForGraph`<br>AN_ReloadLevelInstance. |
+| <a id="an_setlevelinstanceloaded"></a>`AN_SetLevelInstanceLoaded` | Set Level Instance Loaded | Level Instance | P | in: `exec` exec, `root` int, `loaded` bool = true<br>out: `then` exec, `success` bool | none | `GraphLevelInstances.SetLoadedForGraph`<br>AN_SetLevelInstanceLoaded. |
+| <a id="an_setlevelinstancepacked"></a>`AN_SetLevelInstancePacked` | Set Level Instance Packed | Level Instance | P | in: `exec` exec, `root` int, `packed` bool<br>out: `then` exec, `success` bool | none | `GraphLevelInstances.SetPackedForGraph`<br>AN_SetLevelInstancePacked: true when the effective state matches the request. |
+| <a id="an_spawnlevelinstance"></a>`AN_SpawnLevelInstance` | Spawn Level Instance | Level Instance | P | in: `exec` exec, `parent` int, `x` float, `y` float, `z` float, `yaw` float, `scale` float = 1, `packed` bool<br>out: `then` exec, `entity` int | `level` | `GraphLevelInstances.SpawnForGraph`<br>AN_SpawnLevelInstance: the new instance's root, 0 on failure. |

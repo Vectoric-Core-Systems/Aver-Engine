@@ -2,318 +2,595 @@
 
 # Aver.Synapse public API
 
-38 public types and 176 public members, read from `scripting/csharp/Aver.Synapse/` (8 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+38 public types and 176 public members, read from `scripting/csharp/Aver.Synapse/` (8 source files). Members are grouped by kind and sorted alphabetically; signatures are single lines as declared, and the summary is the first sentence of the XML summary. Every type in every assembly: [index](index.md); every member: [members-a-z](members-a-z.md).
+
+## Contents
+
+**namespace Aver.Synapse**
+
+- Classes: [AverAiActionAttribute](#averaiactionattribute), [AverAiConditionAttribute](#averaiconditionattribute), [AverEqsTestAttribute](#avereqstestattribute), [Cover](#cover), [Crowd](#crowd), [Eqs](#eqs), [Hearing](#hearing), [ManagedAi](#managedai), [QueryGraph](#querygraph), [SmartObjects](#smartobjects), [Squad](#squad), [SynapseAi](#synapseai), [SynapseAiGraph](#synapseaigraph)
+- Structs: [AiTaskContext](#aitaskcontext), [EqsRequest](#eqsrequest), [EqsRun](#eqsrun), [EqsTestContext](#eqstestcontext)
+- Enums: [AiStatus](#aistatus), [ClaimRefusal](#claimrefusal), [CrowdBackend](#crowdbackend), [CrowdDrive](#crowddrive), [CrowdMode](#crowdmode), [EqsStatus](#eqsstatus), [FindFlags](#findflags), [ManagedKind](#managedkind), [ReleaseReason](#releasereason), [SlotState](#slotstate), [SquadRole](#squadrole), [SynapseError](#synapseerror)
+- Records: [ClaimInfo](#claiminfo), [EqsItem](#eqsitem), [HeardNoise](#heardnoise), [ManagedLeaf](#managedleaf), [SlotInfo](#slotinfo), [SlotRef](#slotref)
+- Delegates: [AiActionFn](#aiactionfn), [AiConditionFn](#aiconditionfn), [EqsTestFn](#eqstestfn)
 
 ## namespace Aver.Synapse
+
+<a id="aiactionfn"></a>
 
 ### AiActionFn
 
 `public delegate AiStatus AiActionFn(in AiTaskContext c)`
 
+<a id="aiconditionfn"></a>
+
 ### AiConditionFn
 
 `public delegate bool AiConditionFn(in AiTaskContext c)`
+
+<a id="aistatus"></a>
 
 ### AiStatus
 
 `public enum AiStatus` - What an action leaf answers each tick.
 
-Values: `Running = 0`, `Success = 1`, `Failure = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Failure` | `Failure = 2` |  |
+| `Running` | `Running = 0` |  |
+| `Success` | `Success = 1` |  |
+
+<a id="aitaskcontext"></a>
 
 ### AiTaskContext
 
 `public struct AiTaskContext` - One call of an action or condition leaf.
 
-- `public int Entity`
-- `public float DeltaTime, Elapsed`
-- `public bool First, Aborting`
-- `public float P0, P1, P2, P3`
-- `public string Text`
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Aborting` | `public bool First, Aborting` |  |
+| `Elapsed` | `public float DeltaTime, Elapsed` |  |
+| `Entity` | `public int Entity` |  |
+| `P3` | `public float P0, P1, P2, P3` |  |
+| `Text` | `public string Text` |  |
+
+<a id="averaiactionattribute"></a>
 
 ### AverAiActionAttribute
 
 `public sealed class AverAiActionAttribute(string name) : Attribute`
 
-- `public string Name { get; }`
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Name` | `public string Name { get; }` |  |
+
+<a id="averaiconditionattribute"></a>
 
 ### AverAiConditionAttribute
 
 `public sealed class AverAiConditionAttribute(string name) : Attribute`
 
-- `public string Name { get; }`
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Name` | `public string Name { get; }` |  |
+
+<a id="avereqstestattribute"></a>
 
 ### AverEqsTestAttribute
 
 `public sealed class AverEqsTestAttribute(string name) : Attribute`
 
-- `public string Name { get; }`
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Name` | `public string Name { get; }` |  |
+
+<a id="claiminfo"></a>
 
 ### ClaimInfo
 
 `public readonly record struct ClaimInfo(int Handle, SlotRef Slot, int User, SlotState State, float X, float Y, float Z, float Yaw, float EntryX, float EntryY, float EntryZ, float EntryYaw)`
 
+<a id="claimrefusal"></a>
+
 ### ClaimRefusal
 
 `public enum ClaimRefusal` - Why a claim was refused.
 
-Values: `None = 0`, `NoSuchSlot`, `Disabled`, `NotFree`, `Tags`, `UserLimit`, `NoUser`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Disabled` | `Disabled` |  |
+| `None` | `None = 0` |  |
+| `NoSuchSlot` | `NoSuchSlot` |  |
+| `NotFree` | `NotFree` |  |
+| `NoUser` | `NoUser` |  |
+| `Tags` | `Tags` |  |
+| `UserLimit` | `UserLimit` |  |
+
+<a id="cover"></a>
 
 ### Cover
 
 `public static class Cover` - Cover points, searches and reservations.
 
-- `public static int Add(float x, float y, float dirX, float dirY, bool high = true, float arcHalfAngleDeg = 70f)` - Adds a cover point at (x, y); (dirX, dirY) points at the obstacle that protects it.
-- `public static bool Remove(int coverId)`
-- `public static bool AttachMarker(int entity, bool high = true, float arcHalfAngleDeg = 70f)` - Turns an entity into a cover marker: its position is where to stand, its +X axis points at the obstacle.
-- `public static void SetAutoGenerate(bool on, float minSpacingCm = 150f)` - Derives cover from the baked navigation grid's walls, in addition to authored points.
-- `public static int Count { get; }`
-- `public static bool Find(int seeker, float threatX, float threatY, float threatZ, out int coverId, out float x, out float y, float maxSeekCm = 2500f, float minThreatDistCm = 300f, bool requireHigh = false)` - Finds and reserves the cheapest point that shields seeker from the threat.
-- `public static bool Release(int seeker)`
-- `public static bool IsCovered(int seeker, float threatX, float threatY, float threatZ)` - True when the seeker stands on its reserved point and that point still shields it from the threat.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Count` | `public static int Count { get; }` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Add` | `public static int Add(float x, float y, float dirX, float dirY, bool high = true, float arcHalfAngleDeg = 70f)` | Adds a cover point at (x, y); (dirX, dirY) points at the obstacle that protects it. |
+| `AttachMarker` | `public static bool AttachMarker(int entity, bool high = true, float arcHalfAngleDeg = 70f)` | Turns an entity into a cover marker: its position is where to stand, its +X axis points at the obstacle. |
+| `Find` | `public static bool Find(int seeker, float threatX, float threatY, float threatZ, out int coverId, out float x, out float y, float maxSeekCm = 2500f, float minThreatDistCm = 300f, bool requireHigh = false)` | Finds and reserves the cheapest point that shields seeker from the threat. |
+| `IsCovered` | `public static bool IsCovered(int seeker, float threatX, float threatY, float threatZ)` | True when the seeker stands on its reserved point and that point still shields it from the threat. |
+| `Release` | `public static bool Release(int seeker)` |  |
+| `Remove` | `public static bool Remove(int coverId)` |  |
+| `SetAutoGenerate` | `public static void SetAutoGenerate(bool on, float minSpacingCm = 150f)` | Derives cover from the baked navigation grid's walls, in addition to authored points. |
+
+<a id="crowd"></a>
 
 ### Crowd
 
 `public static class Crowd` - Steering, avoidance and crowd settings.
 
-- `public static bool Attach(int entity)` - Makes the entity a crowd agent, with radius and speed taken from its path agent when it has one.
-- `public static bool Configure(int entity, float radiusCm, float maxSpeedCm, float maxAccelCm = 1200f, float priority = 0f)`
-- `public static bool SetMode(int entity, CrowdMode mode, float x = 0f, float y = 0f, float z = 0f)` - Chooses the steering behaviour.
-- `public static bool SetEnabled(int entity, bool enabled)`
-- `public static bool TryGetVelocity(int entity, out float vx, out float vy, out float speed)` - The collision-free velocity for this tick.
-- `public static CrowdBackend Backend { get; set; }` - The solver you asked for.
-- `public static string ActiveBackendName { get; }` - The solver actually in use right now ("cpu-orca" or "gpu-orca").
-- `public static int MaxAgents { get; set; }` - The most agents simulated; the rest (highest entity ids) are left alone.
-- `public static int AgentCount { get; }` - Agents simulated on the last tick.
-- `public static int OverflowCount { get; }` - Agents left out of the last tick because the cap was reached.
-- `public static CrowdDrive Drive { set; }`
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ActiveBackendName` | `public static string ActiveBackendName { get; }` | The solver actually in use right now ("cpu-orca" or "gpu-orca"). |
+| `AgentCount` | `public static int AgentCount { get; }` | Agents simulated on the last tick. |
+| `Backend` | `public static CrowdBackend Backend { get; set; }` | The solver you asked for. |
+| `Drive` | `public static CrowdDrive Drive { set; }` |  |
+| `MaxAgents` | `public static int MaxAgents { get; set; }` | The most agents simulated; the rest (highest entity ids) are left alone. |
+| `OverflowCount` | `public static int OverflowCount { get; }` | Agents left out of the last tick because the cap was reached. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Attach` | `public static bool Attach(int entity)` | Makes the entity a crowd agent, with radius and speed taken from its path agent when it has one. |
+| `Configure` | `public static bool Configure(int entity, float radiusCm, float maxSpeedCm, float maxAccelCm = 1200f, float priority = 0f)` |  |
+| `SetEnabled` | `public static bool SetEnabled(int entity, bool enabled)` |  |
+| `SetMode` | `public static bool SetMode(int entity, CrowdMode mode, float x = 0f, float y = 0f, float z = 0f)` | Chooses the steering behaviour. |
+| `TryGetVelocity` | `public static bool TryGetVelocity(int entity, out float vx, out float vy, out float speed)` | The collision-free velocity for this tick. |
+
+<a id="crowdbackend"></a>
 
 ### CrowdBackend
 
 `public enum CrowdBackend` - Which solver plans crowd avoidance.
 
-Values: `Cpu = 0`, `Gpu = 1`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Cpu` | `Cpu = 0` |  |
+| `Gpu` | `Gpu = 1` |  |
+
+<a id="crowddrive"></a>
 
 ### CrowdDrive
 
 `public enum CrowdDrive` - Who moves the entities.
 
-Values: `Advise = 0`, `Move = 1`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Advise` | `Advise = 0` |  |
+| `Move` | `Move = 1` |  |
+
+<a id="crowdmode"></a>
 
 ### CrowdMode
 
 `public enum CrowdMode` - How a crowd agent chooses where it wants to go.
 
-Values: `FollowAgent = 0`, `Seek = 1`, `Arrive = 2`, `Flee = 3`, `Wander = 4`, `Hold = 5`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Arrive` | `Arrive = 2` |  |
+| `Flee` | `Flee = 3` |  |
+| `FollowAgent` | `FollowAgent = 0` |  |
+| `Hold` | `Hold = 5` |  |
+| `Seek` | `Seek = 1` |  |
+| `Wander` | `Wander = 4` |  |
+
+<a id="eqs"></a>
 
 ### Eqs
 
 `public static class Eqs` - Loading and running .oceqs queries.
 
-- `public static int Load(string contentPath)` - Loads (and caches) a query; its id, or 0 when the file does not load (see LastMessage).
-- `public static bool Reload(string contentPath)` - Re-reads a saved query; runs already started keep their copy.
-- `public static string LastMessage { get; }` - The parse or run failure text of the last load / run, "" when none.
-- `public static EqsRun Start(int queryId, in EqsRequest req)` - Queues a run; it finishes over the next ticks (watch Status or listen for the EqsFinished / EqsFailed event on the querier).
-- `public static EqsRun Run(int queryId, in EqsRequest req)` - Runs to completion before returning.
-- `public static EqsRun Start(string contentPath, in EqsRequest req)` - Load + Start; handle 0 when the query does not load.
-- `public static void SetBudget(float maxMs, int maxUnitsPerTick)` - Per-tick time slice for queued runs: maxMs milliseconds and / or maxUnitsPerTick evaluation units (0 turns a limit off).
-- `public static int Pending { get; }` - Runs queued or in progress.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `LastMessage` | `public static string LastMessage { get; }` | The parse or run failure text of the last load / run, "" when none. |
+| `Pending` | `public static int Pending { get; }` | Runs queued or in progress. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Load` | `public static int Load(string contentPath)` | Loads (and caches) a query; its id, or 0 when the file does not load (see LastMessage). |
+| `Reload` | `public static bool Reload(string contentPath)` | Re-reads a saved query; runs already started keep their copy. |
+| `Run` | `public static EqsRun Run(int queryId, in EqsRequest req)` | Runs to completion before returning. |
+| `SetBudget` | `public static void SetBudget(float maxMs, int maxUnitsPerTick)` | Per-tick time slice for queued runs: maxMs milliseconds and / or maxUnitsPerTick evaluation units (0 turns a limit off). |
+| `Start` | `public static EqsRun Start(int queryId, in EqsRequest req)` | Queues a run; it finishes over the next ticks (watch Status or listen for the EqsFinished / EqsFailed event on the querier). |
+| `Start` | `public static EqsRun Start(string contentPath, in EqsRequest req)` | Load + Start; handle 0 when the query does not load. |
+
+<a id="eqsitem"></a>
 
 ### EqsItem
 
 `public readonly record struct EqsItem(float X, float Y, float Z, int Entity, float Score, int Object, int Slot)` - One ranked result: a position (centimetres), the entity it belongs to if any, its score in [-1, 1], and for smart-object slot items the object entity and slot index.
 
+<a id="eqsrequest"></a>
+
 ### EqsRequest
 
 `public struct EqsRequest` - What a query run needs to know.
 
-- `public int Querier, Target`
-- `public float PointX, PointY, PointZ`
-- `public bool HasPoint`
-- `public string? UserTags`
-- `public int Priority`
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `HasPoint` | `public bool HasPoint` |  |
+| `PointZ` | `public float PointX, PointY, PointZ` |  |
+| `Priority` | `public int Priority` |  |
+| `Target` | `public int Querier, Target` |  |
+| `UserTags` | `public string? UserTags` |  |
+
+<a id="eqsrun"></a>
 
 ### EqsRun
 
 `public readonly struct EqsRun` - A handle to one run.
 
-- `public int Handle { get; }`
-- `public EqsStatus Status { get; }`
-- `public int Count { get; }` - Items of a finished run, 0 otherwise.
-- `public bool IsDone { get; }`
-- `public bool TryGetItem(int index, out EqsItem item)` - Item index, best first.
-- `public EqsItem Best { get; }` - The best item, or default when there is none.
-- `public IReadOnlyList<EqsItem> Items()` - Every item, best first.
-- `public bool TryGetTestValue(int index, int test, out float value)` - The raw value test number test (declaration order in the winning option) produced for item index; false when that test did not run for it.
-- `public (int Generated, int Passed, int Evaluations, bool Truncated) Stats`
-- `public bool Cancel()`
-- `public void Release()`
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Best` | `public EqsItem Best { get; }` | The best item, or default when there is none. |
+| `Count` | `public int Count { get; }` | Items of a finished run, 0 otherwise. |
+| `Handle` | `public int Handle { get; }` |  |
+| `IsDone` | `public bool IsDone { get; }` |  |
+| `Status` | `public EqsStatus Status { get; }` |  |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Cancel` | `public bool Cancel()` |  |
+| `Items` | `public IReadOnlyList<EqsItem> Items()` | Every item, best first. |
+| `public` | `public (int Generated, int Passed, int Evaluations, bool Truncated) Stats` |  |
+| `Release` | `public void Release()` |  |
+| `TryGetItem` | `public bool TryGetItem(int index, out EqsItem item)` | Item index, best first. |
+| `TryGetTestValue` | `public bool TryGetTestValue(int index, int test, out float value)` | The raw value test number test (declaration order in the winning option) produced for item index; false when that test did not run for it. |
+
+<a id="eqsstatus"></a>
 
 ### EqsStatus
 
 `public enum EqsStatus` - Where a query run is.
 
-Values: `Unknown = 0`, `Queued = 1`, `Running = 2`, `Finished = 3`, `Failed = 4`, `Cancelled = 5`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Cancelled` | `Cancelled = 5` |  |
+| `Failed` | `Failed = 4` |  |
+| `Finished` | `Finished = 3` |  |
+| `Queued` | `Queued = 1` |  |
+| `Running` | `Running = 2` |  |
+| `Unknown` | `Unknown = 0` |  |
+
+<a id="eqstestcontext"></a>
 
 ### EqsTestContext
 
 `public struct EqsTestContext` - One item a custom EQS test is asked about.
 
-- `public int Querier`
-- `public float X, Y, Z`
-- `public int ItemEntity`
-- `public float CtxX, CtxY, CtxZ`
-- `public int CtxEntity`
-- `public float P0, P1, P2, P3`
-- `public string Text`
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `CtxEntity` | `public int CtxEntity` |  |
+| `CtxZ` | `public float CtxX, CtxY, CtxZ` |  |
+| `ItemEntity` | `public int ItemEntity` |  |
+| `P3` | `public float P0, P1, P2, P3` |  |
+| `Querier` | `public int Querier` |  |
+| `Text` | `public string Text` |  |
+| `Z` | `public float X, Y, Z` |  |
+
+<a id="eqstestfn"></a>
 
 ### EqsTestFn
 
 `public delegate float EqsTestFn(in EqsTestContext c)` - The raw value; filtering and scoring (min / max / want / weight / curve) come from the asset.
 
+<a id="findflags"></a>
+
 ### FindFlags
 
 `public enum FindFlags`
 
-Values: `None = 0`, `MatchAll = 1`, `IncludeClaimed = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `IncludeClaimed` | `IncludeClaimed = 2` |  |
+| `MatchAll` | `MatchAll = 1` |  |
+| `None` | `None = 0` |  |
+
+<a id="heardnoise"></a>
 
 ### HeardNoise
 
 `public readonly record struct HeardNoise(float X, float Y, float Z, float Level, int Tag, float Confidence, float TimeSinceSec)` - What a listener remembers of the strongest noise it heard.
 
+<a id="hearing"></a>
+
 ### Hearing
 
 `public static class Hearing` - Noise events and listeners.
 
-- `public static bool Attach(int entity)` - Makes the entity a listener.
-- `public static bool Configure(int entity, float sensitivity = 1f, float maxRangeCm = 5000f, float memorySec = 8f)`
-- `public static bool EmitNoise(float x, float y, float z, float loudnessCm, int tag = 0, int sourceEntity = 0)` - Raises a noise.
-- `public static bool TryGetHeard(int entity, out HeardNoise heard)` - The strongest live memory, if any.
-- `public static bool Forget(int entity)`
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Attach` | `public static bool Attach(int entity)` | Makes the entity a listener. |
+| `Configure` | `public static bool Configure(int entity, float sensitivity = 1f, float maxRangeCm = 5000f, float memorySec = 8f)` |  |
+| `EmitNoise` | `public static bool EmitNoise(float x, float y, float z, float loudnessCm, int tag = 0, int sourceEntity = 0)` | Raises a noise. |
+| `Forget` | `public static bool Forget(int entity)` |  |
+| `TryGetHeard` | `public static bool TryGetHeard(int entity, out HeardNoise heard)` | The strongest live memory, if any. |
+
+<a id="managedai"></a>
 
 ### ManagedAi
 
 `public static class ManagedAi`
 
-- `public static Action<string> LogError { get; set; }` - Where a leaf's exception is reported (once per name).
-- `public static bool RegisterAction(string name, AiActionFn fn)`
-- `public static bool RegisterCondition(string name, AiConditionFn fn)`
-- `public static bool RegisterEqsTest(string name, EqsTestFn fn)`
-- `public static int ScanAssembly(Assembly asm)` - Registers every public static method carrying AverAiActionAttribute, AverAiConditionAttribute or AverEqsTestAttribute with the matching signature.
-- `public static IReadOnlyList<ManagedLeaf> Collect(Assembly asm)` - The attributed methods of an assembly and whether each signature is right.
-- `public static unsafe void Startup()` - Installs the dispatch function native code calls for every managed leaf and test.
-- `public static unsafe void Shutdown()` - Drops every name and the dispatch function.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `LogError` | `public static Action<string> LogError { get; set; }` | Where a leaf's exception is reported (once per name). |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Collect` | `public static IReadOnlyList<ManagedLeaf> Collect(Assembly asm)` | The attributed methods of an assembly and whether each signature is right. |
+| `RegisterAction` | `public static bool RegisterAction(string name, AiActionFn fn)` |  |
+| `RegisterCondition` | `public static bool RegisterCondition(string name, AiConditionFn fn)` |  |
+| `RegisterEqsTest` | `public static bool RegisterEqsTest(string name, EqsTestFn fn)` |  |
+| `ScanAssembly` | `public static int ScanAssembly(Assembly asm)` | Registers every public static method carrying AverAiActionAttribute, AverAiConditionAttribute or AverEqsTestAttribute with the matching signature. |
+| `Shutdown` | `public static unsafe void Shutdown()` | Drops every name and the dispatch function. |
+| `Startup` | `public static unsafe void Startup()` | Installs the dispatch function native code calls for every managed leaf and test. |
+
+<a id="managedkind"></a>
 
 ### ManagedKind
 
 `public enum ManagedKind` - Mirrors AVER_SYN_MANAGED_*.
 
-Values: `Condition = 0`, `Action = 1`, `Abort = 2`, `EqsTest = 3`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Abort` | `Abort = 2` |  |
+| `Action` | `Action = 1` |  |
+| `Condition` | `Condition = 0` |  |
+| `EqsTest` | `EqsTest = 3` |  |
+
+<a id="managedleaf"></a>
 
 ### ManagedLeaf
 
 `public readonly record struct ManagedLeaf(string Name, ManagedKind Kind, MethodInfo Method, string? Error)` - One attributed method found by Collect; Error is null when its signature is right.
 
+<a id="querygraph"></a>
+
 ### QueryGraph
 
 `public static class QueryGraph` - The bodies of the AN_Eqs* and AN_So* nodes.
 
-- `public static bool EqsRunForGraph(int querier, int target, float px, float py, float pz, bool hasPoint, string query, string userTags, out int count, out float x, out float y, out float z, out int entity, out float score)`
-- `public static int EqsStartForGraph(int querier, int target, float px, float py, float pz, bool hasPoint, int priority, string query, string userTags)`
-- `public static int EqsStatusForGraph(int handle, out int count)`
-- `public static bool EqsGetItemForGraph(int handle, int index, out float x, out float y, out float z, out int entity, out float score, out int obj, out int slot)`
-- `public static bool EqsCancelForGraph(int handle)`
-- `public static bool EqsReleaseForGraph(int handle)`
-- `public static bool SoAttachForGraph(int entity, string asset)`
-- `public static bool SoFindForGraph(int user, float x, float y, float z, float radius, bool matchAll, string slotTags, string userTags, out int obj, out int slot, out float ex, out float ey, out float ez, out int count)`
-- `public static int SoClaimForGraph(int user, int obj, int slot, float ttl, string userTags, out int refusal)`
-- `public static bool SoUseForGraph(int claim)`
-- `public static bool SoReleaseForGraph(int claim, int reason)`
-- `public static bool SoGetClaimForGraph(int user, int index, out int claim, out int obj, out int slot, out int state, out float x, out float y, out float z, out float yaw, out float ex, out float ey, out float ez)`
-- `public static bool SoSlotInfoForGraph(int entity, int slot, out int state, out int user, out float x, out float y, out float z, out float yaw)`
-- `public static int SoSlotCountForGraph(int entity)`
-- `public static bool SoSetSlotEnabledForGraph(int entity, int slot, bool enabled)`
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `EqsCancelForGraph` | `public static bool EqsCancelForGraph(int handle)` |  |
+| `EqsGetItemForGraph` | `public static bool EqsGetItemForGraph(int handle, int index, out float x, out float y, out float z, out int entity, out float score, out int obj, out int slot)` |  |
+| `EqsReleaseForGraph` | `public static bool EqsReleaseForGraph(int handle)` |  |
+| `EqsRunForGraph` | `public static bool EqsRunForGraph(int querier, int target, float px, float py, float pz, bool hasPoint, string query, string userTags, out int count, out float x, out float y, out float z, out int entity, out float score)` |  |
+| `EqsStartForGraph` | `public static int EqsStartForGraph(int querier, int target, float px, float py, float pz, bool hasPoint, int priority, string query, string userTags)` |  |
+| `EqsStatusForGraph` | `public static int EqsStatusForGraph(int handle, out int count)` |  |
+| `SoAttachForGraph` | `public static bool SoAttachForGraph(int entity, string asset)` |  |
+| `SoClaimForGraph` | `public static int SoClaimForGraph(int user, int obj, int slot, float ttl, string userTags, out int refusal)` |  |
+| `SoFindForGraph` | `public static bool SoFindForGraph(int user, float x, float y, float z, float radius, bool matchAll, string slotTags, string userTags, out int obj, out int slot, out float ex, out float ey, out float ez, out int count)` |  |
+| `SoGetClaimForGraph` | `public static bool SoGetClaimForGraph(int user, int index, out int claim, out int obj, out int slot, out int state, out float x, out float y, out float z, out float yaw, out float ex, out float ey, out float ez)` |  |
+| `SoReleaseForGraph` | `public static bool SoReleaseForGraph(int claim, int reason)` |  |
+| `SoSetSlotEnabledForGraph` | `public static bool SoSetSlotEnabledForGraph(int entity, int slot, bool enabled)` |  |
+| `SoSlotCountForGraph` | `public static int SoSlotCountForGraph(int entity)` |  |
+| `SoSlotInfoForGraph` | `public static bool SoSlotInfoForGraph(int entity, int slot, out int state, out int user, out float x, out float y, out float z, out float yaw)` |  |
+| `SoUseForGraph` | `public static bool SoUseForGraph(int claim)` |  |
+
+<a id="releasereason"></a>
 
 ### ReleaseReason
 
 `public enum ReleaseReason` - Why a claim ended.
 
-Values: `Released = 0`, `Completed = 1`, `Failed = 2`, `Expired = 3`, `UserGone = 4`, `ObjectGone = 5`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Completed` | `Completed = 1` |  |
+| `Expired` | `Expired = 3` |  |
+| `Failed` | `Failed = 2` |  |
+| `ObjectGone` | `ObjectGone = 5` |  |
+| `Released` | `Released = 0` |  |
+| `UserGone` | `UserGone = 4` |  |
+
+<a id="slotinfo"></a>
 
 ### SlotInfo
 
 `public readonly record struct SlotInfo(SlotRef Ref, SlotState State, int User, float X, float Y, float Z, float Yaw, float EntryX, float EntryY, float EntryZ, float EntryYaw)` - A slot in world space (centimetres, yaw in degrees).
 
+<a id="slotref"></a>
+
 ### SlotRef
 
 `public readonly record struct SlotRef(int Object, int Slot)` - One slot of one object: the object's entity handle and the slot's index in its definition.
+
+<a id="slotstate"></a>
 
 ### SlotState
 
 `public enum SlotState` - A slot's state.
 
-Values: `Free = 0`, `Claimed = 1`, `Occupied = 2`, `Cooldown = 3`, `Disabled = 4`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Claimed` | `Claimed = 1` |  |
+| `Cooldown` | `Cooldown = 3` |  |
+| `Disabled` | `Disabled = 4` |  |
+| `Free` | `Free = 0` |  |
+| `Occupied` | `Occupied = 2` |  |
+
+<a id="smartobjects"></a>
 
 ### SmartObjects
 
 `public static class SmartObjects` - Finding, claiming and using smart-object slots.
 
-- `public static bool Attach(int entity, string assetPath)` - Adds the CSmartObject component to the entity and points it at an .ocso asset.
-- `public static bool SetEnabled(int entity, bool enabled)`
-- `public static int SlotCount(int entity)` - Slots the entity's definition declares; -1 when it is not a registered smart object.
-- `public static bool TryGetSlot(int entity, int slot, out SlotInfo info)`
-- `public static bool SetSlotEnabled(int entity, int slot, bool enabled)`
-- `public static int Find(int user, float x, float y, float z, float radius, string? slotTags, string? userTags, FindFlags flags, Span<SlotRef> results)` - Slots within radius of a point, nearest first.
-- `public static List<SlotRef> Find(int user, float x, float y, float z, float radius, string? slotTags = null, string? userTags = null, FindFlags flags = FindFlags.None, int max = 16)`
-- `public static int Claim(int user, SlotRef slot, string? userTags = null, float ttlSec = -1f)` - Claims a slot for user; the claim handle, or 0 when refused (see LastRefusal).
-- `public static ClaimRefusal LastRefusal { get; }` - Why the last Claim on this thread was refused.
-- `public static bool Use(int claim)` - Starts using a claimed slot (Claimed to Occupied); runs the slot's behaviour, if it has one.
-- `public static bool Release(int claim, ReleaseReason reason = ReleaseReason.Released)`
-- `public static bool TryGetClaim(int claim, out ClaimInfo info)`
-- `public static int ClaimsOf(int user, Span<int> claims)` - The claims user holds (at most 4).
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `LastRefusal` | `public static ClaimRefusal LastRefusal { get; }` | Why the last Claim on this thread was refused. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Attach` | `public static bool Attach(int entity, string assetPath)` | Adds the CSmartObject component to the entity and points it at an .ocso asset. |
+| `Claim` | `public static int Claim(int user, SlotRef slot, string? userTags = null, float ttlSec = -1f)` | Claims a slot for user; the claim handle, or 0 when refused (see LastRefusal). |
+| `ClaimsOf` | `public static int ClaimsOf(int user, Span<int> claims)` | The claims user holds (at most 4). |
+| `Find` | `public static List<SlotRef> Find(int user, float x, float y, float z, float radius, string? slotTags = null, string? userTags = null, FindFlags flags = FindFlags.None, int max = 16)` |  |
+| `Find` | `public static int Find(int user, float x, float y, float z, float radius, string? slotTags, string? userTags, FindFlags flags, Span<SlotRef> results)` | Slots within radius of a point, nearest first. |
+| `Release` | `public static bool Release(int claim, ReleaseReason reason = ReleaseReason.Released)` |  |
+| `SetEnabled` | `public static bool SetEnabled(int entity, bool enabled)` |  |
+| `SetSlotEnabled` | `public static bool SetSlotEnabled(int entity, int slot, bool enabled)` |  |
+| `SlotCount` | `public static int SlotCount(int entity)` | Slots the entity's definition declares; -1 when it is not a registered smart object. |
+| `TryGetClaim` | `public static bool TryGetClaim(int claim, out ClaimInfo info)` |  |
+| `TryGetSlot` | `public static bool TryGetSlot(int entity, int slot, out SlotInfo info)` |  |
+| `Use` | `public static bool Use(int claim)` | Starts using a claimed slot (Claimed to Occupied); runs the slot's behaviour, if it has one. |
+
+<a id="squad"></a>
 
 ### Squad
 
 `public static class Squad` - Squad membership, targets and the slots they produce.
 
-- `public static bool Join(int entity, int squadId, float spacingCm = 200f)`
-- `public static bool SetTarget(int squadId, float x, float y, float z)` - Gives a squad something to act on; roles and slots appear once it has one.
-- `public static bool ClearTarget(int squadId)`
-- `public static bool TryGetSlot(int entity, out SquadRole role, out float x, out float y, out float z)` - This member's role and the point it should hold.
-- `public static bool TryGetSpacingPush(int entity, out float dx, out float dy)` - The step that takes this member out of its squad-mates' spacing circles; zero when it has room.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ClearTarget` | `public static bool ClearTarget(int squadId)` |  |
+| `Join` | `public static bool Join(int entity, int squadId, float spacingCm = 200f)` |  |
+| `SetTarget` | `public static bool SetTarget(int squadId, float x, float y, float z)` | Gives a squad something to act on; roles and slots appear once it has one. |
+| `TryGetSlot` | `public static bool TryGetSlot(int entity, out SquadRole role, out float x, out float y, out float z)` | This member's role and the point it should hold. |
+| `TryGetSpacingPush` | `public static bool TryGetSpacingPush(int entity, out float dx, out float dy)` | The step that takes this member out of its squad-mates' spacing circles; zero when it has room. |
+
+<a id="squadrole"></a>
 
 ### SquadRole
 
 `public enum SquadRole` - What a squad member is asked to do.
 
-Values: `None = 0`, `Anchor = 1`, `FlankLeft = 2`, `FlankRight = 3`, `Support = 4`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Anchor` | `Anchor = 1` |  |
+| `FlankLeft` | `FlankLeft = 2` |  |
+| `FlankRight` | `FlankRight = 3` |  |
+| `None` | `None = 0` |  |
+| `Support` | `Support = 4` |  |
+
+<a id="synapseai"></a>
 
 ### SynapseAi
 
 `public static class SynapseAi` - Reads the reason the last Synapse call failed.
 
-- `public static SynapseError LastError { get; }` - Why the last Synapse call on this thread failed, or Ok.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `LastError` | `public static SynapseError LastError { get; }` | Why the last Synapse call on this thread failed, or Ok. |
+
+<a id="synapseaigraph"></a>
 
 ### SynapseAiGraph
 
 `public static class SynapseAiGraph` - The bodies of the AN_ crowd, hearing, cover and squad nodes.
 
-- `public static bool CrowdSetAgentForGraph(int entity, float radiusCm, float maxSpeedCm, float maxAccelCm, float priority)` - Attaches the crowd component if the entity lacks one, then applies the settings.
-- `public static bool CrowdSetModeForGraph(int entity, int mode, float x, float y, float z)`
-- `public static bool CrowdSetBackendForGraph(int backend, int maxAgents)` - backend: 0 CPU, 1 GPU.
-- `public static bool GetCrowdVelocityForGraph(int entity, out float vx, out float vy, out float speed)`
-- `public static void SteerFromVelocity(float vx, float vy, float fwdX, float fwdY, float maxSpeedCm, float dt, float turnRateDegPerSec, out float forward, out float right, out float yawDelta)` - Turns a crowd velocity into the forward/right/yawDelta CharacterMove consumes.
-- `public static bool EmitNoiseForGraph(float x, float y, float z, float loudnessCm, int tag, int sourceEntity)`
-- `public static bool SetHearingForGraph(int entity, float sensitivity, float maxRangeCm, float memorySec)`
-- `public static bool GetHeardForGraph(int entity, out bool heard, out float x, out float y, out float z, out float level, out int tag, out float confidence, out float timeSinceSec)` - "heard" false is ordinary: the listener remembers nothing.
-- `public static bool FindCoverForGraph(int entity, float threatX, float threatY, float threatZ, float maxSeekCm, float minThreatDistCm, out bool found, out float x, out float y, out int coverId)`
-- `public static bool ReleaseCoverForGraph(int entity)`
-- `public static bool IsCoveredForGraph(int entity, float threatX, float threatY, float threatZ)`
-- `public static bool SquadJoinForGraph(int entity, int squadId, float spacingCm)`
-- `public static bool SquadSetTargetForGraph(int squadId, float x, float y, float z)`
-- `public static bool GetSquadSlotForGraph(int entity, out int role, out float x, out float y, out float z)` - "success" is false until the member's squad has a target.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `CrowdSetAgentForGraph` | `public static bool CrowdSetAgentForGraph(int entity, float radiusCm, float maxSpeedCm, float maxAccelCm, float priority)` | Attaches the crowd component if the entity lacks one, then applies the settings. |
+| `CrowdSetBackendForGraph` | `public static bool CrowdSetBackendForGraph(int backend, int maxAgents)` | backend: 0 CPU, 1 GPU. |
+| `CrowdSetModeForGraph` | `public static bool CrowdSetModeForGraph(int entity, int mode, float x, float y, float z)` |  |
+| `EmitNoiseForGraph` | `public static bool EmitNoiseForGraph(float x, float y, float z, float loudnessCm, int tag, int sourceEntity)` |  |
+| `FindCoverForGraph` | `public static bool FindCoverForGraph(int entity, float threatX, float threatY, float threatZ, float maxSeekCm, float minThreatDistCm, out bool found, out float x, out float y, out int coverId)` |  |
+| `GetCrowdVelocityForGraph` | `public static bool GetCrowdVelocityForGraph(int entity, out float vx, out float vy, out float speed)` |  |
+| `GetHeardForGraph` | `public static bool GetHeardForGraph(int entity, out bool heard, out float x, out float y, out float z, out float level, out int tag, out float confidence, out float timeSinceSec)` | "heard" false is ordinary: the listener remembers nothing. |
+| `GetSquadSlotForGraph` | `public static bool GetSquadSlotForGraph(int entity, out int role, out float x, out float y, out float z)` | "success" is false until the member's squad has a target. |
+| `IsCoveredForGraph` | `public static bool IsCoveredForGraph(int entity, float threatX, float threatY, float threatZ)` |  |
+| `ReleaseCoverForGraph` | `public static bool ReleaseCoverForGraph(int entity)` |  |
+| `SetHearingForGraph` | `public static bool SetHearingForGraph(int entity, float sensitivity, float maxRangeCm, float memorySec)` |  |
+| `SquadJoinForGraph` | `public static bool SquadJoinForGraph(int entity, int squadId, float spacingCm)` |  |
+| `SquadSetTargetForGraph` | `public static bool SquadSetTargetForGraph(int squadId, float x, float y, float z)` |  |
+| `SteerFromVelocity` | `public static void SteerFromVelocity(float vx, float vy, float fwdX, float fwdY, float maxSpeedCm, float dt, float turnRateDegPerSec, out float forward, out float right, out float yawDelta)` | Turns a crowd velocity into the forward/right/yawDelta CharacterMove consumes. |
+
+<a id="synapseerror"></a>
 
 ### SynapseError
 
 `public enum SynapseError` - Why a Synapse call failed, mirroring aver::AbiError in modules/core/include/aver/core/ErrorCodes.hpp.
 
-Values: `Ok = 0`, `BadHandle = -1`, `NullPointer = -2`, `NotInitialised = -3`, `OutOfRange = -4`, `Unsupported = -5`, `InvalidArgument = -6`, `AllocationFailed = -7`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AllocationFailed` | `AllocationFailed = -7` |  |
+| `BadHandle` | `BadHandle = -1` |  |
+| `InvalidArgument` | `InvalidArgument = -6` |  |
+| `NotInitialised` | `NotInitialised = -3` |  |
+| `NullPointer` | `NullPointer = -2` |  |
+| `Ok` | `Ok = 0` |  |
+| `OutOfRange` | `OutOfRange = -4` |  |
+| `Unsupported` | `Unsupported = -5` |  |

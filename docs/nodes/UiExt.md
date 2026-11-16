@@ -2,15 +2,17 @@
 
 # UiExt nodes
 
+Contents: 6 nodes sorted A-Z by type (`AN_` prefix ignored); categories: UI. [All nodes A-Z](index.md).
+
 6 nodes. Rows: `scripting/csharp/Aver.Graph/GraphUiExtNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsUiExt.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
 | Type | Display | Category | Path | Pins | Attributes | C# |
 |---|---|---|---|---|---|---|
-| `AN_GetUiInputState` | Get UI Input State | UI | D | out: `pointer` bool, `keyboard` bool, `pausesGame` bool, `showCursor` bool | none | `UiExtGraph.GetUiInputStateForGraph`<br>AN_GetUiInputState: whether a widget wants the pointer, wants the keyboard, pauses the game or wants the cursor shown. |
-| `AN_SetUiItems` | Set UI Items | UI | P | in: `exec` exec, `widget` int<br>out: `then` exec, `success` bool | `items` (optional) | `UiExtGraph.SetUiItemsForGraph`<br>AN_SetUiItems: replaces a choice's or list's options with the items= text, separated by '\|'. |
-| `AN_SetUiProperty` | Set UI Property | UI | P | in: `exec` exec, `widget` int, `value` float<br>out: `then` exec, `success` bool | `property` | `UiExtGraph.SetUiPropertyForGraph`<br>AN_SetUiProperty: sets the property= (a name Widget.Set knows, such as fontSize) to a number. |
-| `AN_SetUiPropertyText` | Set UI Property Text | UI | P | in: `exec` exec, `widget` int<br>out: `then` exec, `success` bool | `property`, `text` (optional) | `UiExtGraph.SetUiPropertyTextForGraph`<br>AN_SetUiPropertyText: sets the property= to the text= (a name or enum word; empty clears it). |
-| `AN_SetUiSelected` | Set UI Selected | UI | P | in: `exec` exec, `widget` int, `index` int<br>out: `then` exec, `success` bool | none | `UiExtGraph.SetUiSelectedForGraph`<br>AN_SetUiSelected: a choice's or list's selected index. |
-| `AN_SetUiTheme` | Set UI Theme | UI | P | in: `exec` exec<br>out: `then` exec, `success` bool | `theme` | `UiExtGraph.SetUiThemeForGraph`<br>AN_SetUiTheme: switches the UI theme by name (dark is the default). |
+| <a id="an_getuiinputstate"></a>`AN_GetUiInputState` | Get UI Input State | UI | D | out: `pointer` bool, `keyboard` bool, `pausesGame` bool, `showCursor` bool | none | `UiExtGraph.GetUiInputStateForGraph`<br>AN_GetUiInputState: whether a widget wants the pointer, wants the keyboard, pauses the game or wants the cursor shown. |
+| <a id="an_setuiitems"></a>`AN_SetUiItems` | Set UI Items | UI | P | in: `exec` exec, `widget` int<br>out: `then` exec, `success` bool | `items` (optional) | `UiExtGraph.SetUiItemsForGraph`<br>AN_SetUiItems: replaces a choice's or list's options with the items= text, separated by '\|'. |
+| <a id="an_setuiproperty"></a>`AN_SetUiProperty` | Set UI Property | UI | P | in: `exec` exec, `widget` int, `value` float<br>out: `then` exec, `success` bool | `property` | `UiExtGraph.SetUiPropertyForGraph`<br>AN_SetUiProperty: sets the property= (a name Widget.Set knows, such as fontSize) to a number. |
+| <a id="an_setuipropertytext"></a>`AN_SetUiPropertyText` | Set UI Property Text | UI | P | in: `exec` exec, `widget` int<br>out: `then` exec, `success` bool | `property`, `text` (optional) | `UiExtGraph.SetUiPropertyTextForGraph`<br>AN_SetUiPropertyText: sets the property= to the text= (a name or enum word; empty clears it). |
+| <a id="an_setuiselected"></a>`AN_SetUiSelected` | Set UI Selected | UI | P | in: `exec` exec, `widget` int, `index` int<br>out: `then` exec, `success` bool | none | `UiExtGraph.SetUiSelectedForGraph`<br>AN_SetUiSelected: a choice's or list's selected index. |
+| <a id="an_setuitheme"></a>`AN_SetUiTheme` | Set UI Theme | UI | P | in: `exec` exec<br>out: `then` exec, `success` bool | `theme` | `UiExtGraph.SetUiThemeForGraph`<br>AN_SetUiTheme: switches the UI theme by name (dark is the default). |

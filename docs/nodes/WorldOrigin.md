@@ -2,12 +2,14 @@
 
 # WorldOrigin nodes
 
+Contents: 3 nodes sorted A-Z by type (`AN_` prefix ignored); categories: World. [All nodes A-Z](index.md).
+
 3 nodes. Rows: `scripting/csharp/Aver.Graph/GraphWorldOriginNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsWorldOrigin.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
 | Type | Display | Category | Path | Pins | Attributes | C# |
 |---|---|---|---|---|---|---|
-| `AN_GetWorldOrigin` | Get World Origin | World | D | out: `regionX` int, `regionY` int, `generation` int, `enabled` bool | none | `WorldOriginGraph.GetOriginForGraph`<br>AN_GetWorldOrigin: the region the floating origin is in (whole regions along X and Y), the shift generation, and whether the origin is on. |
-| `AN_GetWorldRegion` | Get World Region | World | D | in: `entity` int<br>out: `regionX` int, `regionY` int, `regionZ` int, `x` float, `y` float, `z` float | none | `WorldOriginGraph.GetRegionForGraph`<br>AN_GetWorldRegion: an entity's region (X, Y, Z) and its position relative to that region's centre in centimetres. |
-| `AN_SetWorldRegion` | Set World Region | World | P | in: `exec` exec, `entity` int, `regionX` int, `regionY` int, `regionZ` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none | `WorldOriginGraph.SetRegionForGraph`<br>AN_SetWorldRegion: moves an entity to a region and an offset from its centre. |
+| <a id="an_getworldorigin"></a>`AN_GetWorldOrigin` | Get World Origin | World | D | out: `regionX` int, `regionY` int, `generation` int, `enabled` bool | none | `WorldOriginGraph.GetOriginForGraph`<br>AN_GetWorldOrigin: the region the floating origin is in (whole regions along X and Y), the shift generation, and whether the origin is on. |
+| <a id="an_getworldregion"></a>`AN_GetWorldRegion` | Get World Region | World | D | in: `entity` int<br>out: `regionX` int, `regionY` int, `regionZ` int, `x` float, `y` float, `z` float | none | `WorldOriginGraph.GetRegionForGraph`<br>AN_GetWorldRegion: an entity's region (X, Y, Z) and its position relative to that region's centre in centimetres. |
+| <a id="an_setworldregion"></a>`AN_SetWorldRegion` | Set World Region | World | P | in: `exec` exec, `entity` int, `regionX` int, `regionY` int, `regionZ` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none | `WorldOriginGraph.SetRegionForGraph`<br>AN_SetWorldRegion: moves an entity to a region and an offset from its centre. |

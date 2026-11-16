@@ -15,3 +15,711 @@ Generated from source by `scripts/csharp-api-index.py`. Hand-written guides: `do
 | [Aver.Prefab](Aver.Prefab.md) | 4 | 28 |
 | [Aver.Scripting](Aver.Scripting.md) | 18 | 153 |
 | [Aver.Pcg.Apply](Aver.Pcg.Apply.md) | 2 | 8 |
+
+Every public member, alphabetically: [members-a-z.md](members-a-z.md).
+
+## Types A-Z
+
+[A](#a) [B](#b) [C](#c) [D](#d) [E](#e) [F](#f) [G](#g) [H](#h) [I](#i) [J](#j) [K](#k) [L](#l) [M](#m) [N](#n) [O](#o) [P](#p) [Q](#q) [R](#r) [S](#s) [T](#t) [U](#u) [V](#v) [W](#w)
+
+<a id="a"></a>
+
+## A
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [AbilityBuilder](Aver.Framework.md#abilitybuilder) | class | Aver.Framework | Aver.Framework |
+| [AbilityCommit](Aver.Framework.md#abilitycommit) | enum | Aver.Framework | Aver.Framework |
+| [AbilityDef](Aver.Framework.md#abilitydef) | class | Aver.Framework | Aver.Framework |
+| [AbilityFailure](Aver.Framework.md#abilityfailure) | enum | Aver.Framework | Aver.Framework |
+| [AbilityHandle](Aver.Framework.md#abilityhandle) | struct | Aver.Framework | Aver.Framework |
+| [AbilitySystem](Aver.Framework.md#abilitysystem) | class | Aver.Framework | Aver.Framework |
+| [Accessibility](Aver.Framework.md#accessibility) | class | Aver.Framework | Aver.Framework |
+| [Accessibility.Input](Aver.Framework.md#accessibility-input) | class | Aver.Framework | Aver.Framework |
+| [AccessSettingsStore](Aver.Framework.md#accesssettingsstore) | class | Aver.Framework | Aver.Framework |
+| [ActionEvent](Aver.Framework.md#actionevent) | enum | Aver.Framework | Aver.Framework |
+| [ActiveEffectHandle](Aver.Framework.md#activeeffecthandle) | struct | Aver.Framework | Aver.Framework |
+| [ActiveEffectInfo](Aver.Framework.md#activeeffectinfo) | record | Aver.Framework | Aver.Framework |
+| [ActorBuilder](Aver.Framework.md#actorbuilder) | class | Aver.Framework | Aver.Framework |
+| [ActorClass](Aver.Framework.md#actorclass) | struct | Aver.Framework | Aver.Framework |
+| [Actors](Aver.Framework.md#actors) | class | Aver.Framework | Aver.Framework |
+| [AiActionFn](Aver.Synapse.md#aiactionfn) | delegate | Aver.Synapse | Aver.Synapse |
+| [AiConditionFn](Aver.Synapse.md#aiconditionfn) | delegate | Aver.Synapse | Aver.Synapse |
+| [AiStatus](Aver.Synapse.md#aistatus) | enum | Aver.Synapse | Aver.Synapse |
+| [AiTaskContext](Aver.Synapse.md#aitaskcontext) | struct | Aver.Synapse | Aver.Synapse |
+| [ApplyResult](Aver.Pcg.Apply.md#applyresult) | struct | Aver.Pcg.Apply | Aver.Pcg.Apply |
+| [Area](Aver.Physics.md#area) | struct | Aver.Physics | Aver.Physics |
+| [AreaEvent](Aver.Physics.md#areaevent) | struct | Aver.Physics | Aver.Physics |
+| [AreaOverrideMode](Aver.Physics.md#areaoverridemode) | enum | Aver.Physics | Aver.Physics |
+| [Assets](Aver.Scene.md#assets) | class | Aver.Scene | Aver.Scene |
+| [AttributeChange](Aver.Framework.md#attributechange) | record | Aver.Framework | Aver.Framework |
+| [AttributeDef](Aver.Framework.md#attributedef) | class | Aver.Framework | Aver.Framework |
+| [AttributeRef](Aver.Framework.md#attributeref) | struct | Aver.Framework | Aver.Framework |
+| [AttributeSetBuilder](Aver.Framework.md#attributesetbuilder) | class | Aver.Framework | Aver.Framework |
+| [AttributeSetDef](Aver.Framework.md#attributesetdef) | class | Aver.Framework | Aver.Framework |
+| [Audio](Aver.Framework.md#audio) | class | Aver.Framework | Aver.Framework |
+| [AudioDeviceState](Aver.Framework.md#audiodevicestate) | enum | Aver.Framework | Aver.Framework |
+| [AverAbilityAttribute](Aver.Framework.md#averabilityattribute) | class | Aver.Framework | Aver.Framework |
+| [AverAbilitySystemAttribute](Aver.Framework.md#averabilitysystemattribute) | class | Aver.Framework | Aver.Framework |
+| [AverActor](Aver.Framework.md#averactor) | class | Aver.Framework | Aver.Framework |
+| [AverAiActionAttribute](Aver.Synapse.md#averaiactionattribute) | class | Aver.Synapse | Aver.Synapse |
+| [AverAiConditionAttribute](Aver.Synapse.md#averaiconditionattribute) | class | Aver.Synapse | Aver.Synapse |
+| [AverBehaviour](Aver.Scripting.md#averbehaviour) | class | Aver.Scripting | Aver.Scripting |
+| [AverCharacter](Aver.Framework.md#avercharacter) | class | Aver.Framework | Aver.Framework |
+| [AverClassAttribute](Aver.Framework.md#averclassattribute) | class | Aver.Framework | Aver.Framework |
+| [AverEqsTestAttribute](Aver.Synapse.md#avereqstestattribute) | class | Aver.Synapse | Aver.Synapse |
+| [AverGameInstance](Aver.Framework.md#avergameinstance) | class | Aver.Framework | Aver.Framework |
+| [AverGameMode](Aver.Framework.md#avergamemode) | class | Aver.Framework | Aver.Framework |
+| [AverGameModeAttribute](Aver.Framework.md#avergamemodeattribute) | class | Aver.Framework | Aver.Framework |
+| [AverGameplayDefsAttribute](Aver.Framework.md#avergameplaydefsattribute) | class | Aver.Framework | Aver.Framework |
+| [AverHudAttribute](Aver.UI.md#averhudattribute) | class | Aver.UI | Aver.UI |
+| [AverMath](Aver.Framework.md#avermath) | class | Aver.Framework | Aver.Framework |
+| [AverPawn](Aver.Framework.md#averpawn) | class | Aver.Framework | Aver.Framework |
+| [AverPlayerController](Aver.Framework.md#averplayercontroller) | class | Aver.Framework | Aver.Framework |
+| [AverRandom](Aver.Framework.md#averrandom) | class | Aver.Framework | Aver.Framework |
+| [AverReverbVolume](Aver.Framework.md#averreverbvolume) | class | Aver.Framework | Aver.Framework |
+
+<a id="b"></a>
+
+## B
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [BeginReason](Aver.Framework.md#beginreason) | enum | Aver.Framework | Aver.Framework |
+| [BendType](Aver.Physics.md#bendtype) | enum | Aver.Physics | Aver.Physics |
+| [BindingHandle](Aver.Framework.md#bindinghandle) | struct | Aver.Framework | Aver.Framework |
+| [Blackboard](Aver.Framework.md#blackboard) | struct | Aver.Framework | Aver.Framework |
+| [BlackboardScope](Aver.Framework.md#blackboardscope) | enum | Aver.Framework | Aver.Framework |
+| [BlackboardType](Aver.Framework.md#blackboardtype) | enum | Aver.Framework | Aver.Framework |
+| [Body](Aver.Framework.md#body) | struct | Aver.Framework | Aver.Framework |
+| [Body](Aver.Physics.md#body) | struct | Aver.Physics | Aver.Physics |
+| [BodyContactEvent](Aver.Physics.md#bodycontactevent) | struct | Aver.Physics | Aver.Physics |
+| [BodyFacing](Aver.Framework.md#bodyfacing) | enum | Aver.Framework | Aver.Framework |
+| [BoneChannels](Aver.Framework.md#bonechannels) | enum | Aver.Framework | Aver.Framework |
+| [BoneInfo](Aver.Framework.md#boneinfo) | struct | Aver.Framework | Aver.Framework |
+| [BonePose](Aver.Framework.md#bonepose) | struct | Aver.Framework | Aver.Framework |
+| [Brain](Aver.Framework.md#brain) | struct | Aver.Framework | Aver.Framework |
+| [BrainKind](Aver.Framework.md#brainkind) | enum | Aver.Framework | Aver.Framework |
+| [BrainStatus](Aver.Framework.md#brainstatus) | enum | Aver.Framework | Aver.Framework |
+| [BuoyFlags](Aver.Physics.md#buoyflags) | enum | Aver.Physics | Aver.Physics |
+| [Bus](Aver.Framework.md#bus) | enum | Aver.Framework | Aver.Framework |
+
+<a id="c"></a>
+
+## C
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [Camera2D](Aver.Framework.md#camera2d) | struct | Aver.Framework | Aver.Framework |
+| [Camera2DFlags](Aver.Framework.md#camera2dflags) | enum | Aver.Framework | Aver.Framework |
+| [CameraBlendCurve](Aver.Framework.md#camerablendcurve) | enum | Aver.Framework | Aver.Framework |
+| [CameraFx](Aver.Framework.md#camerafx) | class | Aver.Framework | Aver.Framework |
+| [CameraMode](Aver.Framework.md#cameramode) | enum | Aver.Framework | Aver.Framework |
+| [CameraModifierKind](Aver.Framework.md#cameramodifierkind) | enum | Aver.Framework | Aver.Framework |
+| [CameraPose](Aver.Framework.md#camerapose) | record | Aver.Framework | Aver.Framework |
+| [CameraRig](Aver.Framework.md#camerarig) | class | Aver.Framework | Aver.Framework |
+| [CameraRigFlags](Aver.Framework.md#camerarigflags) | enum | Aver.Framework | Aver.Framework |
+| [CameraRigPreset](Aver.Framework.md#camerarigpreset) | enum | Aver.Framework | Aver.Framework |
+| [CameraRigState](Aver.Framework.md#camerarigstate) | record | Aver.Framework | Aver.Framework |
+| [CameraView](Aver.Framework.md#cameraview) | enum | Aver.Framework | Aver.Framework |
+| [CanvasScaleMode](Aver.Framework.md#canvasscalemode) | enum | Aver.Framework | Aver.Framework |
+| [CanvasStretchAspect](Aver.Framework.md#canvasstretchaspect) | enum | Aver.Framework | Aver.Framework |
+| [CanvasStretchMode](Aver.Framework.md#canvasstretchmode) | enum | Aver.Framework | Aver.Framework |
+| [CaptionKind](Aver.Framework.md#captionkind) | enum | Aver.Framework | Aver.Framework |
+| [CaptionMode](Aver.Framework.md#captionmode) | enum | Aver.Framework | Aver.Framework |
+| [Captions](Aver.Framework.md#captions) | class | Aver.Framework | Aver.Framework |
+| [Car](Aver.Framework.md#car) | struct | Aver.Framework | Aver.Framework |
+| [CarSpec](Aver.Framework.md#carspec) | record | Aver.Framework | Aver.Framework |
+| [CarState](Aver.Framework.md#carstate) | record | Aver.Framework | Aver.Framework |
+| [CharacterBody](Aver.Physics.md#characterbody) | struct | Aver.Physics | Aver.Physics |
+| [CharacterBody.Contact](Aver.Physics.md#characterbody-contact) | record | Aver.Physics | Aver.Physics |
+| [ClaimInfo](Aver.Synapse.md#claiminfo) | record | Aver.Synapse | Aver.Synapse |
+| [ClaimRefusal](Aver.Synapse.md#claimrefusal) | enum | Aver.Synapse | Aver.Synapse |
+| [ClassBuilder](Aver.Framework.md#classbuilder) | class | Aver.Framework | Aver.Framework |
+| [ClassNames](Aver.Framework.md#classnames) | class | Aver.Framework | Aver.Framework |
+| [CollisionShape](Aver.Physics.md#collisionshape) | struct | Aver.Physics | Aver.Physics |
+| [Colour](Aver.UI.md#colour) | struct | Aver.UI | Aver.UI |
+| [ColourVisionMode](Aver.Framework.md#colourvisionmode) | enum | Aver.Framework | Aver.Framework |
+| [CombineFlags](Aver.Physics.md#combineflags) | enum | Aver.Physics | Aver.Physics |
+| [CombineMode](Aver.Physics.md#combinemode) | enum | Aver.Physics | Aver.Physics |
+| [Component](Aver.Framework.md#component) | enum | Aver.Framework | Aver.Framework |
+| [CompoundKind](Aver.Physics.md#compoundkind) | enum | Aver.Physics | Aver.Physics |
+| [ConfigFile](Aver.Framework.md#configfile) | class | Aver.Framework | Aver.Framework |
+| [ContactDetail](Aver.Physics.md#contactdetail) | record | Aver.Physics | Aver.Physics |
+| [ContactEvent](Aver.Framework.md#contactevent) | struct | Aver.Framework | Aver.Framework |
+| [ContactEvent](Aver.Physics.md#contactevent) | struct | Aver.Physics | Aver.Physics |
+| [Cover](Aver.Synapse.md#cover) | class | Aver.Synapse | Aver.Synapse |
+| [Crowd](Aver.Synapse.md#crowd) | class | Aver.Synapse | Aver.Synapse |
+| [CrowdBackend](Aver.Synapse.md#crowdbackend) | enum | Aver.Synapse | Aver.Synapse |
+| [CrowdDrive](Aver.Synapse.md#crowddrive) | enum | Aver.Synapse | Aver.Synapse |
+| [CrowdMode](Aver.Synapse.md#crowdmode) | enum | Aver.Synapse | Aver.Synapse |
+| [CursorShape](Aver.Framework.md#cursorshape) | enum | Aver.Framework | Aver.Framework |
+| [CustomEnv](Aver.Framework.md#customenv) | class | Aver.Framework | Aver.Framework |
+| [CustomEnvKind](Aver.Framework.md#customenvkind) | enum | Aver.Framework | Aver.Framework |
+
+<a id="d"></a>
+
+## D
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [DataColumnAttribute](Aver.Framework.md#datacolumnattribute) | class | Aver.Framework | Aver.Framework |
+| [DataColumnType](Aver.Framework.md#datacolumntype) | enum | Aver.Framework | Aver.Framework |
+| [DataContentGraph](Aver.Framework.md#datacontentgraph) | class | Aver.Framework | Aver.Framework |
+| [DataIgnoreAttribute](Aver.Framework.md#dataignoreattribute) | class | Aver.Framework | Aver.Framework |
+| [DataLayerResult](Aver.Framework.md#datalayerresult) | enum | Aver.Framework | Aver.Framework |
+| [DataLayers](Aver.Framework.md#datalayers) | class | Aver.Framework | Aver.Framework |
+| [DataLayerState](Aver.Framework.md#datalayerstate) | enum | Aver.Framework | Aver.Framework |
+| [DataRowNameAttribute](Aver.Framework.md#datarownameattribute) | class | Aver.Framework | Aver.Framework |
+| [DataTable](Aver.Framework.md#datatable) | class | Aver.Framework | Aver.Framework |
+| [DataTableBinder](Aver.Framework.md#datatablebinder) | class | Aver.Framework | Aver.Framework |
+| [DataTables](Aver.Framework.md#datatables) | class | Aver.Framework | Aver.Framework |
+| [DeadZoneType](Aver.Framework.md#deadzonetype) | enum | Aver.Framework | Aver.Framework |
+| [DebugDraw](Aver.Framework.md#debugdraw) | class | Aver.Framework | Aver.Framework |
+| [DebugLabel](Aver.Physics.md#debuglabel) | record | Aver.Physics | Aver.Physics |
+| [DecalChannels](Aver.Scene.md#decalchannels) | enum | Aver.Scene | Aver.Scene |
+| [DecalDesc](Aver.Scene.md#decaldesc) | struct | Aver.Scene | Aver.Scene |
+| [Decals](Aver.Scene.md#decals) | class | Aver.Scene | Aver.Scene |
+| [Deferred](Aver.Framework.md#deferred) | class | Aver.Framework | Aver.Framework |
+| [DifferentialMode](Aver.Physics.md#differentialmode) | enum | Aver.Physics | Aver.Physics |
+| [DirectBodyState](Aver.Physics.md#directbodystate) | struct | Aver.Physics | Aver.Physics |
+| [Display](Aver.Framework.md#display) | class | Aver.Framework | Aver.Framework |
+| [DisplayWindow](Aver.Framework.md#displaywindow) | class | Aver.Framework | Aver.Framework |
+| [Double3](Aver.Framework.md#double3) | struct | Aver.Framework | Aver.Framework |
+| [DriveActionNames](Aver.Framework.md#driveactionnames) | class | Aver.Framework | Aver.Framework |
+| [DriveBinding](Aver.Framework.md#drivebinding) | record | Aver.Framework | Aver.Framework |
+| [DriverAids](Aver.Physics.md#driveraids) | record | Aver.Physics | Aver.Physics |
+| [DrivingContext](Aver.Framework.md#drivingcontext) | class | Aver.Framework | Aver.Framework |
+
+<a id="e"></a>
+
+## E
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [EditableAttribute](Aver.Framework.md#editableattribute) | class | Aver.Framework | Aver.Framework |
+| [EffectBuilder](Aver.Framework.md#effectbuilder) | class | Aver.Framework | Aver.Framework |
+| [EffectDef](Aver.Framework.md#effectdef) | class | Aver.Framework | Aver.Framework |
+| [EffectFailure](Aver.Framework.md#effectfailure) | enum | Aver.Framework | Aver.Framework |
+| [EffectPolicy](Aver.Framework.md#effectpolicy) | enum | Aver.Framework | Aver.Framework |
+| [EffectSpec](Aver.Framework.md#effectspec) | class | Aver.Framework | Aver.Framework |
+| [EndReason](Aver.Framework.md#endreason) | enum | Aver.Framework | Aver.Framework |
+| [Engine](Aver.Framework.md#engine) | class | Aver.Framework | Aver.Framework |
+| [EnhancedInput](Aver.Framework.md#enhancedinput) | class | Aver.Framework | Aver.Framework |
+| [Entity](Aver.Framework.md#entity) | struct | Aver.Framework | Aver.Framework |
+| [EnvFx](Aver.Framework.md#envfx) | class | Aver.Framework | Aver.Framework |
+| [Eqs](Aver.Synapse.md#eqs) | class | Aver.Synapse | Aver.Synapse |
+| [EqsItem](Aver.Synapse.md#eqsitem) | record | Aver.Synapse | Aver.Synapse |
+| [EqsRequest](Aver.Synapse.md#eqsrequest) | struct | Aver.Synapse | Aver.Synapse |
+| [EqsRun](Aver.Synapse.md#eqsrun) | struct | Aver.Synapse | Aver.Synapse |
+| [EqsStatus](Aver.Synapse.md#eqsstatus) | enum | Aver.Synapse | Aver.Synapse |
+| [EqsTestContext](Aver.Synapse.md#eqstestcontext) | struct | Aver.Synapse | Aver.Synapse |
+| [EqsTestFn](Aver.Synapse.md#eqstestfn) | delegate | Aver.Synapse | Aver.Synapse |
+| [EventData](Aver.Framework.md#eventdata) | class | Aver.Framework | Aver.Framework |
+| [Events](Aver.Framework.md#events) | class | Aver.Framework | Aver.Framework |
+| [EventSubscription](Aver.Framework.md#eventsubscription) | struct | Aver.Framework | Aver.Framework |
+| [EventValue](Aver.Framework.md#eventvalue) | struct | Aver.Framework | Aver.Framework |
+| [EventValueKind](Aver.Framework.md#eventvaluekind) | enum | Aver.Framework | Aver.Framework |
+| [ExtensionContext](Aver.Framework.md#extensioncontext) | class | Aver.Framework | Aver.Framework.Hosting |
+| [ExtensionHost](Aver.Framework.md#extensionhost) | class | Aver.Framework | Aver.Framework.Hosting |
+
+<a id="f"></a>
+
+## F
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [FaceShapes](Aver.Framework.md#faceshapes) | class | Aver.Framework | Aver.Framework |
+| [FadeCurve](Aver.Framework.md#fadecurve) | enum | Aver.Framework | Aver.Framework |
+| [FindFlags](Aver.Synapse.md#findflags) | enum | Aver.Synapse | Aver.Synapse |
+| [Float3](Aver.Physics.md#float3) | struct | Aver.Physics | Aver.Physics |
+| [FogVolumeShapeKind](Aver.Framework.md#fogvolumeshapekind) | enum | Aver.Framework | Aver.Framework |
+| [Frame](Aver.Framework.md#frame) | class | Aver.Framework | Aver.Framework |
+| [FrameworkRebindProvider](Aver.Framework.md#frameworkrebindprovider) | class | Aver.Framework | Aver.Framework |
+| [FrameworkSettingsStore](Aver.Framework.md#frameworksettingsstore) | class | Aver.Framework | Aver.Framework |
+
+<a id="g"></a>
+
+## G
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [Game](Aver.Framework.md#game) | class | Aver.Framework | Aver.Framework |
+| [Game.CursorScope](Aver.Framework.md#game-cursorscope) | struct | Aver.Framework | Aver.Framework |
+| [GamepadAxis](Aver.Framework.md#gamepadaxis) | enum | Aver.Framework | Aver.Framework |
+| [GamepadButton](Aver.Framework.md#gamepadbutton) | enum | Aver.Framework | Aver.Framework |
+| [Gamepads](Aver.Framework.md#gamepads) | class | Aver.Framework | Aver.Framework |
+| [GameplayAbilities](Aver.Framework.md#gameplayabilities) | class | Aver.Framework | Aver.Framework |
+| [GameplayAbility](Aver.Framework.md#gameplayability) | class | Aver.Framework | Aver.Framework |
+| [GameplayDefs](Aver.Framework.md#gameplaydefs) | class | Aver.Framework | Aver.Framework |
+| [GameplayTag](Aver.Framework.md#gameplaytag) | struct | Aver.Framework | Aver.Framework |
+| [GameplayTagContainer](Aver.Framework.md#gameplaytagcontainer) | class | Aver.Framework | Aver.Framework |
+| [GearboxTiming](Aver.Physics.md#gearboxtiming) | record | Aver.Physics | Aver.Physics |
+| [GraphLevelInstances](Aver.LevelInstance.md#graphlevelinstances) | class | Aver.LevelInstance | Aver.LevelInstance |
+| [GraphPrefabs](Aver.Prefab.md#graphprefabs) | class | Aver.Prefab | Aver.Prefab |
+| [GroundSample](Aver.Framework.md#groundsample) | record | Aver.Framework | Aver.Framework |
+| [GroundState](Aver.Physics.md#groundstate) | enum | Aver.Physics | Aver.Physics |
+| [Groups](Aver.Framework.md#groups) | class | Aver.Framework | Aver.Framework |
+
+<a id="h"></a>
+
+## H
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [Hair](Aver.Framework.md#hair) | class | Aver.Framework | Aver.Framework |
+| [HairBindRole](Aver.Physics.md#hairbindrole) | enum | Aver.Physics | Aver.Physics |
+| [HairBufferType](Aver.Physics.md#hairbuffertype) | enum | Aver.Physics | Aver.Physics |
+| [HairColliderShape](Aver.Framework.md#haircollidershape) | enum | Aver.Framework | Aver.Framework |
+| [HairHandle](Aver.Physics.md#hairhandle) | struct | Aver.Physics | Aver.Physics |
+| [HairInfoFloat](Aver.Physics.md#hairinfofloat) | enum | Aver.Physics | Aver.Physics |
+| [HairInfoInt](Aver.Physics.md#hairinfoint) | enum | Aver.Physics | Aver.Physics |
+| [HairMaterialParam](Aver.Physics.md#hairmaterialparam) | enum | Aver.Physics | Aver.Physics |
+| [HairParam](Aver.Physics.md#hairparam) | enum | Aver.Physics | Aver.Physics |
+| [HairPhysics](Aver.Physics.md#hairphysics) | class | Aver.Physics | Aver.Physics |
+| [HairSettingsBuilder](Aver.Physics.md#hairsettingsbuilder) | class | Aver.Physics | Aver.Physics |
+| [HairSettingsHandle](Aver.Physics.md#hairsettingshandle) | struct | Aver.Physics | Aver.Physics |
+| [HairState](Aver.Framework.md#hairstate) | record | Aver.Framework | Aver.Framework |
+| [HairUpdateFloat](Aver.Physics.md#hairupdatefloat) | enum | Aver.Physics | Aver.Physics |
+| [HairUpdateInt](Aver.Physics.md#hairupdateint) | enum | Aver.Physics | Aver.Physics |
+| [HeardNoise](Aver.Synapse.md#heardnoise) | record | Aver.Synapse | Aver.Synapse |
+| [Hearing](Aver.Synapse.md#hearing) | class | Aver.Synapse | Aver.Synapse |
+| [HitEvent](Aver.Framework.md#hitevent) | record | Aver.Framework | Aver.Framework |
+| [Hud](Aver.UI.md#hud) | class | Aver.UI | Aver.UI |
+
+<a id="i"></a>
+
+## I
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [IAverExtension](Aver.Framework.md#iaverextension) | interface | Aver.Framework | Aver.Framework.Hosting |
+| [IGasClientRequests](Aver.Framework.md#igasclientrequests) | interface | Aver.Framework | Aver.Framework |
+| [IGasHost](Aver.Framework.md#igashost) | interface | Aver.Framework | Aver.Framework |
+| [IGasReplicationSink](Aver.Framework.md#igasreplicationsink) | interface | Aver.Framework | Aver.Framework |
+| [IkSpace](Aver.Framework.md#ikspace) | enum | Aver.Framework | Aver.Framework |
+| [Image](Aver.Framework.md#image) | class | Aver.Framework | Aver.Framework |
+| [ImageColor](Aver.Framework.md#imagecolor) | struct | Aver.Framework | Aver.Framework |
+| [ImageFormat](Aver.Framework.md#imageformat) | enum | Aver.Framework | Aver.Framework |
+| [ImageInterpolation](Aver.Framework.md#imageinterpolation) | enum | Aver.Framework | Aver.Framework |
+| [INetTransport](Aver.Framework.md#inettransport) | interface | Aver.Framework | Aver.Framework.Net |
+| [Input](Aver.Framework.md#input) | class | Aver.Framework | Aver.Framework |
+| [InputAction](Aver.Framework.md#inputaction) | class | Aver.Framework | Aver.Framework |
+| [InputEvent](Aver.Framework.md#inputevent) | class | Aver.Framework | Aver.Framework |
+| [InputEventJoypadButton](Aver.Framework.md#inputeventjoypadbutton) | class | Aver.Framework | Aver.Framework |
+| [InputEventJoypadMotion](Aver.Framework.md#inputeventjoypadmotion) | class | Aver.Framework | Aver.Framework |
+| [InputEventKey](Aver.Framework.md#inputeventkey) | class | Aver.Framework | Aver.Framework |
+| [InputEventMouseButton](Aver.Framework.md#inputeventmousebutton) | class | Aver.Framework | Aver.Framework |
+| [InputEventMouseMotion](Aver.Framework.md#inputeventmousemotion) | class | Aver.Framework | Aver.Framework |
+| [InputEventMouseWheel](Aver.Framework.md#inputeventmousewheel) | class | Aver.Framework | Aver.Framework |
+| [InputEventTouch](Aver.Framework.md#inputeventtouch) | class | Aver.Framework | Aver.Framework |
+| [InputEventTouchMotion](Aver.Framework.md#inputeventtouchmotion) | class | Aver.Framework | Aver.Framework |
+| [InputMappingContext](Aver.Framework.md#inputmappingcontext) | class | Aver.Framework | Aver.Framework |
+| [InputModifier](Aver.Framework.md#inputmodifier) | struct | Aver.Framework | Aver.Framework |
+| [InputScheme](Aver.Framework.md#inputscheme) | class | Aver.Framework | Aver.Framework |
+| [InputSource](Aver.Framework.md#inputsource) | enum | Aver.Framework | Aver.Framework |
+| [InputTrigger](Aver.Framework.md#inputtrigger) | struct | Aver.Framework | Aver.Framework |
+| [InputValueType](Aver.Framework.md#inputvaluetype) | enum | Aver.Framework | Aver.Framework |
+| [IntegrateForcesHandler](Aver.Physics.md#integrateforceshandler) | delegate | Aver.Physics | Aver.Physics |
+| [InterpolationMode](Aver.Framework.md#interpolationmode) | enum | Aver.Framework | Aver.Framework |
+| [IRawTable](Aver.Framework.md#irawtable) | interface | Aver.Framework | Aver.Framework |
+| [IRebindProvider](Aver.UI.md#irebindprovider) | interface | Aver.UI | Aver.UI |
+| [ISettingsStore](Aver.UI.md#isettingsstore) | interface | Aver.UI | Aver.UI |
+
+<a id="j"></a>
+
+## J
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [JellyState](Aver.Framework.md#jellystate) | record | Aver.Framework | Aver.Framework |
+| [Joint](Aver.Physics.md#joint) | struct | Aver.Physics | Aver.Physics |
+| [JointBreak](Aver.Physics.md#jointbreak) | struct | Aver.Physics | Aver.Physics |
+
+<a id="k"></a>
+
+## K
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [Key](Aver.Framework.md#key) | enum | Aver.Framework | Aver.Framework |
+| [KinematicCharacter](Aver.Physics.md#kinematiccharacter) | struct | Aver.Physics | Aver.Physics |
+| [KinematicCharacterOptions](Aver.Physics.md#kinematiccharacteroptions) | record | Aver.Physics | Aver.Physics |
+| [KinematicMotionMode](Aver.Physics.md#kinematicmotionmode) | enum | Aver.Physics | Aver.Physics |
+| [KinematicState](Aver.Physics.md#kinematicstate) | enum | Aver.Physics | Aver.Physics |
+
+<a id="l"></a>
+
+## L
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [Landscape](Aver.Framework.md#landscape) | class | Aver.Framework | Aver.Framework |
+| [Layer](Aver.UI.md#layer) | enum | Aver.UI | Aver.UI |
+| [Layer2D](Aver.Framework.md#layer2d) | struct | Aver.Framework | Aver.Framework |
+| [Layer2DFlags](Aver.Framework.md#layer2dflags) | enum | Aver.Framework | Aver.Framework |
+| [LayoutMode](Aver.UI.md#layoutmode) | enum | Aver.UI | Aver.UI |
+| [LevelInstanceAbi](Aver.LevelInstance.md#levelinstanceabi) | class | Aver.LevelInstance | Aver.LevelInstance |
+| [LevelInstanceError](Aver.LevelInstance.md#levelinstanceerror) | enum | Aver.LevelInstance | Aver.LevelInstance |
+| [LevelInstances](Aver.LevelInstance.md#levelinstances) | class | Aver.LevelInstance | Aver.LevelInstance |
+| [LevelSequences](Aver.Framework.md#levelsequences) | class | Aver.Framework | Aver.Framework |
+| [LifeState](Aver.Framework.md#lifestate) | enum | Aver.Framework | Aver.Framework |
+| [Loc](Aver.Framework.md#loc) | class | Aver.Framework | Aver.Framework |
+| [LocFormat](Aver.Framework.md#locformat) | class | Aver.Framework | Aver.Framework |
+| [LocGraph](Aver.Framework.md#locgraph) | class | Aver.Framework | Aver.Framework |
+| [LockAxes](Aver.Physics.md#lockaxes) | enum | Aver.Physics | Aver.Physics |
+| [LocText](Aver.Framework.md#loctext) | struct | Aver.Framework | Aver.Framework |
+| [Log](Aver.Scripting.md#log) | class | Aver.Scripting | Aver.Scripting |
+| [Log.Level](Aver.Scripting.md#log-level) | enum | Aver.Scripting | Aver.Scripting |
+| [LoopbackNetwork](Aver.Framework.md#loopbacknetwork) | class | Aver.Framework | Aver.Framework.Net |
+| [LoopbackTransport](Aver.Framework.md#loopbacktransport) | class | Aver.Framework | Aver.Framework.Net |
+| [LraMode](Aver.Physics.md#lramode) | enum | Aver.Physics | Aver.Physics |
+
+<a id="m"></a>
+
+## M
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [MagnitudeKind](Aver.Framework.md#magnitudekind) | enum | Aver.Framework | Aver.Framework |
+| [ManagedAi](Aver.Synapse.md#managedai) | class | Aver.Synapse | Aver.Synapse |
+| [ManagedKind](Aver.Synapse.md#managedkind) | enum | Aver.Synapse | Aver.Synapse |
+| [ManagedLeaf](Aver.Synapse.md#managedleaf) | record | Aver.Synapse | Aver.Synapse |
+| [MeshGiMode](Aver.Framework.md#meshgimode) | enum | Aver.Framework | Aver.Framework |
+| [MeshShadowMode](Aver.Framework.md#meshshadowmode) | enum | Aver.Framework | Aver.Framework |
+| [ModelAttribute](Aver.Framework.md#modelattribute) | class | Aver.Framework | Aver.Framework |
+| [ModelHandle](Aver.Framework.md#modelhandle) | struct | Aver.Framework | Aver.Framework |
+| [ModelImport](Aver.Framework.md#modelimport) | class | Aver.Framework | Aver.Framework |
+| [ModelImportGraph](Aver.Framework.md#modelimportgraph) | class | Aver.Framework | Aver.Framework |
+| [ModelImportOptions](Aver.Framework.md#modelimportoptions) | class | Aver.Framework | Aver.Framework |
+| [ModelImportResult](Aver.Framework.md#modelimportresult) | record | Aver.Framework | Aver.Framework |
+| [ModifierDef](Aver.Framework.md#modifierdef) | class | Aver.Framework | Aver.Framework |
+| [ModOp](Aver.Framework.md#modop) | enum | Aver.Framework | Aver.Framework |
+| [MotionCast](Aver.Physics.md#motioncast) | record | Aver.Physics | Aver.Physics |
+| [MotionContact](Aver.Physics.md#motioncontact) | record | Aver.Physics | Aver.Physics |
+| [MotionDrive](Aver.Framework.md#motiondrive) | enum | Aver.Framework | Aver.Framework |
+| [MotionFacing](Aver.Framework.md#motionfacing) | enum | Aver.Framework | Aver.Framework |
+| [MotionTestResult](Aver.Physics.md#motiontestresult) | record | Aver.Physics | Aver.Physics |
+| [MotionType](Aver.Physics.md#motiontype) | enum | Aver.Physics | Aver.Physics |
+| [MotorState](Aver.Physics.md#motorstate) | enum | Aver.Physics | Aver.Physics |
+| [MultiMeshes](Aver.Framework.md#multimeshes) | class | Aver.Framework | Aver.Framework |
+| [Music](Aver.Framework.md#music) | class | Aver.Framework | Aver.Framework |
+
+<a id="n"></a>
+
+## N
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [NativeNetTransport](Aver.Framework.md#nativenettransport) | class | Aver.Framework | Aver.Framework.Net |
+| [NetCodec](Aver.Framework.md#netcodec) | class | Aver.Framework | Aver.Framework.Net |
+| [NetConnection](Aver.Framework.md#netconnection) | class | Aver.Framework | Aver.Framework.Net |
+| [NetFormatException](Aver.Framework.md#netformatexception) | class | Aver.Framework | Aver.Framework.Net |
+| [NetObject](Aver.Framework.md#netobject) | class | Aver.Framework | Aver.Framework.Net |
+| [NetReader](Aver.Framework.md#netreader) | class | Aver.Framework | Aver.Framework.Net |
+| [NetRelevance](Aver.Framework.md#netrelevance) | class | Aver.Framework | Aver.Framework.Net |
+| [NetRole](Aver.Framework.md#netrole) | enum | Aver.Framework | Aver.Framework.Net |
+| [NetRpcRejection](Aver.Framework.md#netrpcrejection) | record | Aver.Framework | Aver.Framework.Net |
+| [NetSession](Aver.Framework.md#netsession) | class | Aver.Framework | Aver.Framework.Net |
+| [NetSessionState](Aver.Framework.md#netsessionstate) | enum | Aver.Framework | Aver.Framework.Net |
+| [NetStats](Aver.Framework.md#netstats) | class | Aver.Framework | Aver.Framework.Net |
+| [NetTransportEvent](Aver.Framework.md#nettransportevent) | struct | Aver.Framework | Aver.Framework.Net |
+| [NetTransportEventType](Aver.Framework.md#nettransporteventtype) | enum | Aver.Framework | Aver.Framework.Net |
+| [NetTypeAttribute](Aver.Framework.md#nettypeattribute) | class | Aver.Framework | Aver.Framework.Net |
+| [NetTypes](Aver.Framework.md#nettypes) | class | Aver.Framework | Aver.Framework.Net |
+| [NetWriter](Aver.Framework.md#netwriter) | class | Aver.Framework | Aver.Framework.Net |
+
+<a id="o"></a>
+
+## O
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [OS](Aver.Framework.md#os) | class | Aver.Framework | Aver.Framework |
+| [OverlapEvent](Aver.Framework.md#overlapevent) | struct | Aver.Framework | Aver.Framework |
+| [OverlapEvent](Aver.Physics.md#overlapevent) | struct | Aver.Physics | Aver.Physics |
+
+<a id="p"></a>
+
+## P
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [Parallax2D](Aver.Framework.md#parallax2d) | struct | Aver.Framework | Aver.Framework |
+| [Parallax2DFlags](Aver.Framework.md#parallax2dflags) | enum | Aver.Framework | Aver.Framework |
+| [ParticleParamKind](Aver.Framework.md#particleparamkind) | enum | Aver.Framework | Aver.Framework |
+| [Particles](Aver.Framework.md#particles) | class | Aver.Framework | Aver.Framework |
+| [ParticleStats](Aver.Framework.md#particlestats) | record | Aver.Framework | Aver.Framework |
+| [Paths](Aver.Framework.md#paths) | class | Aver.Framework | Aver.Framework |
+| [PauseMode](Aver.Framework.md#pausemode) | enum | Aver.Framework | Aver.Framework |
+| [Pbr](Aver.Scripting.md#pbr) | class | Aver.Scripting | Aver.Scripting |
+| [Pbr.PbrMaterial](Aver.Scripting.md#pbr-pbrmaterial) | struct | Aver.Scripting | Aver.Scripting |
+| [PbrAlphaExtension](Aver.Scripting.md#pbralphaextension) | enum | Aver.Scripting | Aver.Scripting |
+| [PbrAlphaMode](Aver.Scripting.md#pbralphamode) | enum | Aver.Scripting | Aver.Scripting |
+| [PbrChannel](Aver.Scripting.md#pbrchannel) | enum | Aver.Scripting | Aver.Scripting |
+| [PbrFeature](Aver.Scripting.md#pbrfeature) | enum | Aver.Scripting | Aver.Scripting |
+| [PbrSamplerAddress](Aver.Scripting.md#pbrsampleraddress) | enum | Aver.Scripting | Aver.Scripting |
+| [PbrSamplerFilter](Aver.Scripting.md#pbrsamplerfilter) | enum | Aver.Scripting | Aver.Scripting |
+| [PbrStatus](Aver.Scripting.md#pbrstatus) | enum | Aver.Scripting | Aver.Scripting |
+| [PbrTextureSlot](Aver.Scripting.md#pbrtextureslot) | enum | Aver.Scripting | Aver.Scripting |
+| [PbrUvMode](Aver.Scripting.md#pbruvmode) | enum | Aver.Scripting | Aver.Scripting |
+| [PcgApply](Aver.Pcg.Apply.md#pcgapply) | class | Aver.Pcg.Apply | Aver.Pcg.Apply |
+| [PhysicalSurfaces](Aver.Framework.md#physicalsurfaces) | class | Aver.Framework | Aver.Framework |
+| [Physics](Aver.Framework.md#physics) | class | Aver.Framework | Aver.Framework |
+| [Physics](Aver.Physics.md#physics) | class | Aver.Physics | Aver.Physics |
+| [PhysicsBuildFlags](Aver.Physics.md#physicsbuildflags) | enum | Aver.Physics | Aver.Physics |
+| [PhysicsConfigKey](Aver.Physics.md#physicsconfigkey) | enum | Aver.Physics | Aver.Physics |
+| [PhysicsDebugDraw](Aver.Physics.md#physicsdebugdraw) | class | Aver.Physics | Aver.Physics |
+| [PhysicsDebugFlags](Aver.Physics.md#physicsdebugflags) | enum | Aver.Physics | Aver.Physics |
+| [PhysicsDebugScheme](Aver.Physics.md#physicsdebugscheme) | enum | Aver.Physics | Aver.Physics |
+| [PhysicsError](Aver.Physics.md#physicserror) | enum | Aver.Physics | Aver.Physics |
+| [PhysicsOrigin](Aver.Physics.md#physicsorigin) | class | Aver.Physics | Aver.Physics |
+| [PhysicsOriginShift](Aver.Physics.md#physicsoriginshift) | struct | Aver.Physics | Aver.Physics |
+| [PhysicsPrecision](Aver.Physics.md#physicsprecision) | enum | Aver.Physics | Aver.Physics |
+| [PhysicsSetting](Aver.Physics.md#physicssetting) | enum | Aver.Physics | Aver.Physics |
+| [PhysicsSnapshot](Aver.Physics.md#physicssnapshot) | class | Aver.Physics | Aver.Physics |
+| [PhysicsStat](Aver.Physics.md#physicsstat) | enum | Aver.Physics | Aver.Physics |
+| [PhysicsStateRing](Aver.Physics.md#physicsstatering) | class | Aver.Physics | Aver.Physics |
+| [PhysicsStats](Aver.Physics.md#physicsstats) | struct | Aver.Physics | Aver.Physics |
+| [PhysicsUpdateErrors](Aver.Physics.md#physicsupdateerrors) | enum | Aver.Physics | Aver.Physics |
+| [PlatformOnLeave](Aver.Physics.md#platformonleave) | enum | Aver.Physics | Aver.Physics |
+| [PlayState](Aver.Framework.md#playstate) | enum | Aver.Framework | Aver.Framework |
+| [Pointer](Aver.Framework.md#pointer) | class | Aver.Framework | Aver.Framework |
+| [PointerMode](Aver.Framework.md#pointermode) | enum | Aver.Framework | Aver.Framework |
+| [PoseInterpolation](Aver.Framework.md#poseinterpolation) | class | Aver.Framework | Aver.Framework |
+| [PostFx](Aver.Framework.md#postfx) | class | Aver.Framework | Aver.Framework |
+| [PreAttributeChange](Aver.Framework.md#preattributechange) | delegate | Aver.Framework | Aver.Framework |
+| [PrefabAbi](Aver.Prefab.md#prefababi) | class | Aver.Prefab | Aver.Prefab |
+| [PrefabError](Aver.Prefab.md#prefaberror) | enum | Aver.Prefab | Aver.Prefab |
+| [Prefabs](Aver.Prefab.md#prefabs) | class | Aver.Prefab | Aver.Prefab |
+| [Preload](Aver.Framework.md#preload) | class | Aver.Framework | Aver.Framework |
+| [PresentMode](Aver.Framework.md#presentmode) | enum | Aver.Framework | Aver.Framework |
+| [ProbeBlend](Aver.Framework.md#probeblend) | struct | Aver.Framework | Aver.Framework |
+| [ProfileRow](Aver.Physics.md#profilerow) | record | Aver.Physics | Aver.Physics |
+| [ProjectSettings](Aver.Framework.md#projectsettings) | class | Aver.Framework | Aver.Framework |
+
+<a id="q"></a>
+
+## Q
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [Quat](Aver.Scene.md#quat) | struct | Aver.Scene | Aver.Scene |
+| [Quaternion](Aver.Physics.md#quaternion) | struct | Aver.Physics | Aver.Physics |
+| [QueryFlags](Aver.Physics.md#queryflags) | enum | Aver.Physics | Aver.Physics |
+| [QueryGraph](Aver.Synapse.md#querygraph) | class | Aver.Synapse | Aver.Synapse |
+
+<a id="r"></a>
+
+## R
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [Ragdoll](Aver.Physics.md#ragdoll) | struct | Aver.Physics | Aver.Physics |
+| [RagdollBone](Aver.Physics.md#ragdollbone) | struct | Aver.Physics | Aver.Physics |
+| [RagdollMode](Aver.Framework.md#ragdollmode) | enum | Aver.Framework | Aver.Framework |
+| [RagdollMode](Aver.Physics.md#ragdollmode) | enum | Aver.Physics | Aver.Physics |
+| [RandomNumberGenerator](Aver.Framework.md#randomnumbergenerator) | class | Aver.Framework | Aver.Framework |
+| [RayCast3D](Aver.Physics.md#raycast3d) | class | Aver.Physics | Aver.Physics |
+| [RaycastHit](Aver.Framework.md#raycasthit) | struct | Aver.Framework | Aver.Framework |
+| [RaycastHit](Aver.Physics.md#raycasthit) | struct | Aver.Physics | Aver.Physics |
+| [RaycastVehicle](Aver.Physics.md#raycastvehicle) | struct | Aver.Physics | Aver.Physics |
+| [RaycastWheelSettings](Aver.Physics.md#raycastwheelsettings) | record | Aver.Physics | Aver.Physics |
+| [RaycastWheelState](Aver.Physics.md#raycastwheelstate) | struct | Aver.Physics | Aver.Physics |
+| [RebindRow](Aver.UI.md#rebindrow) | record | Aver.UI | Aver.UI |
+| [Rect](Aver.UI.md#rect) | record | Aver.UI | Aver.UI |
+| [ReleaseReason](Aver.Synapse.md#releasereason) | enum | Aver.Synapse | Aver.Synapse |
+| [RenderKey](Aver.Framework.md#renderkey) | enum | Aver.Framework | Aver.Framework |
+| [RenderSettings](Aver.Framework.md#rendersettings) | class | Aver.Framework | Aver.Framework |
+| [RenderStats](Aver.Framework.md#renderstats) | record | Aver.Framework | Aver.Framework |
+| [ReplicatedAttribute](Aver.Framework.md#replicatedattribute) | class | Aver.Framework | Aver.Framework.Net |
+| [RestInfo](Aver.Physics.md#restinfo) | record | Aver.Physics | Aver.Physics |
+| [RestoreOptions](Aver.Physics.md#restoreoptions) | enum | Aver.Physics | Aver.Physics |
+| [RestoreResult](Aver.Physics.md#restoreresult) | enum | Aver.Physics | Aver.Physics |
+| [RootMotionAxes](Aver.Framework.md#rootmotionaxes) | enum | Aver.Framework | Aver.Framework |
+| [RootMotionImport](Aver.Framework.md#rootmotionimport) | enum | Aver.Framework | Aver.Framework |
+| [RootMotionMode](Aver.Framework.md#rootmotionmode) | enum | Aver.Framework | Aver.Framework |
+| [RopeEnd](Aver.Framework.md#ropeend) | enum | Aver.Framework | Aver.Framework |
+| [Ropes](Aver.Framework.md#ropes) | class | Aver.Framework | Aver.Framework |
+| [RopeState](Aver.Framework.md#ropestate) | record | Aver.Framework | Aver.Framework |
+| [Rot](Aver.Scene.md#rot) | struct | Aver.Scene | Aver.Scene |
+| [RpcAttribute](Aver.Framework.md#rpcattribute) | class | Aver.Framework | Aver.Framework.Net |
+| [RpcTarget](Aver.Framework.md#rpctarget) | enum | Aver.Framework | Aver.Framework.Net |
+| [RuntimeMeshes](Aver.Framework.md#runtimemeshes) | class | Aver.Framework | Aver.Framework |
+| [RuntimeTexture](Aver.Framework.md#runtimetexture) | class | Aver.Framework | Aver.Framework |
+
+<a id="s"></a>
+
+## S
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [ScaleFit](Aver.UI.md#scalefit) | enum | Aver.UI | Aver.UI |
+| [Scene](Aver.Scene.md#scene) | class | Aver.Scene | Aver.Scene |
+| [Scene2D](Aver.Framework.md#scene2d) | class | Aver.Framework | Aver.Framework |
+| [Scene2DComponent](Aver.Framework.md#scene2dcomponent) | enum | Aver.Framework | Aver.Framework |
+| [Scene2DTextureResolver](Aver.Framework.md#scene2dtextureresolver) | delegate | Aver.Framework | Aver.Framework |
+| [SceneError](Aver.Scene.md#sceneerror) | enum | Aver.Scene | Aver.Scene |
+| [SceneIds](Aver.Scene.md#sceneids) | class | Aver.Scene | Aver.Scene |
+| [SceneQueries](Aver.Framework.md#scenequeries) | class | Aver.Framework | Aver.Framework |
+| [Settings](Aver.Framework.md#settings) | class | Aver.Framework | Aver.Framework |
+| [SettingsScreen](Aver.UI.md#settingsscreen) | class | Aver.UI | Aver.UI |
+| [ShapeCast3D](Aver.Physics.md#shapecast3d) | class | Aver.Physics | Aver.Physics |
+| [ShapeChild](Aver.Physics.md#shapechild) | record | Aver.Physics | Aver.Physics |
+| [ShapeContact](Aver.Physics.md#shapecontact) | record | Aver.Physics | Aver.Physics |
+| [ShapeHit](Aver.Physics.md#shapehit) | struct | Aver.Physics | Aver.Physics |
+| [ShapeInfo](Aver.Physics.md#shapeinfo) | record | Aver.Physics | Aver.Physics |
+| [ShapeOverlap](Aver.Physics.md#shapeoverlap) | record | Aver.Physics | Aver.Physics |
+| [ShapeParams](Aver.Physics.md#shapeparams) | record | Aver.Physics | Aver.Physics |
+| [Shapes](Aver.Physics.md#shapes) | class | Aver.Physics | Aver.Physics |
+| [ShapeType](Aver.Physics.md#shapetype) | enum | Aver.Physics | Aver.Physics |
+| [SixDofAxis](Aver.Physics.md#sixdofaxis) | enum | Aver.Physics | Aver.Physics |
+| [Sky](Aver.Framework.md#sky) | class | Aver.Framework | Aver.Framework |
+| [SlideCollision](Aver.Physics.md#slidecollision) | record | Aver.Physics | Aver.Physics |
+| [SlotInfo](Aver.Synapse.md#slotinfo) | record | Aver.Synapse | Aver.Synapse |
+| [SlotRef](Aver.Synapse.md#slotref) | record | Aver.Synapse | Aver.Synapse |
+| [SlotState](Aver.Synapse.md#slotstate) | enum | Aver.Synapse | Aver.Synapse |
+| [SmartObjects](Aver.Synapse.md#smartobjects) | class | Aver.Synapse | Aver.Synapse |
+| [SnapshotInfo](Aver.Physics.md#snapshotinfo) | record | Aver.Physics | Aver.Physics |
+| [SnapshotParts](Aver.Physics.md#snapshotparts) | enum | Aver.Physics | Aver.Physics |
+| [SoftBodies](Aver.Framework.md#softbodies) | class | Aver.Framework | Aver.Framework |
+| [SoftBodyBuilder](Aver.Physics.md#softbodybuilder) | class | Aver.Physics | Aver.Physics |
+| [SoftBodyExtParam](Aver.Physics.md#softbodyextparam) | enum | Aver.Physics | Aver.Physics |
+| [SoftBodyHandle](Aver.Physics.md#softbodyhandle) | struct | Aver.Physics | Aver.Physics |
+| [SoftBodyImpact](Aver.Physics.md#softbodyimpact) | record | Aver.Physics | Aver.Physics |
+| [SoftBodyParam](Aver.Physics.md#softbodyparam) | enum | Aver.Physics | Aver.Physics |
+| [SoftBodySensorEvent](Aver.Physics.md#softbodysensorevent) | record | Aver.Physics | Aver.Physics |
+| [SoftBodyState](Aver.Framework.md#softbodystate) | record | Aver.Framework | Aver.Framework |
+| [SoftContactMode](Aver.Framework.md#softcontactmode) | enum | Aver.Framework | Aver.Framework |
+| [SoftDamageKind](Aver.Framework.md#softdamagekind) | enum | Aver.Framework | Aver.Framework |
+| [SoftEvent](Aver.Framework.md#softevent) | record | Aver.Framework | Aver.Framework |
+| [SoftEventKind](Aver.Framework.md#softeventkind) | enum | Aver.Framework | Aver.Framework |
+| [SoftFieldKind](Aver.Framework.md#softfieldkind) | enum | Aver.Framework | Aver.Framework |
+| [SoftFields](Aver.Framework.md#softfields) | class | Aver.Framework | Aver.Framework |
+| [SoftFieldShape](Aver.Framework.md#softfieldshape) | enum | Aver.Framework | Aver.Framework |
+| [SoftFieldSpec](Aver.Framework.md#softfieldspec) | record | Aver.Framework | Aver.Framework |
+| [SoftFieldTargets](Aver.Framework.md#softfieldtargets) | enum | Aver.Framework | Aver.Framework |
+| [SoftPairMode](Aver.Physics.md#softpairmode) | enum | Aver.Physics | Aver.Physics |
+| [SoftPreset](Aver.Framework.md#softpreset) | enum | Aver.Framework | Aver.Framework |
+| [SoftSensorEvent](Aver.Framework.md#softsensorevent) | record | Aver.Framework | Aver.Framework |
+| [SoftShapes](Aver.Framework.md#softshapes) | class | Aver.Framework | Aver.Framework |
+| [SoftSlotKind](Aver.Physics.md#softslotkind) | enum | Aver.Physics | Aver.Physics |
+| [Sound](Aver.Framework.md#sound) | struct | Aver.Framework | Aver.Framework |
+| [SoundGraph](Aver.Framework.md#soundgraph) | struct | Aver.Framework | Aver.Framework |
+| [SpaceQueryFlags](Aver.Physics.md#spacequeryflags) | enum | Aver.Physics | Aver.Physics |
+| [SpaceRayHit](Aver.Physics.md#spacerayhit) | struct | Aver.Physics | Aver.Physics |
+| [SpaceState](Aver.Physics.md#spacestate) | class | Aver.Physics | Aver.Physics |
+| [SpeakerLayout](Aver.Framework.md#speakerlayout) | enum | Aver.Framework | Aver.Framework |
+| [Speech](Aver.Framework.md#speech) | class | Aver.Framework | Aver.Framework |
+| [Sprite2D](Aver.Framework.md#sprite2d) | struct | Aver.Framework | Aver.Framework |
+| [Sprite2DBlend](Aver.Framework.md#sprite2dblend) | enum | Aver.Framework | Aver.Framework |
+| [Sprite2DFlags](Aver.Framework.md#sprite2dflags) | enum | Aver.Framework | Aver.Framework |
+| [SpriteAnim2D](Aver.Framework.md#spriteanim2d) | struct | Aver.Framework | Aver.Framework |
+| [SpriteAnimEvent2D](Aver.Framework.md#spriteanimevent2d) | record | Aver.Framework | Aver.Framework |
+| [SpriteAnimEventKind](Aver.Framework.md#spriteanimeventkind) | enum | Aver.Framework | Aver.Framework |
+| [SpriteAnimFrame2D](Aver.Framework.md#spriteanimframe2d) | struct | Aver.Framework | Aver.Framework |
+| [Squad](Aver.Synapse.md#squad) | class | Aver.Synapse | Aver.Synapse |
+| [SquadRole](Aver.Synapse.md#squadrole) | enum | Aver.Synapse | Aver.Synapse |
+| [StackExpire](Aver.Framework.md#stackexpire) | enum | Aver.Framework | Aver.Framework |
+| [StackScope](Aver.Framework.md#stackscope) | enum | Aver.Framework | Aver.Framework |
+| [StereoUpmix](Aver.Framework.md#stereoupmix) | enum | Aver.Framework | Aver.Framework |
+| [SubViewClear](Aver.Framework.md#subviewclear) | enum | Aver.Framework | Aver.Framework |
+| [SubViewInfo](Aver.Framework.md#subviewinfo) | struct | Aver.Framework | Aver.Framework |
+| [SubViews](Aver.Framework.md#subviews) | class | Aver.Framework | Aver.Framework |
+| [SubViewUpdate](Aver.Framework.md#subviewupdate) | enum | Aver.Framework | Aver.Framework |
+| [Surface](Aver.Framework.md#surface) | class | Aver.Framework | Aver.Framework |
+| [SurfaceHit](Aver.Framework.md#surfacehit) | record | Aver.Framework | Aver.Framework |
+| [SurfaceHit](Aver.Physics.md#surfacehit) | record | Aver.Physics | Aver.Physics |
+| [SurfaceHitExtensions](Aver.Physics.md#surfacehitextensions) | class | Aver.Physics | Aver.Physics |
+| [SurfaceInfo](Aver.Physics.md#surfaceinfo) | record | Aver.Physics | Aver.Physics |
+| [Surfaces](Aver.Physics.md#surfaces) | class | Aver.Physics | Aver.Physics |
+| [SwizzleOrder](Aver.Framework.md#swizzleorder) | enum | Aver.Framework | Aver.Framework |
+| [SynapseAi](Aver.Synapse.md#synapseai) | class | Aver.Synapse | Aver.Synapse |
+| [SynapseAiGraph](Aver.Synapse.md#synapseaigraph) | class | Aver.Synapse | Aver.Synapse |
+| [SynapseError](Aver.Synapse.md#synapseerror) | enum | Aver.Synapse | Aver.Synapse |
+
+<a id="t"></a>
+
+## T
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [Terrain](Aver.Physics.md#terrain) | class | Aver.Physics | Aver.Physics |
+| [TerrainInfo](Aver.Physics.md#terraininfo) | record | Aver.Physics | Aver.Physics |
+| [TextAlignment](Aver.UI.md#textalignment) | enum | Aver.UI | Aver.UI |
+| [TextDirection](Aver.UI.md#textdirection) | enum | Aver.UI | Aver.UI |
+| [TextFlags](Aver.UI.md#textflags) | enum | Aver.UI | Aver.UI |
+| [TextMetrics](Aver.UI.md#textmetrics) | record | Aver.UI | Aver.UI |
+| [TextStats](Aver.UI.md#textstats) | record | Aver.UI | Aver.UI |
+| [TextStyle](Aver.UI.md#textstyle) | record | Aver.UI | Aver.UI |
+| [TickGroup](Aver.Framework.md#tickgroup) | enum | Aver.Framework | Aver.Framework |
+| [TimerFlags](Aver.Framework.md#timerflags) | enum | Aver.Framework | Aver.Framework |
+| [TimerHandle](Aver.Framework.md#timerhandle) | struct | Aver.Framework | Aver.Framework |
+| [Timers](Aver.Framework.md#timers) | class | Aver.Framework | Aver.Framework |
+| [Touch](Aver.Framework.md#touch) | class | Aver.Framework | Aver.Framework |
+| [Transform2D](Aver.Framework.md#transform2d) | struct | Aver.Framework | Aver.Framework |
+| [Transform2DFlags](Aver.Framework.md#transform2dflags) | enum | Aver.Framework | Aver.Framework |
+| [TriggerState](Aver.Framework.md#triggerstate) | enum | Aver.Framework | Aver.Framework |
+
+<a id="u"></a>
+
+## U
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [UiAnimation](Aver.UI.md#uianimation) | class | Aver.UI | Aver.UI |
+| [UiBindings](Aver.UI.md#uibindings) | class | Aver.UI | Aver.UI |
+| [UiEvent](Aver.UI.md#uievent) | record | Aver.UI | Aver.UI |
+| [UiEventKind](Aver.UI.md#uieventkind) | enum | Aver.UI | Aver.UI |
+| [UiGameSettings](Aver.Framework.md#uigamesettings) | class | Aver.Framework | Aver.Framework |
+| [UiGraphNodes](Aver.UI.md#uigraphnodes) | class | Aver.UI | Aver.UI |
+| [UiRouteAction](Aver.UI.md#uirouteaction) | enum | Aver.UI | Aver.UI |
+| [UiSystem](Aver.UI.md#uisystem) | class | Aver.UI | Aver.UI |
+| [UiSystem.MenuEntry](Aver.UI.md#uisystem-menuentry) | record | Aver.UI | Aver.UI |
+| [UiText](Aver.UI.md#uitext) | class | Aver.UI | Aver.UI |
+
+<a id="v"></a>
+
+## V
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [Vec3](Aver.Scene.md#vec3) | struct | Aver.Scene | Aver.Scene |
+| [Vehicle](Aver.Physics.md#vehicle) | struct | Aver.Physics | Aver.Physics |
+| [VehicleEvent](Aver.Framework.md#vehicleevent) | record | Aver.Framework | Aver.Framework |
+| [VehicleEventKind](Aver.Framework.md#vehicleeventkind) | enum | Aver.Framework | Aver.Framework |
+| [VehicleHud](Aver.Framework.md#vehiclehud) | class | Aver.Framework | Aver.Framework |
+| [VehicleKind](Aver.Physics.md#vehiclekind) | enum | Aver.Physics | Aver.Physics |
+| [VehiclePhysicsEvent](Aver.Physics.md#vehiclephysicsevent) | record | Aver.Physics | Aver.Physics |
+| [VehiclePhysicsEventKind](Aver.Physics.md#vehiclephysicseventkind) | enum | Aver.Physics | Aver.Physics |
+| [VehiclePreset](Aver.Framework.md#vehiclepreset) | enum | Aver.Framework | Aver.Framework |
+| [Vehicles](Aver.Framework.md#vehicles) | class | Aver.Framework | Aver.Framework |
+| [VehicleState](Aver.Physics.md#vehiclestate) | record | Aver.Physics | Aver.Physics |
+| [VehicleTelemetry](Aver.Framework.md#vehicletelemetry) | record | Aver.Framework | Aver.Framework |
+| [VehicleTune](Aver.Physics.md#vehicletune) | enum | Aver.Physics | Aver.Physics |
+| [Visemes](Aver.Framework.md#visemes) | class | Aver.Framework | Aver.Framework |
+| [Voice](Aver.Framework.md#voice) | struct | Aver.Framework | Aver.Framework |
+| [Voxi](Aver.Scripting.md#voxi) | class | Aver.Scripting | Aver.Scripting |
+| [VoxiFeature](Aver.Scripting.md#voxifeature) | enum | Aver.Scripting | Aver.Scripting |
+| [VoxiQuality](Aver.Scripting.md#voxiquality) | enum | Aver.Scripting | Aver.Scripting |
+| [VoxiStatus](Aver.Scripting.md#voxistatus) | enum | Aver.Scripting | Aver.Scripting |
+
+<a id="w"></a>
+
+## W
+
+| Type | Kind | Assembly | Namespace |
+|---|---|---|---|
+| [Water](Aver.Framework.md#water) | class | Aver.Framework | Aver.Framework |
+| [WaterKind](Aver.Framework.md#waterkind) | enum | Aver.Framework | Aver.Framework |
+| [WaterSample](Aver.Framework.md#watersample) | record | Aver.Framework | Aver.Framework |
+| [WheelPlan](Aver.Framework.md#wheelplan) | record | Aver.Framework | Aver.Framework |
+| [WheelState](Aver.Physics.md#wheelstate) | record | Aver.Physics | Aver.Physics |
+| [WheelTelemetry](Aver.Framework.md#wheeltelemetry) | record | Aver.Framework | Aver.Framework |
+| [Widget](Aver.UI.md#widget) | struct | Aver.UI | Aver.UI |
+| [WidgetKind](Aver.UI.md#widgetkind) | enum | Aver.UI | Aver.UI |
+| [WindowFlags](Aver.Framework.md#windowflags) | enum | Aver.Framework | Aver.Framework |
+| [WindowMode](Aver.Framework.md#windowmode) | enum | Aver.Framework | Aver.Framework |
+| [WorldEnvKey](Aver.Framework.md#worldenvkey) | enum | Aver.Framework | Aver.Framework |
+| [WorldOrigin](Aver.Framework.md#worldorigin) | class | Aver.Framework | Aver.Framework |
+| [WorldPos](Aver.Framework.md#worldpos) | struct | Aver.Framework | Aver.Framework |

@@ -2,17 +2,19 @@
 
 # Sequence nodes
 
+Contents: 8 nodes sorted A-Z by type (`AN_` prefix ignored); categories: Sequencer. [All nodes A-Z](index.md).
+
 8 nodes. Rows: `scripting/csharp/Aver.Graph/GraphSequenceNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsSequencer.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
 | Type | Display | Category | Path | Pins | Attributes | C# |
 |---|---|---|---|---|---|---|
-| `BindSequenceActor` | Bind Sequence Actor | Sequencer | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `sequence`, `binding` | `SequenceGraphInterop.BindSequenceActorForGraph` |
-| `GetSequenceState` | Get Sequence State | Sequencer | D | out: `found` bool, `time` float, `length` float, `rate` float | `sequence` | `SequenceGraphInterop.GetSequenceStateForGraph` |
-| `IsSequencePlaying` | Is Sequence Playing | Sequencer | D | out: `result` bool | `sequence` (optional) | `SequenceGraphInterop.IsSequencePlayingForGraph` |
-| `PauseSequence` | Pause Sequence | Sequencer | P | in: `exec` exec<br>out: `then` exec, `success` bool | `sequence` | `SequenceGraphInterop.PauseSequenceForGraph` |
-| `PlaySequence` | Play Sequence | Sequencer | P | in: `exec` exec, `start` float = -1, `rate` float = 0<br>out: `then` exec, `success` bool | `sequence` | `SequenceGraphInterop.PlaySequenceForGraph` |
-| `SetSequenceRate` | Set Sequence Rate | Sequencer | P | in: `exec` exec, `rate` float<br>out: `then` exec, `success` bool | `sequence` | `SequenceGraphInterop.SetSequenceRateForGraph` |
-| `SetSequenceTime` | Set Sequence Time | Sequencer | P | in: `exec` exec, `seconds` float<br>out: `then` exec, `success` bool | `sequence` | `SequenceGraphInterop.SetSequenceTimeForGraph` |
-| `StopSequence` | Stop Sequence | Sequencer | P | in: `exec` exec<br>out: `then` exec, `success` bool | `sequence` (optional) | `SequenceGraphInterop.StopSequenceForGraph` |
+| <a id="bindsequenceactor"></a>`BindSequenceActor` | Bind Sequence Actor | Sequencer | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `sequence`, `binding` | `SequenceGraphInterop.BindSequenceActorForGraph` |
+| <a id="getsequencestate"></a>`GetSequenceState` | Get Sequence State | Sequencer | D | out: `found` bool, `time` float, `length` float, `rate` float | `sequence` | `SequenceGraphInterop.GetSequenceStateForGraph` |
+| <a id="issequenceplaying"></a>`IsSequencePlaying` | Is Sequence Playing | Sequencer | D | out: `result` bool | `sequence` (optional) | `SequenceGraphInterop.IsSequencePlayingForGraph` |
+| <a id="pausesequence"></a>`PauseSequence` | Pause Sequence | Sequencer | P | in: `exec` exec<br>out: `then` exec, `success` bool | `sequence` | `SequenceGraphInterop.PauseSequenceForGraph` |
+| <a id="playsequence"></a>`PlaySequence` | Play Sequence | Sequencer | P | in: `exec` exec, `start` float = -1, `rate` float = 0<br>out: `then` exec, `success` bool | `sequence` | `SequenceGraphInterop.PlaySequenceForGraph` |
+| <a id="setsequencerate"></a>`SetSequenceRate` | Set Sequence Rate | Sequencer | P | in: `exec` exec, `rate` float<br>out: `then` exec, `success` bool | `sequence` | `SequenceGraphInterop.SetSequenceRateForGraph` |
+| <a id="setsequencetime"></a>`SetSequenceTime` | Set Sequence Time | Sequencer | P | in: `exec` exec, `seconds` float<br>out: `then` exec, `success` bool | `sequence` | `SequenceGraphInterop.SetSequenceTimeForGraph` |
+| <a id="stopsequence"></a>`StopSequence` | Stop Sequence | Sequencer | P | in: `exec` exec<br>out: `then` exec, `success` bool | `sequence` (optional) | `SequenceGraphInterop.StopSequenceForGraph` |

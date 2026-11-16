@@ -3,7 +3,7 @@
 # in agreement, and writes that reference. Stdlib only.
 #
 #   python scripts/node-catalog.py --check      # fail on any disagreement (ctest NodeCatalogCheck)
-#   python scripts/node-catalog.py --write      # regenerate docs/nodes/<Family>.md and docs/nodes/Core.md
+#   python scripts/node-catalog.py --write      # regenerate docs/nodes/<Family>.md, Core.md and index.md (families + A-Z)
 #   python scripts/node-catalog.py --counts     # table / palette / parser counts, for a sentence in a doc
 #   python scripts/node-catalog.py --scaffold-palette Family --category Cat
 #                                               # print a GraphNodeDefs<Family>.hpp body from the C# rows
@@ -703,6 +703,19 @@ def family_header_file(family, entries_by_key, rows):
     return None
 
 
+def sort_key(type_id):
+    t = type_id.lower()
+    return (t[3:] if t.startswith("an_") else t, t)
+
+
+def anchor(type_id, prefix=""):
+    return prefix + type_id.lower()
+
+
+def short_summary(s):
+    return re.sub(r"^\w+:\s+", "", s)
+
+
 def family_page(family, rows, pal_by_key):
     table_file = rows[0].file
     notes_path = os.path.join(DOCS_NODES, family + ".notes.md")
@@ -710,18 +723,22 @@ def family_page(family, rows, pal_by_key):
     if os.path.exists(notes_path):
         out += [read(notes_path).rstrip("\n"), ""]
     hdrs = sorted({pal_by_key[r.key.lower()].file for r in rows if r.key.lower() in pal_by_key})
+    cats = sorted({pal_by_key[r.key.lower()].category for r in rows if r.key.lower() in pal_by_key})
+    out.append("Contents: %d nodes sorted A-Z by type (`AN_` prefix ignored); categories: %s. "
+               "[All nodes A-Z](index.md)." % (len(rows), ", ".join(cats) if cats else "none"))
+    out.append("")
     out.append("%d nodes. Rows: `%s`. Palette: %s." % (
         len(rows), table_file, ", ".join("`%s`" % h for h in hdrs) if hdrs else "none"))
     out += ["", "Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).", "",
             "| Type | Display | Category | Path | Pins | Attributes | C# |", "|---|---|---|---|---|---|---|"]
-    for r in sorted(rows, key=lambda x: x.key):
+    for r in sorted(rows, key=lambda x: sort_key(x.key)):
         e = pal_by_key.get(r.key.lower())
         summary = doc_summary(r.owner, r.method) if r.kind != "Trigger" else ""
         csharp = "`%s.%s`" % (r.owner, r.method) if r.method else "entry node"
         if summary:
             csharp += "<br>" + md(summary)
-        out.append("| `%s` | %s | %s | %s | %s | %s | %s |" % (
-            e.type_id if e else r.key, md(e.display) if e else "", md(e.category) if e else "", PATH_CODE[r.kind],
+        out.append("| <a id=\"%s\"></a>`%s` | %s | %s | %s | %s | %s | %s |" % (
+            anchor(r.key), e.type_id if e else r.key, md(e.display) if e else "", md(e.category) if e else "", PATH_CODE[r.kind],
             pins_cell(r.derived_pins()), attrs_cell(r.attributes()), csharp))
     out.append("")
     return "\n".join(out)
@@ -729,19 +746,80 @@ def family_page(family, rows, pal_by_key):
 
 def core_page(entries, rowkeys):
     mine = [e for e in entries if e.type_id.lower() not in rowkeys]
-    gameplay = sorted([e for e in mine if serves_gameplay(e)], key=lambda e: (e.category.lower(), e.type_id.lower()))
-    material = sorted([e for e in mine if e.domain == "material"], key=lambda e: (e.category.lower(), e.type_id.lower()))
+    gameplay = sorted([e for e in mine if serves_gameplay(e)], key=lambda e: (e.category.lower(), sort_key(e.type_id)))
+    material = sorted([e for e in mine if e.domain == "material"], key=lambda e: (e.category.lower(), sort_key(e.type_id)))
     out = [GENERATED_MARK, "", "# Core nodes", "",
            "The nodes the parser (`OcGraphParser.AddDefaultPins`) and the compiler know by hand, plus palette entries "
            "that are not table rows. Read from the editor palette (`sandbox/src/GraphNodeDefs*.hpp`); the parser is "
-           "the ground truth for a pin shape (`docs/AVER_NODE_NODES.md`).", ""]
+           "the ground truth for a pin shape (`docs/AVER_NODE_NODES.md`).", "",
+           "Contents: %d gameplay nodes and %d material-graph nodes, each section grouped by palette category and sorted "
+           "A-Z within it. [All nodes A-Z](index.md)." % (len(gameplay), len(material)), ""]
     for title, group in (("Gameplay", gameplay), ("Material graph", material)):
         out += ["## %s (%d)" % (title, len(group)), "", "| Type | Display | Category | Pins | Attributes |", "|---|---|---|---|---|"]
         for e in group:
             pins = pins_cell(e.pins) if e.pins is not None else "see the palette entry"
             attrs = ", ".join("`%s`" % a for a in e.attrs) if e.attrs else "none"
-            out.append("| `%s` | %s | %s | %s | %s |" % (e.type_id, md(e.display), md(e.category), pins, attrs))
+            out.append("| <a id=\"%s\"></a>`%s` | %s | %s | %s | %s |" % (
+                anchor(e.type_id, "material-" if title != "Gameplay" else ""), e.type_id, md(e.display), md(e.category), pins, attrs))
         out.append("")
+    return "\n".join(out)
+
+
+def index_page(rows, entries, pal_by_key):
+    rowkeys = {r.key.lower() for r in rows}
+    core = [e for e in entries if e.type_id.lower() not in rowkeys]
+    core_gp = [e for e in core if serves_gameplay(e)]
+    core_mat = [e for e in core if e.domain == "material"]
+    fams = {}
+    for r in rows:
+        fams.setdefault(r.family, []).append(r)
+    items = []       # (type_id, family label, category, summary, page, anchor)
+    fam_rows = []    # (family label, categories, count, page)
+    for fam in sorted(fams, key=str.lower):
+        rs = fams[fam]
+        cats = sorted({pal_by_key[r.key.lower()].category for r in rs if r.key.lower() in pal_by_key})
+        fam_rows.append((fam, ", ".join(cats), len(rs), fam + ".md"))
+        for r in rs:
+            e = pal_by_key.get(r.key.lower())
+            summ = short_summary(doc_summary(r.owner, r.method)) if r.kind != "Trigger" and r.method else ""
+            items.append((e.type_id if e else r.key, fam, e.category if e else "", summ, fam + ".md", anchor(r.key)))
+    cats = sorted({e.category for e in core_gp}, key=str.lower)
+    fam_rows.append(("Core", ", ".join(cats), len(core_gp), "Core.md"))
+    fam_rows.append(("Core (material graph)", ", ".join(sorted({e.category for e in core_mat}, key=str.lower)),
+                     len(core_mat), "Core.md"))
+    for e in core_gp:
+        items.append((e.type_id, "Core", e.category, "", "Core.md", anchor(e.type_id)))
+    for e in core_mat:
+        items.append((e.type_id, "Core (material graph)", e.category, "", "Core.md", anchor(e.type_id, "material-")))
+    items.sort(key=lambda x: (sort_key(x[0]), x[1]))
+    letters = []
+    for it in items:
+        c = sort_key(it[0])[0][:1].upper()
+        c = c if c.isalpha() else "#"
+        if c not in letters:
+            letters.append(c)
+    out = [GENERATED_MARK, "", "# Aver Node index", "",
+           "Lookup by family and by name. Generated; pins and attributes are on the family pages, behaviour notes in "
+           "[`AVER_NODE_NODES.md`](../AVER_NODE_NODES.md). [README](README.md) explains how these pages are made.", "",
+           "## Families", "", "| Family | Category | Nodes | Page |", "|---|---|---|---|"]
+    for fam, cat, n, page in fam_rows:
+        out.append("| %s | %s | %d | [`%s`](%s) |" % (fam, md(cat), n, page, page))
+    out.append("| **Total** | | **%d** | |" % sum(f[2] for f in fam_rows))
+    out += ["", "## All nodes A-Z (%d)" % len(items), "",
+            " ".join("[%s](#letter-%s)" % (c, "sym" if c == "#" else c.lower()) for c in letters), ""]
+    cur = None
+    for it in items:
+        c = sort_key(it[0])[0][:1].upper()
+        c = c if c.isalpha() else "#"
+        if c != cur:
+            if cur is not None:
+                out.append("")
+            cur = c
+            out += ['<a id="letter-%s"></a>' % ("sym" if c == "#" else c.lower()), "", "### %s" % c, "",
+                    "| Node | Family | Category | Summary | Page |", "|---|---|---|---|---|"]
+        tid, fam, cat, summ, page, anc = it
+        out.append("| `%s` | %s | %s | %s | [%s](%s#%s) |" % (tid, fam, md(cat), md(summ), page, page, anc))
+    out.append("")
     return "\n".join(out)
 
 
@@ -757,6 +835,7 @@ def build_pages(rows, entries):
     for fam, rs in fams.items():
         pages[fam + ".md"] = family_page(fam, rs, pal_by_key)
     pages["Core.md"] = core_page(entries, {r.key.lower() for r in rows})
+    pages["index.md"] = index_page(rows, entries, pal_by_key)
     return pages
 
 

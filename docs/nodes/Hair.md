@@ -2,17 +2,19 @@
 
 # Hair nodes
 
+Contents: 8 nodes sorted A-Z by type (`AN_` prefix ignored); categories: Physics. [All nodes A-Z](index.md).
+
 8 nodes. Rows: `scripting/csharp/Aver.Graph/GraphHairNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsHair.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
 | Type | Display | Category | Path | Pins | Attributes | C# |
 |---|---|---|---|---|---|---|
-| `AddHair` | Add Hair | Physics | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `asset` | `HairGraphInterop.AddHairForGraph` |
-| `AddHairCollider` | Add Hair Collider | Physics | P | in: `exec` exec, `entity` int, `shape` int = 0, `sx` float = 10, `sy` float = 0, `sz` float = 0<br>out: `then` exec, `success` bool | `bone` | `HairGraphInterop.AddHairColliderForGraph` |
-| `GetHair` | Get Hair | Physics | D | in: `entity` int<br>out: `found` bool, `simulating` bool, `lod` int, `renderStrands` int, `simStrands` int | none | `HairGraphInterop.GetHairForGraph` |
-| `SetHairEnabled` | Set Hair Enabled | Physics | P | in: `exec` exec, `entity` int, `on` bool = true<br>out: `then` exec, `success` bool | none | `HairGraphInterop.SetHairEnabledForGraph` |
-| `SetHairLook` | Set Hair Look | Physics | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `material` | `HairGraphInterop.SetHairLookForGraph` |
-| `SetHairParams` | Set Hair Params | Physics | P | in: `exec` exec, `entity` int, `width` float = 1, `density` float = 1, `stiffness` float = 1, `wind` float = 1<br>out: `then` exec, `success` bool | none | `HairGraphInterop.SetHairParamsForGraph`<br>Width, density, stiffness and wind scale in one node; a negative value leaves that scale alone (so a node can set just one). |
-| `SetHairWind` | Set Hair Wind | Physics | P | in: `exec` exec, `x` float, `y` float, `z` float, `gust` float = 0<br>out: `then` exec, `success` bool | none | `HairGraphInterop.SetHairWindForGraph` |
-| `TeleportHair` | Teleport Hair | Physics | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none | `HairGraphInterop.TeleportHairForGraph` |
+| <a id="addhair"></a>`AddHair` | Add Hair | Physics | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `asset` | `HairGraphInterop.AddHairForGraph` |
+| <a id="addhaircollider"></a>`AddHairCollider` | Add Hair Collider | Physics | P | in: `exec` exec, `entity` int, `shape` int = 0, `sx` float = 10, `sy` float = 0, `sz` float = 0<br>out: `then` exec, `success` bool | `bone` | `HairGraphInterop.AddHairColliderForGraph` |
+| <a id="gethair"></a>`GetHair` | Get Hair | Physics | D | in: `entity` int<br>out: `found` bool, `simulating` bool, `lod` int, `renderStrands` int, `simStrands` int | none | `HairGraphInterop.GetHairForGraph` |
+| <a id="sethairenabled"></a>`SetHairEnabled` | Set Hair Enabled | Physics | P | in: `exec` exec, `entity` int, `on` bool = true<br>out: `then` exec, `success` bool | none | `HairGraphInterop.SetHairEnabledForGraph` |
+| <a id="sethairlook"></a>`SetHairLook` | Set Hair Look | Physics | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `material` | `HairGraphInterop.SetHairLookForGraph` |
+| <a id="sethairparams"></a>`SetHairParams` | Set Hair Params | Physics | P | in: `exec` exec, `entity` int, `width` float = 1, `density` float = 1, `stiffness` float = 1, `wind` float = 1<br>out: `then` exec, `success` bool | none | `HairGraphInterop.SetHairParamsForGraph`<br>Width, density, stiffness and wind scale in one node; a negative value leaves that scale alone (so a node can set just one). |
+| <a id="sethairwind"></a>`SetHairWind` | Set Hair Wind | Physics | P | in: `exec` exec, `x` float, `y` float, `z` float, `gust` float = 0<br>out: `then` exec, `success` bool | none | `HairGraphInterop.SetHairWindForGraph` |
+| <a id="teleporthair"></a>`TeleportHair` | Teleport Hair | Physics | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none | `HairGraphInterop.TeleportHairForGraph` |

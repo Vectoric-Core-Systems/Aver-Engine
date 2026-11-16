@@ -2,17 +2,19 @@
 
 # Fields nodes
 
+Contents: 8 nodes sorted A-Z by type (`AN_` prefix ignored); categories: Physics. [All nodes A-Z](index.md).
+
 8 nodes. Rows: `scripting/csharp/Aver.Graph/GraphFieldsNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsFields.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
 | Type | Display | Category | Path | Pins | Attributes | C# |
 |---|---|---|---|---|---|---|
-| `AN_GetSoftFieldTouched` | Get Soft Field Touched | Physics | D | in: `entity` int<br>out: `found` bool, `touched` int | none | `SoftFieldGraph.GetSoftFieldTouchedForGraph` |
-| `AN_SoftFieldImpact` | Soft Field Impact | Physics | P | in: `exec` exec, `x` float, `y` float, `z` float, `dirX` float, `dirY` float, `dirZ` float, `radius` float = 40, `energy` float = 500, `kick` float = 0<br>out: `then` exec, `reached` int, `success` bool | none | `SoftFieldGraph.SoftFieldImpactForGraph` |
-| `AN_SoftFieldPulse` | Soft Field Pulse | Physics | P | in: `exec` exec, `kind` int, `shape` int, `x` float, `y` float, `z` float, `ex` float, `ey` float, `ez` float, `dirX` float, `dirY` float, `dirZ` float, `strength` float, `energy` float, `falloff` float = 1, `targets` int = 7<br>out: `then` exec, `reached` int, `success` bool | none | `SoftFieldGraph.SoftFieldPulseForGraph`<br>Success means at least one piece was in reach. |
-| `AN_SoftFieldSetEnabled` | Set Soft Field Enabled | Physics | P | in: `exec` exec, `entity` int, `enabled` bool = true<br>out: `then` exec, `success` bool | none | `SoftFieldGraph.SoftFieldSetEnabledForGraph` |
-| `AN_SoftFieldSetStrength` | Set Soft Field Strength | Physics | P | in: `exec` exec, `entity` int, `strength` float, `energy` float<br>out: `then` exec, `success` bool | none | `SoftFieldGraph.SoftFieldSetStrengthForGraph` |
-| `AN_SoftFieldStart` | Start Soft Field | Physics | P | in: `exec` exec, `kind` int, `shape` int, `x` float, `y` float, `z` float, `ex` float, `ey` float, `ez` float, `dirX` float, `dirY` float, `dirZ` float, `strength` float, `energy` float, `falloff` float = 1, `targets` int = 7, `lifetime` float = 5<br>out: `then` exec, `handle` int, `success` bool | none | `SoftFieldGraph.SoftFieldStartForGraph` |
-| `AN_SoftFieldStop` | Stop Soft Field | Physics | P | in: `exec` exec, `handle` int<br>out: `then` exec, `success` bool | none | `SoftFieldGraph.SoftFieldStopForGraph` |
-| `AN_SpawnSoftField` | Spawn Soft Field | Physics | P | in: `exec` exec, `kind` int, `shape` int, `x` float, `y` float, `z` float, `ex` float, `ey` float, `ez` float, `strength` float, `energy` float, `falloff` float = 1, `lifetime` float = 5<br>out: `then` exec, `entity` int, `success` bool | none | `SoftFieldGraph.SpawnSoftFieldForGraph` |
+| <a id="an_getsoftfieldtouched"></a>`AN_GetSoftFieldTouched` | Get Soft Field Touched | Physics | D | in: `entity` int<br>out: `found` bool, `touched` int | none | `SoftFieldGraph.GetSoftFieldTouchedForGraph` |
+| <a id="an_softfieldimpact"></a>`AN_SoftFieldImpact` | Soft Field Impact | Physics | P | in: `exec` exec, `x` float, `y` float, `z` float, `dirX` float, `dirY` float, `dirZ` float, `radius` float = 40, `energy` float = 500, `kick` float = 0<br>out: `then` exec, `reached` int, `success` bool | none | `SoftFieldGraph.SoftFieldImpactForGraph` |
+| <a id="an_softfieldpulse"></a>`AN_SoftFieldPulse` | Soft Field Pulse | Physics | P | in: `exec` exec, `kind` int, `shape` int, `x` float, `y` float, `z` float, `ex` float, `ey` float, `ez` float, `dirX` float, `dirY` float, `dirZ` float, `strength` float, `energy` float, `falloff` float = 1, `targets` int = 7<br>out: `then` exec, `reached` int, `success` bool | none | `SoftFieldGraph.SoftFieldPulseForGraph`<br>Success means at least one piece was in reach. |
+| <a id="an_softfieldsetenabled"></a>`AN_SoftFieldSetEnabled` | Set Soft Field Enabled | Physics | P | in: `exec` exec, `entity` int, `enabled` bool = true<br>out: `then` exec, `success` bool | none | `SoftFieldGraph.SoftFieldSetEnabledForGraph` |
+| <a id="an_softfieldsetstrength"></a>`AN_SoftFieldSetStrength` | Set Soft Field Strength | Physics | P | in: `exec` exec, `entity` int, `strength` float, `energy` float<br>out: `then` exec, `success` bool | none | `SoftFieldGraph.SoftFieldSetStrengthForGraph` |
+| <a id="an_softfieldstart"></a>`AN_SoftFieldStart` | Start Soft Field | Physics | P | in: `exec` exec, `kind` int, `shape` int, `x` float, `y` float, `z` float, `ex` float, `ey` float, `ez` float, `dirX` float, `dirY` float, `dirZ` float, `strength` float, `energy` float, `falloff` float = 1, `targets` int = 7, `lifetime` float = 5<br>out: `then` exec, `handle` int, `success` bool | none | `SoftFieldGraph.SoftFieldStartForGraph` |
+| <a id="an_softfieldstop"></a>`AN_SoftFieldStop` | Stop Soft Field | Physics | P | in: `exec` exec, `handle` int<br>out: `then` exec, `success` bool | none | `SoftFieldGraph.SoftFieldStopForGraph` |
+| <a id="an_spawnsoftfield"></a>`AN_SpawnSoftField` | Spawn Soft Field | Physics | P | in: `exec` exec, `kind` int, `shape` int, `x` float, `y` float, `z` float, `ex` float, `ey` float, `ez` float, `strength` float, `energy` float, `falloff` float = 1, `lifetime` float = 5<br>out: `then` exec, `entity` int, `success` bool | none | `SoftFieldGraph.SpawnSoftFieldForGraph` |

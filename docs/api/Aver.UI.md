@@ -2,350 +2,629 @@
 
 # Aver.UI public API
 
-28 public types and 260 public members, read from `scripting/csharp/Aver.UI/` (10 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+28 public types and 260 public members, read from `scripting/csharp/Aver.UI/` (10 source files). Members are grouped by kind and sorted alphabetically; signatures are single lines as declared, and the summary is the first sentence of the XML summary. Every type in every assembly: [index](index.md); every member: [members-a-z](members-a-z.md).
+
+## Contents
+
+**namespace Aver.UI**
+
+- Classes: [AverHudAttribute](#averhudattribute), [Hud](#hud), [SettingsScreen](#settingsscreen), [UiAnimation](#uianimation), [UiBindings](#uibindings), [UiGraphNodes](#uigraphnodes), [UiSystem](#uisystem), [UiText](#uitext)
+- Structs: [Colour](#colour), [Widget](#widget)
+- Interfaces: [IRebindProvider](#irebindprovider), [ISettingsStore](#isettingsstore)
+- Enums: [Layer](#layer), [LayoutMode](#layoutmode), [ScaleFit](#scalefit), [TextAlignment](#textalignment), [TextDirection](#textdirection), [TextFlags](#textflags), [UiEventKind](#uieventkind), [UiRouteAction](#uirouteaction), [WidgetKind](#widgetkind)
+- Records: [RebindRow](#rebindrow), [Rect](#rect), [TextMetrics](#textmetrics), [TextStats](#textstats), [TextStyle](#textstyle), [UiEvent](#uievent), [UiSystem.MenuEntry](#uisystem-menuentry)
 
 ## namespace Aver.UI
+
+<a id="averhudattribute"></a>
 
 ### AverHudAttribute
 
 `public sealed class AverHudAttribute : Attribute` - Marks a class the engine discovers as a HUD.
 
-- `public AverHudAttribute(string name)` - Marks a class as a HUD under the given display name.
-- `public string Name { get; }` - The display name.
-- `public bool Default { get; init; }` - Draw this one when the editor has no better reason to choose.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AverHudAttribute` | `public AverHudAttribute(string name)` | Marks a class as a HUD under the given display name. |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Default` | `public bool Default { get; init; }` | Draw this one when the editor has no better reason to choose. |
+| `Name` | `public string Name { get; }` | The display name. |
+
+<a id="colour"></a>
 
 ### Colour
 
 `public readonly struct Colour` - A colour written as ARGB.
 
-- `public static Colour Rgb(byte r, byte g, byte b, byte a = 255)` - From bytes: Colour.Rgb(232, 228, 220), opaque unless an alpha is given.
-- `public static Colour Argb(uint argb)` - From the familiar hex spelling: Colour.Argb(0xFFE8E4DC).
-- `public Colour WithAlpha(float alpha)` - The same colour at a different opacity, 0..1.
-- `public static Colour Lerp(Colour from, Colour to, float t)` - Linear blend between two colours, t clamped to 0..1.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Argb` | `public static Colour Argb(uint argb)` | From the familiar hex spelling: Colour.Argb(0xFFE8E4DC). |
+| `Lerp` | `public static Colour Lerp(Colour from, Colour to, float t)` | Linear blend between two colours, t clamped to 0..1. |
+| `Rgb` | `public static Colour Rgb(byte r, byte g, byte b, byte a = 255)` | From bytes: Colour.Rgb(232, 228, 220), opaque unless an alpha is given. |
+| `WithAlpha` | `public Colour WithAlpha(float alpha)` | The same colour at a different opacity, 0..1. |
+
+<a id="hud"></a>
 
 ### Hud
 
 `public static class Hud` - The game's UI: rectangles, in screen pixels, with a top-left origin.
 
-- `public static Rect Viewport { get; }` - The rectangle this frame's UI is laid out against, in backbuffer pixels.
-- `public static Layer CurrentLayer { get; set; }` - The band subsequent draws land in.
-- `public static void Box(float x, float y, float w, float h, Colour colour)` - A solid rectangle.
-- `public static void Box(Rect r, Colour colour)` - A solid rectangle.
-- `public static void Frame(Rect r, float thickness, Colour border, Colour fill)` - A rectangle with a border drawn inside its bounds.
-- `public static void Bar(Rect r, float fraction, Colour border, Colour empty, Colour full)` - A horizontal bar filled left to right by fraction (0..1).
-- `public static void Image(Rect r, ulong texture, Colour tint, float u0 = 0f, float v0 = 0f, float u1 = 1f, float v1 = 1f)` - A textured quad.
-- `public static void PushClip(Rect r)` - Confines subsequent draws to r until PopClip.
-- `public static void PopClip()` - Restore the enclosing clip.
-- `public static bool HasFont { get; }` - Whether a font is available this frame.
-- `public static float LineHeight { get; }` - Baseline to baseline, in pixels.
-- `public static float Ascent { get; }` - How far the font rises above the baseline.
-- `public static float Text(float x, float y, string text, Colour colour)` - Draws text with the pen at x, y — the LEFT END OF THE BASELINE, not a box corner.
-- `public static float MeasureText(string text)` - The width text would occupy.
-- `public static float TextCentred(Rect r, string text, Colour colour)` - Draws text centred horizontally in r and vertically on its mid-line.
-- `public static float TextBlock(Rect r, string text, Colour colour, TextStyle style, TextAlignment align = TextAlignment.Left)` - Draws a block of styled text with its top-left at the rectangle's corner, wrapped to the rectangle's width and aligned within it.
-- `public static TextMetrics MeasureText(string text, TextStyle style, float maxWidth = 0f)` - The size text would occupy in style, wrapped to maxWidth when that is above 0.
-- `public static void HitRect(ulong id, Rect r)` - Registers r as clickable under id, clipped and layered exactly as a draw would be.
-- `public static ulong HitTest(float x, float y)` - The id registered under a point, or 0.
-- `public static ulong Hovered { get; }` - The id under the pointer, or 0.
-- `public static (float X, float Y) Pointer` - The pointer, in Viewport's space — NOT the window's.
-- `public static bool PointerDown(int button = 0)` - Whether a pointer button is held: 0 left, 1 right, 2 middle.
-- `public static int DrawCallCount { get; }` - How many draw calls this frame's UI will cost.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Ascent` | `public static float Ascent { get; }` | How far the font rises above the baseline. |
+| `CurrentLayer` | `public static Layer CurrentLayer { get; set; }` | The band subsequent draws land in. |
+| `DrawCallCount` | `public static int DrawCallCount { get; }` | How many draw calls this frame's UI will cost. |
+| `HasFont` | `public static bool HasFont { get; }` | Whether a font is available this frame. |
+| `Hovered` | `public static ulong Hovered { get; }` | The id under the pointer, or 0. |
+| `LineHeight` | `public static float LineHeight { get; }` | Baseline to baseline, in pixels. |
+| `Viewport` | `public static Rect Viewport { get; }` | The rectangle this frame's UI is laid out against, in backbuffer pixels. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Bar` | `public static void Bar(Rect r, float fraction, Colour border, Colour empty, Colour full)` | A horizontal bar filled left to right by fraction (0..1). |
+| `Box` | `public static void Box(Rect r, Colour colour)` | A solid rectangle. |
+| `Box` | `public static void Box(float x, float y, float w, float h, Colour colour)` | A solid rectangle. |
+| `Frame` | `public static void Frame(Rect r, float thickness, Colour border, Colour fill)` | A rectangle with a border drawn inside its bounds. |
+| `HitRect` | `public static void HitRect(ulong id, Rect r)` | Registers r as clickable under id, clipped and layered exactly as a draw would be. |
+| `HitTest` | `public static ulong HitTest(float x, float y)` | The id registered under a point, or 0. |
+| `Image` | `public static void Image(Rect r, ulong texture, Colour tint, float u0 = 0f, float v0 = 0f, float u1 = 1f, float v1 = 1f)` | A textured quad. |
+| `MeasureText` | `public static TextMetrics MeasureText(string text, TextStyle style, float maxWidth = 0f)` | The size text would occupy in style, wrapped to maxWidth when that is above 0. |
+| `MeasureText` | `public static float MeasureText(string text)` | The width text would occupy. |
+| `PointerDown` | `public static bool PointerDown(int button = 0)` | Whether a pointer button is held: 0 left, 1 right, 2 middle. |
+| `PopClip` | `public static void PopClip()` | Restore the enclosing clip. |
+| `PushClip` | `public static void PushClip(Rect r)` | Confines subsequent draws to r until PopClip. |
+| `static` | `public static (float X, float Y) Pointer` | The pointer, in Viewport's space — NOT the window's. |
+| `Text` | `public static float Text(float x, float y, string text, Colour colour)` | Draws text with the pen at x, y — the LEFT END OF THE BASELINE, not a box corner. |
+| `TextBlock` | `public static float TextBlock(Rect r, string text, Colour colour, TextStyle style, TextAlignment align = TextAlignment.Left)` | Draws a block of styled text with its top-left at the rectangle's corner, wrapped to the rectangle's width and aligned within it. |
+| `TextCentred` | `public static float TextCentred(Rect r, string text, Colour colour)` | Draws text centred horizontally in r and vertically on its mid-line. |
+
+<a id="irebindprovider"></a>
 
 ### IRebindProvider
 
 `public interface IRebindProvider` - The input system as the controls page sees it.
 
-- `IReadOnlyList<RebindRow> Rows { get; }` - The rows to show, in order.
-- `string BindingText(RebindRow row)` - The current key for a row, as text ("Space").
-- `bool TryRebind(string action, int slot, int rawKey)` - Rebinds an action's binding to a framework key slot.
-- `void ResetToDefaults()` - Restores every binding to the defaults.
-- `void Save()` - Persists the bindings.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Rows` | `IReadOnlyList<RebindRow> Rows { get; }` | The rows to show, in order. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `BindingText` | `string BindingText(RebindRow row)` | The current key for a row, as text ("Space"). |
+| `ResetToDefaults` | `void ResetToDefaults()` | Restores every binding to the defaults. |
+| `Save` | `void Save()` | Persists the bindings. |
+| `TryRebind` | `bool TryRebind(string action, int slot, int rawKey)` | Rebinds an action's binding to a framework key slot. |
+
+<a id="isettingsstore"></a>
 
 ### ISettingsStore
 
 `public interface ISettingsStore` - Where setting values are kept between runs.
 
-- `float Get(string key, float fallback)` - The stored value, or fallback.
-- `void Set(string key, float value)` - Stores a value (not necessarily to disk yet).
-- `void Flush()` - Writes to disk.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Flush` | `void Flush()` | Writes to disk. |
+| `Get` | `float Get(string key, float fallback)` | The stored value, or fallback. |
+| `Set` | `void Set(string key, float value)` | Stores a value (not necessarily to disk yet). |
+
+<a id="layer"></a>
 
 ### Layer
 
 `public enum Layer` - Which band a widget composites in.
 
-Values: `Background = 0`, `Content = 1`, `Overlay = 2`, `Tooltip = 3`, `Debug = 4`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Background` | `Background = 0` |  |
+| `Content` | `Content = 1` |  |
+| `Debug` | `Debug = 4` |  |
+| `Overlay` | `Overlay = 2` |  |
+| `Tooltip` | `Tooltip = 3` |  |
+
+<a id="layoutmode"></a>
 
 ### LayoutMode
 
 `public enum LayoutMode` - How a widget arranges its children.
 
-Values: `None = 0`, `VStack = 1`, `HStack = 2`, `Grid = 3`, `Overlay = 4`, `Wrap = 5`, `Switcher = 6`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Grid` | `Grid = 3` |  |
+| `HStack` | `HStack = 2` |  |
+| `None` | `None = 0` |  |
+| `Overlay` | `Overlay = 4` |  |
+| `Switcher` | `Switcher = 6` |  |
+| `VStack` | `VStack = 1` |  |
+| `Wrap` | `Wrap = 5` |  |
+
+<a id="rebindrow"></a>
 
 ### RebindRow
 
 `public readonly record struct RebindRow(string Action, int Slot, string Label, bool Rebindable = true)` - One row of the controls page: which binding of which action.
 
+<a id="rect"></a>
+
 ### Rect
 
 `public readonly record struct Rect(float X, float Y, float Width, float Height)` - A rectangle in screen pixels, top-left origin, with +Y running down the screen.
 
-- `public float Right { get; }` - Right edge.
-- `public float Bottom { get; }` - Bottom edge.
-- `public Rect Inset(float by)` - The same rectangle shrunk by by on every side.
-- `public static Rect Anchored(Rect container, float ax, float ay, float w, float h, float offsetX = 0f, float offsetY = 0f)` - A rectangle of this size placed relative to a container, by fractional anchor.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Bottom` | `public float Bottom { get; }` | Bottom edge. |
+| `Right` | `public float Right { get; }` | Right edge. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Anchored` | `public static Rect Anchored(Rect container, float ax, float ay, float w, float h, float offsetX = 0f, float offsetY = 0f)` | A rectangle of this size placed relative to a container, by fractional anchor. |
+| `Inset` | `public Rect Inset(float by)` | The same rectangle shrunk by by on every side. |
+
+<a id="scalefit"></a>
 
 ### ScaleFit
 
 `public enum ScaleFit` - How a widget scales its children to its content box.
 
-Values: `None = 0`, `Contain = 1`, `Cover = 2`, `Down = 3`, `FitWidth = 4`, `FitHeight = 5`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Contain` | `Contain = 1` |  |
+| `Cover` | `Cover = 2` |  |
+| `Down` | `Down = 3` |  |
+| `FitHeight` | `FitHeight = 5` |  |
+| `FitWidth` | `FitWidth = 4` |  |
+| `None` | `None = 0` |  |
+
+<a id="settingsscreen"></a>
 
 ### SettingsScreen
 
 `public sealed class SettingsScreen` - A settings screen: graphics, audio and (given a provider) a controls page that rebinds keys.
 
-- `public Widget Root { get; }` - The screen's root widget once Build has run.
-- `public event Action<string, float>? SettingChanged` - Raised when the player changes a setting, and by ApplyAll: key and value.
-- `public SettingsScreen(ISettingsStore? store = null, IRebindProvider? rebind = null, bool defaultItems = true)` - Creates the screen's model: the default graphics and audio items when defaultItems, with persisted values read from store.
-- `public SettingsScreen AddToggle(string key, string label, string tab, bool value)` - Adds an on/off setting.
-- `public SettingsScreen AddSlider(string key, string label, string tab, float value, float min, float max, float step = 0f)` - Adds a slider.
-- `public SettingsScreen AddChoice(string key, string label, string tab, IEnumerable<string> choices, int index = 0)` - Adds a list of options; the value is the chosen index.
-- `public float this[string key] { get; }` - The current value of a setting.
-- `public void ApplyAll()` - Raises SettingChanged for every setting with its persisted value, so the game applies saved settings at startup without opening the screen.
-- `public Widget Build(string rootName = "SettingsScreen")` - Creates the screen's widgets (a menu root that pauses the game) and starts listening.
-- `public void Dispose()` - Stops listening.
-- `public void Flush()` - Writes persisted settings and bindings to disk.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `SettingsScreen` | `public SettingsScreen(ISettingsStore? store = null, IRebindProvider? rebind = null, bool defaultItems = true)` | Creates the screen's model: the default graphics and audio items when defaultItems, with persisted values read from store. |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Root` | `public Widget Root { get; }` | The screen's root widget once Build has run. |
+| `this[]` | `public float this[string key] { get; }` | The current value of a setting. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AddChoice` | `public SettingsScreen AddChoice(string key, string label, string tab, IEnumerable<string> choices, int index = 0)` | Adds a list of options; the value is the chosen index. |
+| `AddSlider` | `public SettingsScreen AddSlider(string key, string label, string tab, float value, float min, float max, float step = 0f)` | Adds a slider. |
+| `AddToggle` | `public SettingsScreen AddToggle(string key, string label, string tab, bool value)` | Adds an on/off setting. |
+| `ApplyAll` | `public void ApplyAll()` | Raises SettingChanged for every setting with its persisted value, so the game applies saved settings at startup without opening the screen. |
+| `Build` | `public Widget Build(string rootName = "SettingsScreen")` | Creates the screen's widgets (a menu root that pauses the game) and starts listening. |
+| `Dispose` | `public void Dispose()` | Stops listening. |
+| `Flush` | `public void Flush()` | Writes persisted settings and bindings to disk. |
+
+**Events**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `SettingChanged` | `public event Action<string, float>? SettingChanged` | Raised when the player changes a setting, and by ApplyAll: key and value. |
+
+<a id="textalignment"></a>
 
 ### TextAlignment
 
 `public enum TextAlignment` - Where a line of text sits in its box.
 
-Values: `Left = 0`, `Center = 1`, `Right = 2`, `Start = 3`, `End = 4`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Center` | `Center = 1` |  |
+| `End` | `End = 4` |  |
+| `Left` | `Left = 0` |  |
+| `Right` | `Right = 2` |  |
+| `Start` | `Start = 3` |  |
+
+<a id="textdirection"></a>
 
 ### TextDirection
 
 `public enum TextDirection` - The direction of a paragraph.
 
-Values: `Auto = 0`, `LeftToRight = 1`, `RightToLeft = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Auto` | `Auto = 0` |  |
+| `LeftToRight` | `LeftToRight = 1` |  |
+| `RightToLeft` | `RightToLeft = 2` |  |
+
+<a id="textflags"></a>
 
 ### TextFlags
 
 `public enum TextFlags` - Switches for a text call (no flags is default).
 
-Values: `Bold = 1`, `Italic = 2`, `Rich = 4`, `Ellipsis = 8`, `Wrap = 16`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Bold` | `Bold = 1` |  |
+| `Ellipsis` | `Ellipsis = 8` |  |
+| `Italic` | `Italic = 2` |  |
+| `Rich` | `Rich = 4` |  |
+| `Wrap` | `Wrap = 16` |  |
+
+<a id="textmetrics"></a>
 
 ### TextMetrics
 
 `public readonly record struct TextMetrics(float Width, float Height, int Lines)` - The size of laid-out text.
 
+<a id="textstats"></a>
+
 ### TextStats
 
 `public readonly record struct TextStats(int Pages, int GlyphsResident, int RasterThisFrame, long RasterTotal, int EvictedPages, int Overflow, int LayoutHits, int LayoutMisses, int Faces)` - The text engine's counters (aver_ui_text_stats).
+
+<a id="textstyle"></a>
 
 ### TextStyle
 
 `public readonly record struct TextStyle(string? Family = null, float Size = 16f, bool Bold = false, bool Italic = false, bool Rich = false, bool Ellipsis = false)` - The look of a run of text: a family of the loaded font set (null or empty is the default family), a size in pixels, and the style switches.
 
+<a id="uianimation"></a>
+
 ### UiAnimation
 
 `public static class UiAnimation` - Plays the animations of an .ocui layout (its ANIM records): tracks over a widget's opacity, colours and render transform.
 
-- `public static int AbiVersion { get; }` - The widget ABI version the native library reports (2 and up has animation).
-- `public static IReadOnlyList<string> List(Widget root)` - The names of the layout's animations.
-- `public static float Length(Widget root, string name)` - The animation's length in seconds, -1 for an unknown one.
-- `public static bool Play(Widget root, string name, float speed = 1f, int loops = 1, bool reverse = false, bool pingPong = false)` - Starts an animation from its start (its end when reverse), replacing a run of the same name.
-- `public static bool Stop(Widget root, string name, bool release = true)` - Stops it.
-- `public static bool Seek(Widget root, string name, float seconds)` - Jumps to a time (clamped) and applies it; an animation that was not running stays paused there.
-- `public static bool Reverse(Widget root, string name)` - Flips a running animation's direction; one that is not running starts from its end, backwards.
-- `public static bool Pause(Widget root, string name, bool paused = true)` - Pauses or resumes a running animation.
-- `public static bool IsPlaying(Widget root, string name)` - Whether it is running and not paused.
-- `public static float Time(Widget root, string name)` - Where a running animation is, in seconds; -1 when it is not running.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AbiVersion` | `public static int AbiVersion { get; }` | The widget ABI version the native library reports (2 and up has animation). |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `IsPlaying` | `public static bool IsPlaying(Widget root, string name)` | Whether it is running and not paused. |
+| `Length` | `public static float Length(Widget root, string name)` | The animation's length in seconds, -1 for an unknown one. |
+| `List` | `public static IReadOnlyList<string> List(Widget root)` | The names of the layout's animations. |
+| `Pause` | `public static bool Pause(Widget root, string name, bool paused = true)` | Pauses or resumes a running animation. |
+| `Play` | `public static bool Play(Widget root, string name, float speed = 1f, int loops = 1, bool reverse = false, bool pingPong = false)` | Starts an animation from its start (its end when reverse), replacing a run of the same name. |
+| `Reverse` | `public static bool Reverse(Widget root, string name)` | Flips a running animation's direction; one that is not running starts from its end, backwards. |
+| `Seek` | `public static bool Seek(Widget root, string name, float seconds)` | Jumps to a time (clamped) and applies it; an animation that was not running stays paused there. |
+| `Stop` | `public static bool Stop(Widget root, string name, bool release = true)` | Stops it. |
+| `Time` | `public static float Time(Widget root, string name)` | Where a running animation is, in seconds; -1 when it is not running. |
+
+<a id="uibindings"></a>
 
 ### UiBindings
 
 `public static class UiBindings` - Feeds the BIND records of opened layouts and runs the EVENT records that name a method.
 
-- `public static object? ViewModel { get; set; }` - The object vm: paths start from.
-- `public static Func<string, object?>? VariableResolver { get; set; }` - Answers var: paths that SetVariable has not set (a host that keeps graph variables elsewhere reads them here).
-- `public static event Action<string, IReadOnlyList<string>, UiEvent>? GraphEvent` - Called for a route whose action is graph: the target, the route's extra arguments and the event.
-- `public static void SetVariable(string name, object? value)` - Sets a graph variable (a number, bool or string) and re-reads the bindings of it when it changed.
-- `public static bool TryGetVariable(string name, out object? value)` - The variable's value; false when none was set and VariableResolver has none.
-- `public static void ClearVariables()` - Removes every published variable.
-- `public static void Notify(string? path = null)` - Tells the UI a path changed so its mode change bindings read again (null or empty = everything).
-- `public static void Install()` - Hands the native UI the resolver.
-- `public static bool Bind(Widget widget, string property, string path, string? format = null, bool onChange = false)` - Adds a binding to the layout widget is in.
-- `public static int Count(Widget root)` - The number of bindings in the layout at root.
-- `public static bool Route(Widget widget, string eventName, UiRouteAction action, string target)` - Routes one event of a widget (see the EVENT record) to a command, a graph event or a method.
-- `public static bool TryResolve(string path, out object? value)` - Resolves a vm: path against ViewModel.
-- `public static bool TryResolve(object? root, string path, out object? value)` - Resolves a path against any object: members separated by dots (public properties and fields, matched with the exact case first and then without), and [n] or [key] on arrays, lists and dictionaries.
-- `public static void RegisterMethod(string name, Action<UiEvent, IReadOnlyList<string>> handler)` - Registers a handler a method route can name (EVENT Play click method Menu.Start).
-- `public static void RegisterMethod(string name, Action handler)` - Registers a handler that needs neither the event nor arguments.
-- `public static void ClearMethods()` - Removes every registered method.
-- `public static void ResetForScriptUnload()` - Forgets everything scripts set up: methods, variables, the view model, GraphEvent subscribers and VariableResolver.
-- `public static bool InvokeMethod(string target, IReadOnlyList<string> args, UiEvent ev)` - Runs a method route: a registered handler by that name, else a public method on ViewModel ("Save", or "Settings.SetVolume" for a method of a member).
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `VariableResolver` | `public static Func<string, object?>? VariableResolver { get; set; }` | Answers var: paths that SetVariable has not set (a host that keeps graph variables elsewhere reads them here). |
+| `ViewModel` | `public static object? ViewModel { get; set; }` | The object vm: paths start from. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Bind` | `public static bool Bind(Widget widget, string property, string path, string? format = null, bool onChange = false)` | Adds a binding to the layout widget is in. |
+| `ClearMethods` | `public static void ClearMethods()` | Removes every registered method. |
+| `ClearVariables` | `public static void ClearVariables()` | Removes every published variable. |
+| `Count` | `public static int Count(Widget root)` | The number of bindings in the layout at root. |
+| `Install` | `public static void Install()` | Hands the native UI the resolver. |
+| `InvokeMethod` | `public static bool InvokeMethod(string target, IReadOnlyList<string> args, UiEvent ev)` | Runs a method route: a registered handler by that name, else a public method on ViewModel ("Save", or "Settings.SetVolume" for a method of a member). |
+| `Notify` | `public static void Notify(string? path = null)` | Tells the UI a path changed so its mode change bindings read again (null or empty = everything). |
+| `RegisterMethod` | `public static void RegisterMethod(string name, Action handler)` | Registers a handler that needs neither the event nor arguments. |
+| `RegisterMethod` | `public static void RegisterMethod(string name, Action<UiEvent, IReadOnlyList<string>> handler)` | Registers a handler a method route can name (EVENT Play click method Menu.Start). |
+| `ResetForScriptUnload` | `public static void ResetForScriptUnload()` | Forgets everything scripts set up: methods, variables, the view model, GraphEvent subscribers and VariableResolver. |
+| `Route` | `public static bool Route(Widget widget, string eventName, UiRouteAction action, string target)` | Routes one event of a widget (see the EVENT record) to a command, a graph event or a method. |
+| `SetVariable` | `public static void SetVariable(string name, object? value)` | Sets a graph variable (a number, bool or string) and re-reads the bindings of it when it changed. |
+| `TryGetVariable` | `public static bool TryGetVariable(string name, out object? value)` | The variable's value; false when none was set and VariableResolver has none. |
+| `TryResolve` | `public static bool TryResolve(object? root, string path, out object? value)` | Resolves a path against any object: members separated by dots (public properties and fields, matched with the exact case first and then without), and [n] or [key] on arrays, lists and dictionaries. |
+| `TryResolve` | `public static bool TryResolve(string path, out object? value)` | Resolves a vm: path against ViewModel. |
+
+**Events**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `GraphEvent` | `public static event Action<string, IReadOnlyList<string>, UiEvent>? GraphEvent` | Called for a route whose action is graph: the target, the route's extra arguments and the event. |
+
+<a id="uievent"></a>
 
 ### UiEvent
 
 `public readonly record struct UiEvent(UiEventKind Kind, Widget Widget, float Value, int Index, string Text)` - One thing that happened in the UI.
 
+<a id="uieventkind"></a>
+
 ### UiEventKind
 
 `public enum UiEventKind` - What happened to a widget.
 
-Values: `Clicked = 0`, `Toggled = 1`, `ValueChanged = 2`, `SelectionChanged = 3`, `TextChanged = 4`, `TextSubmitted = 5`, `FocusGained = 6`, `FocusLost = 7`, `KeyCaptured = 8`, `Cancel = 9`, `Command = 10`, `Hovered = 11`, `AnimationFinished = 12`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AnimationFinished` | `AnimationFinished = 12` |  |
+| `Cancel` | `Cancel = 9` |  |
+| `Clicked` | `Clicked = 0` |  |
+| `Command` | `Command = 10` |  |
+| `FocusGained` | `FocusGained = 6` |  |
+| `FocusLost` | `FocusLost = 7` |  |
+| `Hovered` | `Hovered = 11` |  |
+| `KeyCaptured` | `KeyCaptured = 8` |  |
+| `SelectionChanged` | `SelectionChanged = 3` |  |
+| `TextChanged` | `TextChanged = 4` |  |
+| `TextSubmitted` | `TextSubmitted = 5` |  |
+| `Toggled` | `Toggled = 1` |  |
+| `ValueChanged` | `ValueChanged = 2` |  |
+
+<a id="uigraphnodes"></a>
 
 ### UiGraphNodes
 
 `public static class UiGraphNodes` - What the UI graph nodes run.
 
-- `public static bool OpenLayout(string path, out int layout)` - AN_OpenUiLayout: reads an .ocui file and creates its widgets.
-- `public static bool CloseLayout(int layout)` - AN_CloseUiLayout: destroys a layout's widgets.
-- `public static bool FindWidget(int layout, string name, out int widget)` - AN_FindUiWidget: a named widget inside a layout (0 layout searches everywhere).
-- `public static bool CreateWidget(int parent, int kind, string name, out int widget)` - AN_CreateUiWidget: a new widget of kind (a WidgetKind number) under parent (0 makes a root).
-- `public static bool SetText(int widget, string text)` - AN_SetUiText.
-- `public static bool SetValue(int widget, float value)` - AN_SetUiValue: a slider's or progress bar's value.
-- `public static bool SetChecked(int widget, bool value)` - AN_SetUiChecked.
-- `public static bool SetVisible(int widget, bool value)` - AN_SetUiVisible.
-- `public static bool SetEnabled(int widget, bool value)` - AN_SetUiEnabled.
-- `public static bool GetValue(int widget, out float value, out bool isChecked, out int selected)` - AN_GetUiValue: a widget's value, checked state and selected index at once.
-- `public static bool WasClicked(int widget)` - AN_UiWasClicked: true when the widget was clicked since the last Pump.
-- `public static bool CommandFired(string command)` - AN_UiCommandFired: true when a button with this command was activated since the last Pump.
-- `public static bool PlayAnimation(int layout, string name, int loops, float speed, bool reverse)` - AN_PlayUiAnimation: plays a layout animation (its ANIM records); loops 0 repeats until stopped.
-- `public static bool StopAnimation(int layout, string name, bool release)` - AN_StopUiAnimation: stops it and, with release, brings back the authored look.
-- `public static bool SeekAnimation(int layout, string name, float seconds)` - AN_SeekUiAnimation: jumps to a time and applies it.
-- `public static bool ReverseAnimation(int layout, string name)` - AN_ReverseUiAnimation: flips a running animation, or plays one backwards from its end.
-- `public static bool AnimationFinished(int layout, string name)` - AN_UiAnimationFinished: true when the animation finished since the last Pump.
-- `public static bool SetVariable(string name, float value)` - AN_SetUiVariable: publishes a number as the graph variable name for var: bindings.
-- `public static bool SetVariableBool(string name, bool value)` - AN_SetUiVariableBool: publishes a bool.
-- `public static bool GraphEventFired(string name)` - AN_UiGraphEventFired: true when an EVENT ...
-- `public static bool SetFocus(int widget)` - AN_SetUiFocus.
-- `public static bool CreateMenu(string name, string title, string entries, bool modal, out int menu)` - AN_ShowUiMenu: a centred menu of buttons; entries is one "Label|command" per line.
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AnimationFinished` | `public static bool AnimationFinished(int layout, string name)` | AN_UiAnimationFinished: true when the animation finished since the last Pump. |
+| `CloseLayout` | `public static bool CloseLayout(int layout)` | AN_CloseUiLayout: destroys a layout's widgets. |
+| `CommandFired` | `public static bool CommandFired(string command)` | AN_UiCommandFired: true when a button with this command was activated since the last Pump. |
+| `CreateMenu` | `public static bool CreateMenu(string name, string title, string entries, bool modal, out int menu)` | AN_ShowUiMenu: a centred menu of buttons; entries is one "Label\|command" per line. |
+| `CreateWidget` | `public static bool CreateWidget(int parent, int kind, string name, out int widget)` | AN_CreateUiWidget: a new widget of kind (a WidgetKind number) under parent (0 makes a root). |
+| `FindWidget` | `public static bool FindWidget(int layout, string name, out int widget)` | AN_FindUiWidget: a named widget inside a layout (0 layout searches everywhere). |
+| `GetValue` | `public static bool GetValue(int widget, out float value, out bool isChecked, out int selected)` | AN_GetUiValue: a widget's value, checked state and selected index at once. |
+| `GraphEventFired` | `public static bool GraphEventFired(string name)` | AN_UiGraphEventFired: true when an EVENT ... |
+| `OpenLayout` | `public static bool OpenLayout(string path, out int layout)` | AN_OpenUiLayout: reads an .ocui file and creates its widgets. |
+| `PlayAnimation` | `public static bool PlayAnimation(int layout, string name, int loops, float speed, bool reverse)` | AN_PlayUiAnimation: plays a layout animation (its ANIM records); loops 0 repeats until stopped. |
+| `ReverseAnimation` | `public static bool ReverseAnimation(int layout, string name)` | AN_ReverseUiAnimation: flips a running animation, or plays one backwards from its end. |
+| `SeekAnimation` | `public static bool SeekAnimation(int layout, string name, float seconds)` | AN_SeekUiAnimation: jumps to a time and applies it. |
+| `SetChecked` | `public static bool SetChecked(int widget, bool value)` | AN_SetUiChecked. |
+| `SetEnabled` | `public static bool SetEnabled(int widget, bool value)` | AN_SetUiEnabled. |
+| `SetFocus` | `public static bool SetFocus(int widget)` | AN_SetUiFocus. |
+| `SetText` | `public static bool SetText(int widget, string text)` | AN_SetUiText. |
+| `SetValue` | `public static bool SetValue(int widget, float value)` | AN_SetUiValue: a slider's or progress bar's value. |
+| `SetVariable` | `public static bool SetVariable(string name, float value)` | AN_SetUiVariable: publishes a number as the graph variable name for var: bindings. |
+| `SetVariableBool` | `public static bool SetVariableBool(string name, bool value)` | AN_SetUiVariableBool: publishes a bool. |
+| `SetVisible` | `public static bool SetVisible(int widget, bool value)` | AN_SetUiVisible. |
+| `StopAnimation` | `public static bool StopAnimation(int layout, string name, bool release)` | AN_StopUiAnimation: stops it and, with release, brings back the authored look. |
+| `WasClicked` | `public static bool WasClicked(int widget)` | AN_UiWasClicked: true when the widget was clicked since the last Pump. |
+
+<a id="uirouteaction"></a>
 
 ### UiRouteAction
 
 `public enum UiRouteAction` - What an EVENT route does.
 
-Values: `Command = 0`, `Graph = 1`, `Method = 2`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Command` | `Command = 0` |  |
+| `Graph` | `Graph = 1` |  |
+| `Method` | `Method = 2` |  |
+
+<a id="uisystem"></a>
 
 ### UiSystem
 
 `public static class UiSystem` - The UI as a whole: layouts, menus, events, theme and scale, and what the UI wants of the game's input.
 
-- `public static event Action<UiEvent>? Event` - Raised for every event, before the per-widget and per-command handlers.
-- `public static string LastError { get; }` - Why the last layout failed to open.
-- `public static Func<string, ulong>? ImageResolver { get; set; }` - Resolves an image path (a layout's image property) to a texture id.
-- `public static void On(Widget widget, UiEventKind kind, Action<UiEvent> handler)` - Registers a handler for one kind of event on one widget.
-- `public static void OnCommand(string command, Action<UiEvent> handler)` - Registers a handler for a command string (a button's command property).
-- `public static void ClearHandlers()` - Drops every widget and command handler (and Event subscribers are untouched).
-- `public static void ResetForScriptUnload()` - Forgets everything scripts registered: handlers, Event subscribers, the image resolver and this frame's event sets.
-- `public static bool TryPoll(out UiEvent e)` - Takes the next event the UI raised, without dispatching it.
-- `public static int Pump()` - Delivers every pending event to Event and the registered handlers.
-- `public static bool WasClicked(Widget widget)` - Whether widget was clicked in the events the last Pump delivered.
-- `public static bool AnimationFinished(Widget root, string name)` - Whether the layout animation name of root finished in the events the last Pump delivered.
-- `public static bool GraphEventFired(string name)` - Whether an EVENT ...
-- `public static bool CommandFired(string command)` - Whether command fired in the events the last Pump delivered.
-- `public static bool WantsPointer { get; }` - The pointer is on UI or a menu is open: gameplay should ignore the mouse.
-- `public static bool WantsKeyboard { get; }` - A menu or text field owns the keyboard and gamepad.
-- `public static bool PausesGame { get; }` - A menu is open: gameplay input should pause.
-- `public static bool ShowCursor { get; }` - The cursor should be shown and free.
-- `public static void SetTheme(string name)` - Selects a built-in theme: "dark", "light" or "contrast".
-- `public static void SetScaling(int mode, float referenceWidth, float referenceHeight, float userScale = 1f)` - Sets how design pixels scale: mode 0 constant, 1 width, 2 height, 3 shortest side, 4 blend, against a reference resolution, times the player's userScale.
-- `public static void SetUserScale(float userScale)` - Sets only the player's UI-scale multiplier.
-- `public static float Scale { get; }` - The scale applied to design pixels as of the last frame.
-- `public static Widget OpenLayoutText(string ocui, bool applyEnvironment = true)` - Creates the widgets of an .ocui layout given as text.
-- `public static Widget OpenLayout(string path, bool applyEnvironment = true)` - Reads an .ocui file and opens it.
-- `public static List<string> LayoutRoots { get; }` - Folders, besides the opened file's folder and its parents, where a nested layout's path (a USE record in a layout) is looked up.
-- `public static void SetProjectContentRoot(string contentDir)` - Makes contentDir the project's layout root, first in LayoutRoots, replacing the one a previous project set.
-- `public static string LastWarnings { get; }` - What went wrong in the last open without stopping it, one per line: a nested layout that could not be found, or an unknown slot or exposed name.
-- `public static string? CaptureLayout(Widget root)` - The widget subtree at root as .ocui text, for saving a layout built in code.
-- `public static void ResolveImages(Widget root)` - Asks ImageResolver for a texture for every image widget under root that names one.
-- `public static void Show(Widget root, bool visible = true)` - Opens or closes a layout's root.
-- `public static Widget Focused { get; }` - The widget with the keyboard/gamepad focus, or none.
-- `public static Widget HitWidget(float x, float y)` - The topmost widget under a point, or none.
-- `public static Widget CreateMenu(string name, string title, IEnumerable<MenuEntry> entries, bool modal = true, string cancelCommand = "")` - A centred titled menu of buttons.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Focused` | `public static Widget Focused { get; }` | The widget with the keyboard/gamepad focus, or none. |
+| `ImageResolver` | `public static Func<string, ulong>? ImageResolver { get; set; }` | Resolves an image path (a layout's image property) to a texture id. |
+| `LastError` | `public static string LastError { get; }` | Why the last layout failed to open. |
+| `LastWarnings` | `public static string LastWarnings { get; }` | What went wrong in the last open without stopping it, one per line: a nested layout that could not be found, or an unknown slot or exposed name. |
+| `LayoutRoots` | `public static List<string> LayoutRoots { get; }` | Folders, besides the opened file's folder and its parents, where a nested layout's path (a USE record in a layout) is looked up. |
+| `PausesGame` | `public static bool PausesGame { get; }` | A menu is open: gameplay input should pause. |
+| `Scale` | `public static float Scale { get; }` | The scale applied to design pixels as of the last frame. |
+| `ShowCursor` | `public static bool ShowCursor { get; }` | The cursor should be shown and free. |
+| `WantsKeyboard` | `public static bool WantsKeyboard { get; }` | A menu or text field owns the keyboard and gamepad. |
+| `WantsPointer` | `public static bool WantsPointer { get; }` | The pointer is on UI or a menu is open: gameplay should ignore the mouse. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AnimationFinished` | `public static bool AnimationFinished(Widget root, string name)` | Whether the layout animation name of root finished in the events the last Pump delivered. |
+| `CaptureLayout` | `public static string? CaptureLayout(Widget root)` | The widget subtree at root as .ocui text, for saving a layout built in code. |
+| `ClearHandlers` | `public static void ClearHandlers()` | Drops every widget and command handler (and Event subscribers are untouched). |
+| `CommandFired` | `public static bool CommandFired(string command)` | Whether command fired in the events the last Pump delivered. |
+| `CreateMenu` | `public static Widget CreateMenu(string name, string title, IEnumerable<MenuEntry> entries, bool modal = true, string cancelCommand = "")` | A centred titled menu of buttons. |
+| `GraphEventFired` | `public static bool GraphEventFired(string name)` | Whether an EVENT ... |
+| `HitWidget` | `public static Widget HitWidget(float x, float y)` | The topmost widget under a point, or none. |
+| `On` | `public static void On(Widget widget, UiEventKind kind, Action<UiEvent> handler)` | Registers a handler for one kind of event on one widget. |
+| `OnCommand` | `public static void OnCommand(string command, Action<UiEvent> handler)` | Registers a handler for a command string (a button's command property). |
+| `OpenLayout` | `public static Widget OpenLayout(string path, bool applyEnvironment = true)` | Reads an .ocui file and opens it. |
+| `OpenLayoutText` | `public static Widget OpenLayoutText(string ocui, bool applyEnvironment = true)` | Creates the widgets of an .ocui layout given as text. |
+| `Pump` | `public static int Pump()` | Delivers every pending event to Event and the registered handlers. |
+| `ResetForScriptUnload` | `public static void ResetForScriptUnload()` | Forgets everything scripts registered: handlers, Event subscribers, the image resolver and this frame's event sets. |
+| `ResolveImages` | `public static void ResolveImages(Widget root)` | Asks ImageResolver for a texture for every image widget under root that names one. |
+| `SetProjectContentRoot` | `public static void SetProjectContentRoot(string contentDir)` | Makes contentDir the project's layout root, first in LayoutRoots, replacing the one a previous project set. |
+| `SetScaling` | `public static void SetScaling(int mode, float referenceWidth, float referenceHeight, float userScale = 1f)` | Sets how design pixels scale: mode 0 constant, 1 width, 2 height, 3 shortest side, 4 blend, against a reference resolution, times the player's userScale. |
+| `SetTheme` | `public static void SetTheme(string name)` | Selects a built-in theme: "dark", "light" or "contrast". |
+| `SetUserScale` | `public static void SetUserScale(float userScale)` | Sets only the player's UI-scale multiplier. |
+| `Show` | `public static void Show(Widget root, bool visible = true)` | Opens or closes a layout's root. |
+| `TryPoll` | `public static bool TryPoll(out UiEvent e)` | Takes the next event the UI raised, without dispatching it. |
+| `WasClicked` | `public static bool WasClicked(Widget widget)` | Whether widget was clicked in the events the last Pump delivered. |
+
+**Events**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Event` | `public static event Action<UiEvent>? Event` | Raised for every event, before the per-widget and per-command handlers. |
+
+<a id="uisystem-menuentry"></a>
 
 ### UiSystem.MenuEntry
 
 `public readonly record struct MenuEntry(string Label, string Command, bool Danger = false)` - One button in a CreateMenu menu.
 
+<a id="uitext"></a>
+
 ### UiText
 
 `public static class UiText` - The runtime text engine: TrueType fonts with fallback chains, kerning, Arabic shaping, bidirectional text, line breaking and styling (docs/GAME_UI_TEXT.md).
 
-- `public static bool LoadFontSet(string ocfontsText)` - Loads an .ocfonts document, replacing the font set.
-- `public static string LastError { get; }` - Why the last LoadFontSet failed.
-- `public static void Configure(int pageSize = 0, int maxPages = 0, int glyphBudget = 0)` - Atlas page size (256..2048), page cap (1..64) and the per-frame glyph budget.
-- `public static string Language { set; }` - The UI language (BCP-47, e.g.
-- `public static bool HasGlyph(string? family, int codePoint)` - Whether some face of family (null = the default) has the code point.
-- `public static TextMetrics Measure(string text, TextStyle style, float maxWidth = 0f)` - The size text would occupy.
-- `public static void Prewarm(string text, TextStyle style)` - Rasterises the glyphs of text now, ignoring the per-frame budget: call it while a loading screen is up so the first frame of gameplay does not spread a big string over several frames.
-- `public static TextStats Stats { get; }` - The engine's counters, for a debug readout.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Language` | `public static string Language { set; }` | The UI language (BCP-47, e.g. |
+| `LastError` | `public static string LastError { get; }` | Why the last LoadFontSet failed. |
+| `Stats` | `public static TextStats Stats { get; }` | The engine's counters, for a debug readout. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Configure` | `public static void Configure(int pageSize = 0, int maxPages = 0, int glyphBudget = 0)` | Atlas page size (256..2048), page cap (1..64) and the per-frame glyph budget. |
+| `HasGlyph` | `public static bool HasGlyph(string? family, int codePoint)` | Whether some face of family (null = the default) has the code point. |
+| `LoadFontSet` | `public static bool LoadFontSet(string ocfontsText)` | Loads an .ocfonts document, replacing the font set. |
+| `Measure` | `public static TextMetrics Measure(string text, TextStyle style, float maxWidth = 0f)` | The size text would occupy. |
+| `Prewarm` | `public static void Prewarm(string text, TextStyle style)` | Rasterises the glyphs of text now, ignoring the per-frame budget: call it while a loading screen is up so the first frame of gameplay does not spread a big string over several frames. |
+
+<a id="widget"></a>
 
 ### Widget
 
 `public readonly struct Widget : IEquatable<Widget>` - A handle to one widget in the UI tree.
 
-- `public uint Id { get; }` - The native widget id.
-- `public Widget(uint id)` - Wraps a native id.
-- `public static Widget None { get; }` - The "no widget" handle.
-- `public bool Exists { get; }` - Whether this handle names a live widget.
-- `public static Widget Create(WidgetKind kind, Widget parent = default, string name = "")` - Creates a widget.
-- `public Widget Add(WidgetKind kind, string name = "")` - Creates a child of this widget.
-- `public static Widget FindAnywhere(string name)` - Finds a widget by name anywhere in the tree.
-- `public Widget Find(string name)` - Finds a descendant of this widget by name.
-- `public bool Destroy()` - Destroys this widget and everything under it.
-- `public bool Reparent(Widget newParent, int index = -1)` - Moves under newParent (none = make it a root).
-- `public WidgetKind Kind { get; }` - The kind, or Panel for a missing widget.
-- `public Widget Parent { get; }` - The parent, or none for a root.
-- `public Widget Root { get; }` - The root of this widget's tree.
-- `public IEnumerable<Widget> Children { get; }` - The direct children, in order.
-- `public bool Set(string property, string value)` - Sets any authored property by name and text, as a layout file would (w.Set("anchors", "0.5 0.5")).
-- `public bool Set(string property, float value)` - Sets a numeric property (w.Set("width", 200f)).
-- `public string? Get(string property)` - Reads any authored property as text, or null for an unknown name.
-- `public string Text { get; set; }` - The label or contents.
-- `public string ShownText { get; }` - Text after localization: a "@Table:Key=Default" reference resolved for the active culture.
-- `public string FontFamily { get; set; }` - A family of the loaded font set; empty uses the theme's, then the default family.
-- `public float FontSize { get; set; }` - The text size in design pixels; 0 uses the theme's.
-- `public bool Bold { get; set; }` - Use the family's bold face.
-- `public bool Italic { get; set; }` - Use the family's italic face (or shear the regular one).
-- `public TextAlignment TextAlign { get; set; }` - Where lines sit in the widget.
-- `public TextDirection TextDir { get; set; }` - The paragraph direction; Auto follows the first strong letter.
-- `public bool Wrap { get; set; }` - Wrap a Text widget's lines at its width.
-- `public bool Ellipsis { get; set; }` - End a line that is clipped by the widget's width with an ellipsis.
-- `public int MaxLines { get; set; }` - The most lines to show; 0 is unlimited.
-- `public float LineSpacing { get; set; }` - Line height multiplier (1 = the font's own).
-- `public float LetterSpacing { get; set; }` - Extra space after every character, in design pixels.
-- `public bool RichText { get; set; }` - Read &lt;b&gt; &lt;i&gt; &lt;color=#RRGGBB&gt; &lt;size=N&gt; &lt;font=Name&gt; &lt;br&gt; tags in the text.
-- `public Colour TextColour { set; }` - The text colour (overrides the theme's).
-- `public TextMetrics TextSize { get; }` - The size of the widget's text as laid out by the last frame (zero before the first frame, and for a widget with no text).
-- `public LayoutMode Layout { get; set; }` - How this widget arranges its children.
-- `public bool Uniform { get; set; }` - A grid whose cells are all the size of the largest and share the space equally.
-- `public int ActiveIndex { get; set; }` - The child a Switcher shows (by position among its children).
-- `public ScaleFit Fit { get; set; }` - Scales the children's whole subtree (text and padding included) to fit this widget's content box.
-- `public float ContentScale { get; set; }` - A fixed multiplier on the children's scale when Fit is none.
-- `public float BorderWidth { get; set; }` - Border thickness in design pixels; negative uses the style's.
-- `public Colour BorderColour { set; }` - The border colour (overrides the style's).
-- `public float Value { get; set; }` - A slider's or progress bar's value, clamped to its range when set.
-- `public bool Checked { get; set; }` - A toggle's state.
-- `public int Selected { get; set; }` - A choice's or list's selected index.
-- `public void SetItems(IEnumerable<string> items)` - Replaces a choice's or list's options.
-- `public bool Visible { get; set; }` - Whether this widget and all its ancestors are visible.
-- `public bool Enabled { set; }` - Whether the widget reacts to input.
-- `public ulong Texture { set; }` - The texture an image draws, resolved by the host (see ImageResolver).
-- `public Rect Rect { get; }` - The widget's screen rectangle as of the last frame.
-- `public bool Focus()` - Gives this widget the keyboard/gamepad focus.
-- `public Widget OnClick(Action handler)` - Runs handler when this widget is clicked.
-- `public Widget OnChanged(Action<UiEvent> handler)` - Runs handler when a slider or choice changes.
-- `public Widget OnToggled(Action<bool> handler)` - Runs handler when a toggle flips.
-- `public bool Equals(Widget other)` - Inherited documentation.
-- `public override bool Equals(object? obj)` - Inherited documentation.
-- `public override int GetHashCode()` - Inherited documentation.
-- `public static bool operator ==(Widget a, Widget b)` - Handle equality.
-- `public static bool operator !=(Widget a, Widget b)` - Handle inequality.
-- `public override string ToString()` - Inherited documentation.
+**Constructors**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Widget` | `public Widget(uint id)` | Wraps a native id. |
+
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `ActiveIndex` | `public int ActiveIndex { get; set; }` | The child a Switcher shows (by position among its children). |
+| `Bold` | `public bool Bold { get; set; }` | Use the family's bold face. |
+| `BorderColour` | `public Colour BorderColour { set; }` | The border colour (overrides the style's). |
+| `BorderWidth` | `public float BorderWidth { get; set; }` | Border thickness in design pixels; negative uses the style's. |
+| `Checked` | `public bool Checked { get; set; }` | A toggle's state. |
+| `Children` | `public IEnumerable<Widget> Children { get; }` | The direct children, in order. |
+| `ContentScale` | `public float ContentScale { get; set; }` | A fixed multiplier on the children's scale when Fit is none. |
+| `Ellipsis` | `public bool Ellipsis { get; set; }` | End a line that is clipped by the widget's width with an ellipsis. |
+| `Enabled` | `public bool Enabled { set; }` | Whether the widget reacts to input. |
+| `Exists` | `public bool Exists { get; }` | Whether this handle names a live widget. |
+| `Fit` | `public ScaleFit Fit { get; set; }` | Scales the children's whole subtree (text and padding included) to fit this widget's content box. |
+| `FontFamily` | `public string FontFamily { get; set; }` | A family of the loaded font set; empty uses the theme's, then the default family. |
+| `FontSize` | `public float FontSize { get; set; }` | The text size in design pixels; 0 uses the theme's. |
+| `Id` | `public uint Id { get; }` | The native widget id. |
+| `Italic` | `public bool Italic { get; set; }` | Use the family's italic face (or shear the regular one). |
+| `Kind` | `public WidgetKind Kind { get; }` | The kind, or Panel for a missing widget. |
+| `Layout` | `public LayoutMode Layout { get; set; }` | How this widget arranges its children. |
+| `LetterSpacing` | `public float LetterSpacing { get; set; }` | Extra space after every character, in design pixels. |
+| `LineSpacing` | `public float LineSpacing { get; set; }` | Line height multiplier (1 = the font's own). |
+| `MaxLines` | `public int MaxLines { get; set; }` | The most lines to show; 0 is unlimited. |
+| `None` | `public static Widget None { get; }` | The "no widget" handle. |
+| `Parent` | `public Widget Parent { get; }` | The parent, or none for a root. |
+| `Rect` | `public Rect Rect { get; }` | The widget's screen rectangle as of the last frame. |
+| `RichText` | `public bool RichText { get; set; }` | Read &lt;b&gt; &lt;i&gt; &lt;color=#RRGGBB&gt; &lt;size=N&gt; &lt;font=Name&gt; &lt;br&gt; tags in the text. |
+| `Root` | `public Widget Root { get; }` | The root of this widget's tree. |
+| `Selected` | `public int Selected { get; set; }` | A choice's or list's selected index. |
+| `ShownText` | `public string ShownText { get; }` | Text after localization: a "@Table:Key=Default" reference resolved for the active culture. |
+| `Text` | `public string Text { get; set; }` | The label or contents. |
+| `TextAlign` | `public TextAlignment TextAlign { get; set; }` | Where lines sit in the widget. |
+| `TextColour` | `public Colour TextColour { set; }` | The text colour (overrides the theme's). |
+| `TextDir` | `public TextDirection TextDir { get; set; }` | The paragraph direction; Auto follows the first strong letter. |
+| `TextSize` | `public TextMetrics TextSize { get; }` | The size of the widget's text as laid out by the last frame (zero before the first frame, and for a widget with no text). |
+| `Texture` | `public ulong Texture { set; }` | The texture an image draws, resolved by the host (see ImageResolver). |
+| `Uniform` | `public bool Uniform { get; set; }` | A grid whose cells are all the size of the largest and share the space equally. |
+| `Value` | `public float Value { get; set; }` | A slider's or progress bar's value, clamped to its range when set. |
+| `Visible` | `public bool Visible { get; set; }` | Whether this widget and all its ancestors are visible. |
+| `Wrap` | `public bool Wrap { get; set; }` | Wrap a Text widget's lines at its width. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Add` | `public Widget Add(WidgetKind kind, string name = "")` | Creates a child of this widget. |
+| `Create` | `public static Widget Create(WidgetKind kind, Widget parent = default, string name = "")` | Creates a widget. |
+| `Destroy` | `public bool Destroy()` | Destroys this widget and everything under it. |
+| `Equals` | `public bool Equals(Widget other)` | Inherited documentation. |
+| `Equals` | `public override bool Equals(object? obj)` | Inherited documentation. |
+| `Find` | `public Widget Find(string name)` | Finds a descendant of this widget by name. |
+| `FindAnywhere` | `public static Widget FindAnywhere(string name)` | Finds a widget by name anywhere in the tree. |
+| `Focus` | `public bool Focus()` | Gives this widget the keyboard/gamepad focus. |
+| `Get` | `public string? Get(string property)` | Reads any authored property as text, or null for an unknown name. |
+| `GetHashCode` | `public override int GetHashCode()` | Inherited documentation. |
+| `OnChanged` | `public Widget OnChanged(Action<UiEvent> handler)` | Runs handler when a slider or choice changes. |
+| `OnClick` | `public Widget OnClick(Action handler)` | Runs handler when this widget is clicked. |
+| `OnToggled` | `public Widget OnToggled(Action<bool> handler)` | Runs handler when a toggle flips. |
+| `operator !=` | `public static bool operator !=(Widget a, Widget b)` | Handle inequality. |
+| `operator ==` | `public static bool operator ==(Widget a, Widget b)` | Handle equality. |
+| `Reparent` | `public bool Reparent(Widget newParent, int index = -1)` | Moves under newParent (none = make it a root). |
+| `Set` | `public bool Set(string property, float value)` | Sets a numeric property (w.Set("width", 200f)). |
+| `Set` | `public bool Set(string property, string value)` | Sets any authored property by name and text, as a layout file would (w.Set("anchors", "0.5 0.5")). |
+| `SetItems` | `public void SetItems(IEnumerable<string> items)` | Replaces a choice's or list's options. |
+| `ToString` | `public override string ToString()` | Inherited documentation. |
+
+<a id="widgetkind"></a>
 
 ### WidgetKind
 
 `public enum WidgetKind` - The kinds of widget.
 
-Values: `Panel = 0`, `Text = 1`, `Image = 2`, `Button = 3`, `Toggle = 4`, `Slider = 5`, `Choice = 6`, `List = 7`, `Scroll = 8`, `TextInput = 9`, `Progress = 10`, `KeyBind = 11`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Button` | `Button = 3` |  |
+| `Choice` | `Choice = 6` |  |
+| `Image` | `Image = 2` |  |
+| `KeyBind` | `KeyBind = 11` |  |
+| `List` | `List = 7` |  |
+| `Panel` | `Panel = 0` |  |
+| `Progress` | `Progress = 10` |  |
+| `Scroll` | `Scroll = 8` |  |
+| `Slider` | `Slider = 5` |  |
+| `Text` | `Text = 1` |  |
+| `TextInput` | `TextInput = 9` |  |
+| `Toggle` | `Toggle = 4` |  |

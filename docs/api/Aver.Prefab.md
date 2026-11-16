@@ -2,47 +2,95 @@
 
 # Aver.Prefab public API
 
-4 public types and 28 public members, read from `scripting/csharp/Aver.Prefab/` (2 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+4 public types and 28 public members, read from `scripting/csharp/Aver.Prefab/` (2 source files). Members are grouped by kind and sorted alphabetically; signatures are single lines as declared, and the summary is the first sentence of the XML summary. Every type in every assembly: [index](index.md); every member: [members-a-z](members-a-z.md).
+
+## Contents
+
+**namespace Aver.Prefab**
+
+- Classes: [GraphPrefabs](#graphprefabs), [PrefabAbi](#prefababi), [Prefabs](#prefabs)
+- Enums: [PrefabError](#prefaberror)
 
 ## namespace Aver.Prefab
+
+<a id="graphprefabs"></a>
 
 ### GraphPrefabs
 
 `public static class GraphPrefabs` - Scalar-signature seam the AN_SpawnPrefab / AN_DestroyPrefab / AN_GetPrefabRoot / AN_FindPrefabNode / AN_RevertPrefab nodes' compiled IL calls (the shape GraphTimerEvents has for the timer nodes).
 
-- `public const string SpawnNodeType = "AN_SpawnPrefab"` - The node type names, for the parser and the catalog to share.
-- `public const string DestroyNodeType = "AN_DestroyPrefab"`
-- `public const string RootNodeType = "AN_GetPrefabRoot"`
-- `public const string FindNodeType = "AN_FindPrefabNode"`
-- `public const string RevertNodeType = "AN_RevertPrefab"`
-- `public static int SpawnPrefabForGraph(int parent, float x, float y, float z, float yaw, float scale, string prefab)` - AN_SpawnPrefab: the new instance's root, 0 on failure.
-- `public static bool DestroyPrefabForGraph(int root)` - AN_DestroyPrefab.
-- `public static int PrefabRootForGraph(int entity)` - AN_GetPrefabRoot: the root of the instance the entity is part of, 0 if none.
-- `public static int FindPrefabNodeForGraph(int root, string node)` - AN_FindPrefabNode: the entity at the node path inside the instance, 0 if none.
-- `public static bool RevertPrefabForGraph(int root)` - AN_RevertPrefab.
+**Fields**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `DestroyNodeType` | `public const string DestroyNodeType = "AN_DestroyPrefab"` |  |
+| `FindNodeType` | `public const string FindNodeType = "AN_FindPrefabNode"` |  |
+| `RevertNodeType` | `public const string RevertNodeType = "AN_RevertPrefab"` |  |
+| `RootNodeType` | `public const string RootNodeType = "AN_GetPrefabRoot"` |  |
+| `SpawnNodeType` | `public const string SpawnNodeType = "AN_SpawnPrefab"` | The node type names, for the parser and the catalog to share. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `DestroyPrefabForGraph` | `public static bool DestroyPrefabForGraph(int root)` | AN_DestroyPrefab. |
+| `FindPrefabNodeForGraph` | `public static int FindPrefabNodeForGraph(int root, string node)` | AN_FindPrefabNode: the entity at the node path inside the instance, 0 if none. |
+| `PrefabRootForGraph` | `public static int PrefabRootForGraph(int entity)` | AN_GetPrefabRoot: the root of the instance the entity is part of, 0 if none. |
+| `RevertPrefabForGraph` | `public static bool RevertPrefabForGraph(int root)` | AN_RevertPrefab. |
+| `SpawnPrefabForGraph` | `public static int SpawnPrefabForGraph(int parent, float x, float y, float z, float yaw, float scale, string prefab)` | AN_SpawnPrefab: the new instance's root, 0 on failure. |
+
+<a id="prefababi"></a>
 
 ### PrefabAbi
 
 `public static class PrefabAbi` - Reads the reason the last prefab call failed.
 
-- `public static PrefabError LastError { get; }` - Why the last prefab call on this thread failed, or Ok.
-- `public static bool LastCallFailed { get; }` - True when the last prefab call on this thread recorded a failure.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `LastCallFailed` | `public static bool LastCallFailed { get; }` | True when the last prefab call on this thread recorded a failure. |
+| `LastError` | `public static PrefabError LastError { get; }` | Why the last prefab call on this thread failed, or Ok. |
+
+<a id="prefaberror"></a>
 
 ### PrefabError
 
 `public enum PrefabError` - Why a prefab call failed, mirroring aver::AbiError in modules/core/include/aver/core/ErrorCodes.hpp.
 
-Values: `Ok = 0`, `BadHandle = -1`, `NullPointer = -2`, `NotInitialised = -3`, `OutOfRange = -4`, `Unsupported = -5`, `InvalidArgument = -6`, `AllocationFailed = -7`
+**Enum values**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AllocationFailed` | `AllocationFailed = -7` |  |
+| `BadHandle` | `BadHandle = -1` |  |
+| `InvalidArgument` | `InvalidArgument = -6` |  |
+| `NotInitialised` | `NotInitialised = -3` |  |
+| `NullPointer` | `NullPointer = -2` |  |
+| `Ok` | `Ok = 0` |  |
+| `OutOfRange` | `OutOfRange = -4` |  |
+| `Unsupported` | `Unsupported = -5` |  |
+
+<a id="prefabs"></a>
 
 ### Prefabs
 
 `public static class Prefabs` - Spawn and query prefab instances.
 
-- `public static int AbiVersion { get; }` - The ABI version the native library was built with: (major &lt;&lt; 16) | minor.
-- `public static int Spawn(string path, float x, float y, float z, float yaw = 0f, float pitch = 0f, float roll = 0f, float scale = 1f, int parent = 0)` - Spawns an instance and returns its root entity, 0 on failure.
-- `public static bool Destroy(int root)` - Destroys the instance root and everything under it.
-- `public static int RootOf(int entity)` - The root of the instance entity belongs to; 0 when it is not part of one.
-- `public static bool IsInstance(int entity)` - True when entity is part of a prefab instance.
-- `public static int Find(int root, string nodePath = "")` - The entity at nodePath inside an instance: "" is the root, "5" a node, "3/5" a node of a nested prefab.
-- `public static bool Revert(int root)` - Puts every field the instance changed back to what the prefab says.
-- `public static int OverrideCount(int root)` - How many fields, components and names of the instance differ from the prefab.
+**Properties**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `AbiVersion` | `public static int AbiVersion { get; }` | The ABI version the native library was built with: (major &lt;&lt; 16) \| minor. |
+
+**Methods**
+
+| Member | Signature | Summary |
+|---|---|---|
+| `Destroy` | `public static bool Destroy(int root)` | Destroys the instance root and everything under it. |
+| `Find` | `public static int Find(int root, string nodePath = "")` | The entity at nodePath inside an instance: "" is the root, "5" a node, "3/5" a node of a nested prefab. |
+| `IsInstance` | `public static bool IsInstance(int entity)` | True when entity is part of a prefab instance. |
+| `OverrideCount` | `public static int OverrideCount(int root)` | How many fields, components and names of the instance differ from the prefab. |
+| `Revert` | `public static bool Revert(int root)` | Puts every field the instance changed back to what the prefab says. |
+| `RootOf` | `public static int RootOf(int entity)` | The root of the instance entity belongs to; 0 when it is not part of one. |
+| `Spawn` | `public static int Spawn(string path, float x, float y, float z, float yaw = 0f, float pitch = 0f, float roll = 0f, float scale = 1f, int parent = 0)` | Spawns an instance and returns its root entity, 0 on failure. |

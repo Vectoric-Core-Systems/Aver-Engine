@@ -2,19 +2,21 @@
 
 # PhysAnim nodes
 
+Contents: 10 nodes sorted A-Z by type (`AN_` prefix ignored); categories: Animation. [All nodes A-Z](index.md).
+
 10 nodes. Rows: `scripting/csharp/Aver.Graph/GraphPhysAnimNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsPhysAnim.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
 | Type | Display | Category | Path | Pins | Attributes | C# |
 |---|---|---|---|---|---|---|
-| `ApplyHitReaction` | Apply Hit Reaction | Animation | P | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float, `px` float, `py` float, `pz` float, `damage` float, `radius` float<br>out: `then` exec, `success` bool | `bone` (optional) | `PhysAnimGraphInterop.ApplyHitReactionForGraph` |
-| `BlendPhysicalAnimation` | Blend Physical Animation | Animation | P | in: `exec` exec, `entity` int, `weight` float, `seconds` float = 0.2<br>out: `then` exec, `success` bool | none | `PhysAnimGraphInterop.BlendPhysicalAnimationForGraph` |
-| `DieAsRagdoll` | Die As Ragdoll | Animation | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none | `PhysAnimGraphInterop.DieAsRagdollForGraph` |
-| `GetPhysicalAnimationState` | Get Physical Animation State | Animation | D | in: `entity` int<br>out: `found` bool, `life` int, `facing` int, `reacting` int | none | `PhysAnimGraphInterop.GetPhysicalAnimationStateForGraph` |
-| `GetUpFromRagdoll` | Get Up From Ragdoll | Animation | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none | `PhysAnimGraphInterop.GetUpFromRagdollForGraph` |
-| `PinBone` | Pin Bone | Animation | P | in: `exec` exec, `entity` int, `pinned` bool = true<br>out: `then` exec, `success` bool | `bone` | `PhysAnimGraphInterop.PinBoneForGraph` |
-| `SetBoneBlend` | Set Bone Blend | Animation | P | in: `exec` exec, `entity` int, `blend` float<br>out: `then` exec, `success` bool | `bone` | `PhysAnimGraphInterop.SetBoneBlendForGraph` |
-| `SetBoneStrength` | Set Bone Strength | Animation | P | in: `exec` exec, `entity` int, `strength` float<br>out: `then` exec, `success` bool | `bone` | `PhysAnimGraphInterop.SetBoneStrengthForGraph` |
-| `SetPhysicalAnimationProfile` | Set Physical Animation Profile | Animation | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `profile` (optional) | `PhysAnimGraphInterop.SetPhysicalAnimationProfileForGraph` |
-| `SimulateBoneSubtree` | Simulate Bone Subtree | Animation | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `bone` (optional) | `PhysAnimGraphInterop.SimulateBoneSubtreeForGraph` |
+| <a id="applyhitreaction"></a>`ApplyHitReaction` | Apply Hit Reaction | Animation | P | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float, `px` float, `py` float, `pz` float, `damage` float, `radius` float<br>out: `then` exec, `success` bool | `bone` (optional) | `PhysAnimGraphInterop.ApplyHitReactionForGraph` |
+| <a id="blendphysicalanimation"></a>`BlendPhysicalAnimation` | Blend Physical Animation | Animation | P | in: `exec` exec, `entity` int, `weight` float, `seconds` float = 0.2<br>out: `then` exec, `success` bool | none | `PhysAnimGraphInterop.BlendPhysicalAnimationForGraph` |
+| <a id="dieasragdoll"></a>`DieAsRagdoll` | Die As Ragdoll | Animation | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none | `PhysAnimGraphInterop.DieAsRagdollForGraph` |
+| <a id="getphysicalanimationstate"></a>`GetPhysicalAnimationState` | Get Physical Animation State | Animation | D | in: `entity` int<br>out: `found` bool, `life` int, `facing` int, `reacting` int | none | `PhysAnimGraphInterop.GetPhysicalAnimationStateForGraph` |
+| <a id="getupfromragdoll"></a>`GetUpFromRagdoll` | Get Up From Ragdoll | Animation | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none | `PhysAnimGraphInterop.GetUpFromRagdollForGraph` |
+| <a id="pinbone"></a>`PinBone` | Pin Bone | Animation | P | in: `exec` exec, `entity` int, `pinned` bool = true<br>out: `then` exec, `success` bool | `bone` | `PhysAnimGraphInterop.PinBoneForGraph` |
+| <a id="setboneblend"></a>`SetBoneBlend` | Set Bone Blend | Animation | P | in: `exec` exec, `entity` int, `blend` float<br>out: `then` exec, `success` bool | `bone` | `PhysAnimGraphInterop.SetBoneBlendForGraph` |
+| <a id="setbonestrength"></a>`SetBoneStrength` | Set Bone Strength | Animation | P | in: `exec` exec, `entity` int, `strength` float<br>out: `then` exec, `success` bool | `bone` | `PhysAnimGraphInterop.SetBoneStrengthForGraph` |
+| <a id="setphysicalanimationprofile"></a>`SetPhysicalAnimationProfile` | Set Physical Animation Profile | Animation | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `profile` (optional) | `PhysAnimGraphInterop.SetPhysicalAnimationProfileForGraph` |
+| <a id="simulatebonesubtree"></a>`SimulateBoneSubtree` | Simulate Bone Subtree | Animation | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `bone` (optional) | `PhysAnimGraphInterop.SimulateBoneSubtreeForGraph` |

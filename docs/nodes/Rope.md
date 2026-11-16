@@ -2,15 +2,17 @@
 
 # Rope nodes
 
+Contents: 6 nodes sorted A-Z by type (`AN_` prefix ignored); categories: Physics. [All nodes A-Z](index.md).
+
 6 nodes. Rows: `scripting/csharp/Aver.Graph/GraphRopeNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsRope.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
 | Type | Display | Category | Path | Pins | Attributes | C# |
 |---|---|---|---|---|---|---|
-| `CreateRope` | Create Rope | Physics | P | in: `exec` exec, `x1` float, `y1` float, `z1` float, `x2` float, `y2` float, `z2` float, `length` float = 0, `radius` float = 0<br>out: `then` exec, `entity` int, `success` bool | `asset` (optional) | `RopeGraphInterop.CreateRopeForGraph`<br>Success means the rope entity exists; length and radius 0 take the asset's. |
-| `CutRope` | Cut Rope | Physics | P | in: `exec` exec, `rope` int, `x` float, `y` float, `z` float<br>out: `then` exec, `other` int, `success` bool | none | `RopeGraphInterop.CutRopeForGraph` |
-| `DestroyRope` | Destroy Rope | Physics | P | in: `exec` exec, `rope` int<br>out: `then` exec, `success` bool | none | `RopeGraphInterop.DestroyRopeForGraph`<br>Destroys the rope's entity (its body goes with it). |
-| `FreeRopeEnd` | Free Rope End | Physics | P | in: `exec` exec, `rope` int, `end` int, `x` float, `y` float, `z` float, `pinned` bool<br>out: `then` exec, `success` bool | none | `RopeGraphInterop.FreeRopeEndForGraph` |
-| `GetRope` | Get Rope | Physics | D | in: `rope` int<br>out: `found` bool, `length` float, `strain` float, `nodes` int, `cut` bool | none | `RopeGraphInterop.GetRopeForGraph` |
-| `SetRopeEnd` | Set Rope End | Physics | P | in: `exec` exec, `rope` int, `end` int, `anchor` int, `ox` float, `oy` float, `oz` float<br>out: `then` exec, `success` bool | none | `RopeGraphInterop.SetRopeEndForGraph` |
+| <a id="createrope"></a>`CreateRope` | Create Rope | Physics | P | in: `exec` exec, `x1` float, `y1` float, `z1` float, `x2` float, `y2` float, `z2` float, `length` float = 0, `radius` float = 0<br>out: `then` exec, `entity` int, `success` bool | `asset` (optional) | `RopeGraphInterop.CreateRopeForGraph`<br>Success means the rope entity exists; length and radius 0 take the asset's. |
+| <a id="cutrope"></a>`CutRope` | Cut Rope | Physics | P | in: `exec` exec, `rope` int, `x` float, `y` float, `z` float<br>out: `then` exec, `other` int, `success` bool | none | `RopeGraphInterop.CutRopeForGraph` |
+| <a id="destroyrope"></a>`DestroyRope` | Destroy Rope | Physics | P | in: `exec` exec, `rope` int<br>out: `then` exec, `success` bool | none | `RopeGraphInterop.DestroyRopeForGraph`<br>Destroys the rope's entity (its body goes with it). |
+| <a id="freeropeend"></a>`FreeRopeEnd` | Free Rope End | Physics | P | in: `exec` exec, `rope` int, `end` int, `x` float, `y` float, `z` float, `pinned` bool<br>out: `then` exec, `success` bool | none | `RopeGraphInterop.FreeRopeEndForGraph` |
+| <a id="getrope"></a>`GetRope` | Get Rope | Physics | D | in: `rope` int<br>out: `found` bool, `length` float, `strain` float, `nodes` int, `cut` bool | none | `RopeGraphInterop.GetRopeForGraph` |
+| <a id="setropeend"></a>`SetRopeEnd` | Set Rope End | Physics | P | in: `exec` exec, `rope` int, `end` int, `anchor` int, `ox` float, `oy` float, `oz` float<br>out: `then` exec, `success` bool | none | `RopeGraphInterop.SetRopeEndForGraph` |

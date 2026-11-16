@@ -2,30 +2,32 @@
 
 # AiQuery nodes
 
+Contents: 21 nodes sorted A-Z by type (`AN_` prefix ignored); categories: AI. [All nodes A-Z](index.md).
+
 21 nodes. Rows: `scripting/csharp/Aver.Graph/GraphAiQueryNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsAiQuery.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
 | Type | Display | Category | Path | Pins | Attributes | C# |
 |---|---|---|---|---|---|---|
-| `AN_BrainIsInState` | Brain Is In State | AI | D | in: `entity` int<br>out: `inState` bool | `state` | `BrainGraph.IsInStateForGraph` |
-| `AN_BrainRestart` | Restart Brain | AI | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none | `BrainGraph.RestartForGraph` |
-| `AN_BrainSendEvent` | Send Brain Event | AI | P | in: `exec` exec, `entity` int, `payloadI` int, `payloadF` float<br>out: `then` exec, `success` bool | `event` | `BrainGraph.SendEventForGraph` |
-| `AN_BrainSet` | Set Brain | AI | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `asset` | `BrainGraph.SetAssetForGraph` |
-| `AN_BrainStatus` | Brain Status | AI | D | in: `entity` int<br>out: `status` int, `kind` int | none | `BrainGraph.StatusForGraph`<br>status is a BrainStatus value, kind a BrainKind value. |
-| `AN_BrainStop` | Stop Brain | AI | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none | `BrainGraph.StopForGraph` |
-| `AN_EqsCancel` | Cancel EQS Query | AI | P | in: `exec` exec, `handle` int<br>out: `then` exec, `success` bool | none | `QueryGraph.EqsCancelForGraph` |
-| `AN_EqsGetItem` | Get EQS Item | AI | D | in: `handle` int, `index` int<br>out: `success` bool, `x` float, `y` float, `z` float, `entity` int, `score` float, `obj` int, `slot` int | none | `QueryGraph.EqsGetItemForGraph` |
-| `AN_EqsRelease` | Release EQS Query | AI | P | in: `exec` exec, `handle` int<br>out: `then` exec, `success` bool | none | `QueryGraph.EqsReleaseForGraph` |
-| `AN_EqsRun` | Run EQS Query | AI | P | in: `exec` exec, `querier` int, `target` int, `px` float, `py` float, `pz` float, `hasPoint` bool<br>out: `then` exec, `found` bool, `count` int, `x` float, `y` float, `z` float, `entity` int, `score` float | `query`, `usertags` (optional) | `QueryGraph.EqsRunForGraph` |
-| `AN_EqsStart` | Start EQS Query | AI | P | in: `exec` exec, `querier` int, `target` int, `px` float, `py` float, `pz` float, `hasPoint` bool, `priority` int<br>out: `then` exec, `handle` int | `query`, `usertags` (optional) | `QueryGraph.EqsStartForGraph` |
-| `AN_EqsStatus` | EQS Query Status | AI | D | in: `handle` int<br>out: `status` int, `count` int | none | `QueryGraph.EqsStatusForGraph` |
-| `AN_SoAttach` | Attach Smart Object | AI | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `asset` | `QueryGraph.SoAttachForGraph` |
-| `AN_SoClaim` | Claim Smart Object Slot | AI | P | in: `exec` exec, `user` int, `obj` int, `slot` int, `ttl` float = -1<br>out: `then` exec, `claim` int, `refusal` int | `usertags` (optional) | `QueryGraph.SoClaimForGraph` |
-| `AN_SoFind` | Find Smart Object Slot | AI | D | in: `user` int, `x` float, `y` float, `z` float, `radius` float = 1500, `matchAll` bool<br>out: `found` bool, `obj` int, `slot` int, `ex` float, `ey` float, `ez` float, `count` int | `slottags` (optional), `usertags` (optional) | `QueryGraph.SoFindForGraph` |
-| `AN_SoGetClaim` | Get Smart Object Claim | AI | D | in: `user` int, `index` int = 0<br>out: `has` bool, `claim` int, `obj` int, `slot` int, `state` int, `x` float, `y` float, `z` float, `yaw` float, `ex` float, `ey` float, `ez` float | none | `QueryGraph.SoGetClaimForGraph` |
-| `AN_SoRelease` | Release Smart Object Slot | AI | P | in: `exec` exec, `claim` int, `reason` int<br>out: `then` exec, `success` bool | none | `QueryGraph.SoReleaseForGraph` |
-| `AN_SoSetSlotEnabled` | Set Smart Object Slot Enabled | AI | P | in: `exec` exec, `entity` int, `slot` int, `enabled` bool = true<br>out: `then` exec, `success` bool | none | `QueryGraph.SoSetSlotEnabledForGraph` |
-| `AN_SoSlotCount` | Smart Object Slot Count | AI | D | in: `entity` int<br>out: `count` int | none | `QueryGraph.SoSlotCountForGraph` |
-| `AN_SoSlotInfo` | Smart Object Slot Info | AI | D | in: `entity` int, `slot` int<br>out: `success` bool, `state` int, `user` int, `x` float, `y` float, `z` float, `yaw` float | none | `QueryGraph.SoSlotInfoForGraph` |
-| `AN_SoUse` | Use Smart Object Slot | AI | P | in: `exec` exec, `claim` int<br>out: `then` exec, `success` bool | none | `QueryGraph.SoUseForGraph` |
+| <a id="an_brainisinstate"></a>`AN_BrainIsInState` | Brain Is In State | AI | D | in: `entity` int<br>out: `inState` bool | `state` | `BrainGraph.IsInStateForGraph` |
+| <a id="an_brainrestart"></a>`AN_BrainRestart` | Restart Brain | AI | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none | `BrainGraph.RestartForGraph` |
+| <a id="an_brainsendevent"></a>`AN_BrainSendEvent` | Send Brain Event | AI | P | in: `exec` exec, `entity` int, `payloadI` int, `payloadF` float<br>out: `then` exec, `success` bool | `event` | `BrainGraph.SendEventForGraph` |
+| <a id="an_brainset"></a>`AN_BrainSet` | Set Brain | AI | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `asset` | `BrainGraph.SetAssetForGraph` |
+| <a id="an_brainstatus"></a>`AN_BrainStatus` | Brain Status | AI | D | in: `entity` int<br>out: `status` int, `kind` int | none | `BrainGraph.StatusForGraph`<br>status is a BrainStatus value, kind a BrainKind value. |
+| <a id="an_brainstop"></a>`AN_BrainStop` | Stop Brain | AI | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none | `BrainGraph.StopForGraph` |
+| <a id="an_eqscancel"></a>`AN_EqsCancel` | Cancel EQS Query | AI | P | in: `exec` exec, `handle` int<br>out: `then` exec, `success` bool | none | `QueryGraph.EqsCancelForGraph` |
+| <a id="an_eqsgetitem"></a>`AN_EqsGetItem` | Get EQS Item | AI | D | in: `handle` int, `index` int<br>out: `success` bool, `x` float, `y` float, `z` float, `entity` int, `score` float, `obj` int, `slot` int | none | `QueryGraph.EqsGetItemForGraph` |
+| <a id="an_eqsrelease"></a>`AN_EqsRelease` | Release EQS Query | AI | P | in: `exec` exec, `handle` int<br>out: `then` exec, `success` bool | none | `QueryGraph.EqsReleaseForGraph` |
+| <a id="an_eqsrun"></a>`AN_EqsRun` | Run EQS Query | AI | P | in: `exec` exec, `querier` int, `target` int, `px` float, `py` float, `pz` float, `hasPoint` bool<br>out: `then` exec, `found` bool, `count` int, `x` float, `y` float, `z` float, `entity` int, `score` float | `query`, `usertags` (optional) | `QueryGraph.EqsRunForGraph` |
+| <a id="an_eqsstart"></a>`AN_EqsStart` | Start EQS Query | AI | P | in: `exec` exec, `querier` int, `target` int, `px` float, `py` float, `pz` float, `hasPoint` bool, `priority` int<br>out: `then` exec, `handle` int | `query`, `usertags` (optional) | `QueryGraph.EqsStartForGraph` |
+| <a id="an_eqsstatus"></a>`AN_EqsStatus` | EQS Query Status | AI | D | in: `handle` int<br>out: `status` int, `count` int | none | `QueryGraph.EqsStatusForGraph` |
+| <a id="an_soattach"></a>`AN_SoAttach` | Attach Smart Object | AI | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `asset` | `QueryGraph.SoAttachForGraph` |
+| <a id="an_soclaim"></a>`AN_SoClaim` | Claim Smart Object Slot | AI | P | in: `exec` exec, `user` int, `obj` int, `slot` int, `ttl` float = -1<br>out: `then` exec, `claim` int, `refusal` int | `usertags` (optional) | `QueryGraph.SoClaimForGraph` |
+| <a id="an_sofind"></a>`AN_SoFind` | Find Smart Object Slot | AI | D | in: `user` int, `x` float, `y` float, `z` float, `radius` float = 1500, `matchAll` bool<br>out: `found` bool, `obj` int, `slot` int, `ex` float, `ey` float, `ez` float, `count` int | `slottags` (optional), `usertags` (optional) | `QueryGraph.SoFindForGraph` |
+| <a id="an_sogetclaim"></a>`AN_SoGetClaim` | Get Smart Object Claim | AI | D | in: `user` int, `index` int = 0<br>out: `has` bool, `claim` int, `obj` int, `slot` int, `state` int, `x` float, `y` float, `z` float, `yaw` float, `ex` float, `ey` float, `ez` float | none | `QueryGraph.SoGetClaimForGraph` |
+| <a id="an_sorelease"></a>`AN_SoRelease` | Release Smart Object Slot | AI | P | in: `exec` exec, `claim` int, `reason` int<br>out: `then` exec, `success` bool | none | `QueryGraph.SoReleaseForGraph` |
+| <a id="an_sosetslotenabled"></a>`AN_SoSetSlotEnabled` | Set Smart Object Slot Enabled | AI | P | in: `exec` exec, `entity` int, `slot` int, `enabled` bool = true<br>out: `then` exec, `success` bool | none | `QueryGraph.SoSetSlotEnabledForGraph` |
+| <a id="an_soslotcount"></a>`AN_SoSlotCount` | Smart Object Slot Count | AI | D | in: `entity` int<br>out: `count` int | none | `QueryGraph.SoSlotCountForGraph` |
+| <a id="an_soslotinfo"></a>`AN_SoSlotInfo` | Smart Object Slot Info | AI | D | in: `entity` int, `slot` int<br>out: `success` bool, `state` int, `user` int, `x` float, `y` float, `z` float, `yaw` float | none | `QueryGraph.SoSlotInfoForGraph` |
+| <a id="an_souse"></a>`AN_SoUse` | Use Smart Object Slot | AI | P | in: `exec` exec, `claim` int<br>out: `then` exec, `success` bool | none | `QueryGraph.SoUseForGraph` |

@@ -2,37 +2,39 @@
 
 # Gas nodes
 
+Contents: 28 nodes sorted A-Z by type (`AN_` prefix ignored); categories: Abilities. [All nodes A-Z](index.md).
+
 28 nodes. Rows: `scripting/csharp/Aver.Graph/GraphGasNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsGas.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
 | Type | Display | Category | Path | Pins | Attributes | C# |
 |---|---|---|---|---|---|---|
-| `AN_GasAbilityId` | Ability Id | Abilities | D | out: `abilityId` int | `ability` | `GasGraph.AbilityIdForGraph` |
-| `AN_GasAddAttributeSet` | Add Attribute Set | Abilities | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `set` | `GasGraph.AddAttributeSetForGraph` |
-| `AN_GasAddTag` | Add Gameplay Tag | Abilities | P | in: `exec` exec, `entity` int, `tagId` int, `count` int = 1<br>out: `then` exec, `success` bool | `tag` (optional) | `GasGraph.AddTagForGraph` |
-| `AN_GasApplyEffect` | Apply Gameplay Effect | Abilities | P | in: `exec` exec, `target` int, `source` int, `effectId` int, `callerValue` float<br>out: `then` exec, `handle` int, `applied` bool | `effect` (optional), `callertag` (optional) | `GasGraph.ApplyEffectForGraph` |
-| `AN_GasAttributeId` | Attribute Id | Abilities | D | out: `attrId` int | `attribute` | `GasGraph.AttributeIdForGraph` |
-| `AN_GasCanActivate` | Can Activate Ability | Abilities | D | in: `entity` int, `abilityId` int<br>out: `can` bool, `reason` int | `ability` (optional) | `GasGraph.CanActivateForGraph` |
-| `AN_GasCancelByTag` | Cancel Abilities By Tag | Abilities | P | in: `exec` exec, `entity` int, `tagId` int<br>out: `then` exec, `count` int | `tag` (optional) | `GasGraph.CancelAbilitiesByTagForGraph` |
-| `AN_GasCommitAbility` | Commit Ability | Abilities | P | in: `exec` exec, `entity` int, `abilityId` int<br>out: `then` exec, `success` bool | `ability` (optional) | `GasGraph.CommitAbilityForGraph` |
-| `AN_GasCooldown` | Ability Cooldown | Abilities | D | in: `entity` int, `abilityId` int<br>out: `remaining` float, `onCooldown` bool | `ability` (optional) | `GasGraph.AbilityCooldownForGraph` |
-| `AN_GasEffectId` | Effect Id | Abilities | D | out: `effectId` int | `effect` | `GasGraph.EffectIdForGraph` |
-| `AN_GasEffectInfo` | Gameplay Effect Info | Abilities | D | in: `entity` int, `effectId` int<br>out: `active` bool, `stacks` int, `remaining` float, `handle` int | `effect` (optional) | `GasGraph.EffectInfoForGraph` |
-| `AN_GasEndAbility` | End Ability | Abilities | P | in: `exec` exec, `entity` int, `abilityId` int, `cancelled` bool<br>out: `then` exec, `success` bool | `ability` (optional) | `GasGraph.EndAbilityForGraph` |
-| `AN_GasGetAttribute` | Get Attribute | Abilities | D | in: `entity` int, `attrId` int<br>out: `value` float, `base` float, `success` bool | `attribute` (optional) | `GasGraph.GetAttributeForGraph` |
-| `AN_GasGrantAbility` | Grant Ability | Abilities | P | in: `exec` exec, `entity` int, `abilityId` int, `level` int = 1<br>out: `then` exec, `handle` int | `ability` (optional) | `GasGraph.GrantAbilityForGraph` |
-| `AN_GasHasTag` | Has Gameplay Tag | Abilities | D | in: `entity` int, `tagId` int<br>out: `has` bool | `tag` (optional) | `GasGraph.HasTagForGraph` |
-| `AN_GasHasTags` | Has Gameplay Tags | Abilities | D | in: `entity` int, `all` bool<br>out: `has` bool | `tags` | `GasGraph.HasTagsForGraph` |
-| `AN_GasIsAbilityActive` | Is Ability Active | Abilities | D | in: `entity` int, `abilityId` int<br>out: `active` bool | `ability` (optional) | `GasGraph.IsAbilityActiveForGraph` |
-| `AN_GasRemoveEffect` | Remove Gameplay Effect | Abilities | P | in: `exec` exec, `entity` int, `handle` int<br>out: `then` exec, `success` bool | none | `GasGraph.RemoveEffectForGraph` |
-| `AN_GasRemoveEffectsByDef` | Remove Effects By Definition | Abilities | P | in: `exec` exec, `entity` int, `effectId` int<br>out: `then` exec, `count` int | `effect` (optional) | `GasGraph.RemoveEffectsByDefForGraph` |
-| `AN_GasRemoveEffectsByTag` | Remove Effects By Tag | Abilities | P | in: `exec` exec, `entity` int, `tagId` int<br>out: `then` exec, `count` int | `tag` (optional) | `GasGraph.RemoveEffectsByTagForGraph` |
-| `AN_GasRemoveTag` | Remove Gameplay Tag | Abilities | P | in: `exec` exec, `entity` int, `tagId` int, `count` int = 1<br>out: `then` exec, `success` bool | `tag` (optional) | `GasGraph.RemoveTagForGraph` |
-| `AN_GasRevokeAbility` | Revoke Ability | Abilities | P | in: `exec` exec, `entity` int, `abilityId` int<br>out: `then` exec, `success` bool | `ability` (optional) | `GasGraph.RevokeAbilityForGraph` |
-| `AN_GasSendEvent` | Send Gameplay Event | Abilities | P | in: `exec` exec, `entity` int, `instigator` int, `tagId` int, `magnitude` float<br>out: `then` exec, `triggered` int | `tag` (optional) | `GasGraph.SendGameplayEventForGraph` |
-| `AN_GasSetAttribute` | Set Attribute Base | Abilities | P | in: `exec` exec, `entity` int, `attrId` int, `value` float<br>out: `then` exec, `success` bool | `attribute` (optional) | `GasGraph.SetAttributeBaseForGraph` |
-| `AN_GasTagCount` | Gameplay Tag Count | Abilities | D | in: `entity` int, `tagId` int<br>out: `count` int | `tag` (optional) | `GasGraph.TagCountForGraph` |
-| `AN_GasTagId` | Gameplay Tag Id | Abilities | D | out: `tagId` int | `tag` | `GasGraph.TagIdForGraph` |
-| `AN_GasTryActivate` | Try Activate Ability | Abilities | P | in: `exec` exec, `entity` int, `abilityId` int, `target` int<br>out: `then` exec, `success` bool, `reason` int | `ability` (optional) | `GasGraph.TryActivateForGraph` |
-| `AN_GasTryActivateByTag` | Try Activate By Tag | Abilities | P | in: `exec` exec, `entity` int, `tagId` int, `target` int<br>out: `then` exec, `success` bool, `abilityId` int, `reason` int | `tag` (optional) | `GasGraph.TryActivateByTagForGraph` |
+| <a id="an_gasabilityid"></a>`AN_GasAbilityId` | Ability Id | Abilities | D | out: `abilityId` int | `ability` | `GasGraph.AbilityIdForGraph` |
+| <a id="an_gasaddattributeset"></a>`AN_GasAddAttributeSet` | Add Attribute Set | Abilities | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | `set` | `GasGraph.AddAttributeSetForGraph` |
+| <a id="an_gasaddtag"></a>`AN_GasAddTag` | Add Gameplay Tag | Abilities | P | in: `exec` exec, `entity` int, `tagId` int, `count` int = 1<br>out: `then` exec, `success` bool | `tag` (optional) | `GasGraph.AddTagForGraph` |
+| <a id="an_gasapplyeffect"></a>`AN_GasApplyEffect` | Apply Gameplay Effect | Abilities | P | in: `exec` exec, `target` int, `source` int, `effectId` int, `callerValue` float<br>out: `then` exec, `handle` int, `applied` bool | `effect` (optional), `callertag` (optional) | `GasGraph.ApplyEffectForGraph` |
+| <a id="an_gasattributeid"></a>`AN_GasAttributeId` | Attribute Id | Abilities | D | out: `attrId` int | `attribute` | `GasGraph.AttributeIdForGraph` |
+| <a id="an_gascanactivate"></a>`AN_GasCanActivate` | Can Activate Ability | Abilities | D | in: `entity` int, `abilityId` int<br>out: `can` bool, `reason` int | `ability` (optional) | `GasGraph.CanActivateForGraph` |
+| <a id="an_gascancelbytag"></a>`AN_GasCancelByTag` | Cancel Abilities By Tag | Abilities | P | in: `exec` exec, `entity` int, `tagId` int<br>out: `then` exec, `count` int | `tag` (optional) | `GasGraph.CancelAbilitiesByTagForGraph` |
+| <a id="an_gascommitability"></a>`AN_GasCommitAbility` | Commit Ability | Abilities | P | in: `exec` exec, `entity` int, `abilityId` int<br>out: `then` exec, `success` bool | `ability` (optional) | `GasGraph.CommitAbilityForGraph` |
+| <a id="an_gascooldown"></a>`AN_GasCooldown` | Ability Cooldown | Abilities | D | in: `entity` int, `abilityId` int<br>out: `remaining` float, `onCooldown` bool | `ability` (optional) | `GasGraph.AbilityCooldownForGraph` |
+| <a id="an_gaseffectid"></a>`AN_GasEffectId` | Effect Id | Abilities | D | out: `effectId` int | `effect` | `GasGraph.EffectIdForGraph` |
+| <a id="an_gaseffectinfo"></a>`AN_GasEffectInfo` | Gameplay Effect Info | Abilities | D | in: `entity` int, `effectId` int<br>out: `active` bool, `stacks` int, `remaining` float, `handle` int | `effect` (optional) | `GasGraph.EffectInfoForGraph` |
+| <a id="an_gasendability"></a>`AN_GasEndAbility` | End Ability | Abilities | P | in: `exec` exec, `entity` int, `abilityId` int, `cancelled` bool<br>out: `then` exec, `success` bool | `ability` (optional) | `GasGraph.EndAbilityForGraph` |
+| <a id="an_gasgetattribute"></a>`AN_GasGetAttribute` | Get Attribute | Abilities | D | in: `entity` int, `attrId` int<br>out: `value` float, `base` float, `success` bool | `attribute` (optional) | `GasGraph.GetAttributeForGraph` |
+| <a id="an_gasgrantability"></a>`AN_GasGrantAbility` | Grant Ability | Abilities | P | in: `exec` exec, `entity` int, `abilityId` int, `level` int = 1<br>out: `then` exec, `handle` int | `ability` (optional) | `GasGraph.GrantAbilityForGraph` |
+| <a id="an_gashastag"></a>`AN_GasHasTag` | Has Gameplay Tag | Abilities | D | in: `entity` int, `tagId` int<br>out: `has` bool | `tag` (optional) | `GasGraph.HasTagForGraph` |
+| <a id="an_gashastags"></a>`AN_GasHasTags` | Has Gameplay Tags | Abilities | D | in: `entity` int, `all` bool<br>out: `has` bool | `tags` | `GasGraph.HasTagsForGraph` |
+| <a id="an_gasisabilityactive"></a>`AN_GasIsAbilityActive` | Is Ability Active | Abilities | D | in: `entity` int, `abilityId` int<br>out: `active` bool | `ability` (optional) | `GasGraph.IsAbilityActiveForGraph` |
+| <a id="an_gasremoveeffect"></a>`AN_GasRemoveEffect` | Remove Gameplay Effect | Abilities | P | in: `exec` exec, `entity` int, `handle` int<br>out: `then` exec, `success` bool | none | `GasGraph.RemoveEffectForGraph` |
+| <a id="an_gasremoveeffectsbydef"></a>`AN_GasRemoveEffectsByDef` | Remove Effects By Definition | Abilities | P | in: `exec` exec, `entity` int, `effectId` int<br>out: `then` exec, `count` int | `effect` (optional) | `GasGraph.RemoveEffectsByDefForGraph` |
+| <a id="an_gasremoveeffectsbytag"></a>`AN_GasRemoveEffectsByTag` | Remove Effects By Tag | Abilities | P | in: `exec` exec, `entity` int, `tagId` int<br>out: `then` exec, `count` int | `tag` (optional) | `GasGraph.RemoveEffectsByTagForGraph` |
+| <a id="an_gasremovetag"></a>`AN_GasRemoveTag` | Remove Gameplay Tag | Abilities | P | in: `exec` exec, `entity` int, `tagId` int, `count` int = 1<br>out: `then` exec, `success` bool | `tag` (optional) | `GasGraph.RemoveTagForGraph` |
+| <a id="an_gasrevokeability"></a>`AN_GasRevokeAbility` | Revoke Ability | Abilities | P | in: `exec` exec, `entity` int, `abilityId` int<br>out: `then` exec, `success` bool | `ability` (optional) | `GasGraph.RevokeAbilityForGraph` |
+| <a id="an_gassendevent"></a>`AN_GasSendEvent` | Send Gameplay Event | Abilities | P | in: `exec` exec, `entity` int, `instigator` int, `tagId` int, `magnitude` float<br>out: `then` exec, `triggered` int | `tag` (optional) | `GasGraph.SendGameplayEventForGraph` |
+| <a id="an_gassetattribute"></a>`AN_GasSetAttribute` | Set Attribute Base | Abilities | P | in: `exec` exec, `entity` int, `attrId` int, `value` float<br>out: `then` exec, `success` bool | `attribute` (optional) | `GasGraph.SetAttributeBaseForGraph` |
+| <a id="an_gastagcount"></a>`AN_GasTagCount` | Gameplay Tag Count | Abilities | D | in: `entity` int, `tagId` int<br>out: `count` int | `tag` (optional) | `GasGraph.TagCountForGraph` |
+| <a id="an_gastagid"></a>`AN_GasTagId` | Gameplay Tag Id | Abilities | D | out: `tagId` int | `tag` | `GasGraph.TagIdForGraph` |
+| <a id="an_gastryactivate"></a>`AN_GasTryActivate` | Try Activate Ability | Abilities | P | in: `exec` exec, `entity` int, `abilityId` int, `target` int<br>out: `then` exec, `success` bool, `reason` int | `ability` (optional) | `GasGraph.TryActivateForGraph` |
+| <a id="an_gastryactivatebytag"></a>`AN_GasTryActivateByTag` | Try Activate By Tag | Abilities | P | in: `exec` exec, `entity` int, `tagId` int, `target` int<br>out: `then` exec, `success` bool, `abilityId` int, `reason` int | `tag` (optional) | `GasGraph.TryActivateByTagForGraph` |
