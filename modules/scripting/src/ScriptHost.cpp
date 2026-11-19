@@ -9,6 +9,8 @@
 #include "aver/platform/FileSystem.hpp"
 
 #include <algorithm>
+#include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <format>
 #include <string>
@@ -91,10 +93,27 @@ using editable_list_fn = int32_t(AVER_SCRIPT_CALL*)(int32_t entity, char* out, i
 using editable_set_fn = int32_t(AVER_SCRIPT_CALL*)(int32_t entity, const char* utf8Name, const char* utf8Value);
 using load_extensions_fn = int32_t(AVER_SCRIPT_CALL*)(const char* utf8Spec);
 
-// What the bridge's LoadExtensions takes. Version 2: a first line "#aver-extensions 2", then one line per Ready extension that has a managed half,
-// fields separated by TAB: its name, version, folder, managed.entry (may be empty), managed.actorBase (may be empty), then the full path of each
-// managed.runtime assembly. A Refused extension logs its reason (one line) and is left out. Empty when no extension has a managed half.
+// Why the managed half of `e` cannot run here: a service it lists in managed.services that this engine does not offer at that version. Empty if none.
+std::string missingService(const ext::Extension& e) {
+    const ext::ServiceRegistry& reg = ext::ServiceRegistry::instance();
+    for (const auto& [name, version] : e.managedServices) {
+        if (reg.find(name, version)) continue;
+        const std::vector<u32> offered = reg.versionsOf(name);
+        std::string has;
+        for (const u32 v : offered) has += (has.empty() ? "v" : ", v") + std::to_string(v);
+        return "it needs service " + name + " v" + std::to_string(version) + " and this engine offers " + (has.empty() ? "none" : has) +
+               (offered.empty() ? "" : "; rebuild it against this engine");
+    }
+    return {};
+}
+
+// What the bridge's LoadExtensions takes. Version 3: a first line "#aver-extensions 3" and, after a TAB, the address of the host's service lookup
+// (ext::serviceLookup, AverExtHost::getService's) in hex; then one line per Ready extension that has a managed half, fields separated by TAB: its
+// name, version, folder, managed.entry (may be empty), managed.actorBase (may be empty), then the full path of each managed.runtime assembly.
+// A Refused extension, or one that needs a service this engine does not offer, logs its reason (one line) and is left out. Empty when no
+// extension has a managed half.
 std::string managedExtensionSpec(const std::string& root) {
+    ext::registerSeamServices();
     ext::Registry registry;
     if (root.empty()) registry.scanDefault();
     else registry.scan(root);
@@ -105,11 +124,18 @@ std::string managedExtensionSpec(const std::string& root) {
             continue;
         }
         if (e.managedRuntime.empty()) continue;
+        if (const std::string why = missingService(e); !why.empty()) {
+            AVER_WARN("[Scripting] extension {} is not loaded: {}", e.name, why);
+            continue;
+        }
         spec += e.name + '\t' + e.version + '\t' + e.dir + '\t' + e.managedEntry + '\t' + e.actorBase;
         for (const std::string& m : e.managedRuntime) spec += '\t' + e.dir + "/managed/" + m;
         spec += '\n';
     }
-    return spec.empty() ? spec : "#aver-extensions 2\n" + spec;
+    if (spec.empty()) return spec;
+    char lookup[32];
+    std::snprintf(lookup, sizeof lookup, "%llx", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(ext::serviceLookup())));
+    return "#aver-extensions 3\t" + std::string(lookup) + "\n" + spec;
 }
 
 // UTF-8 to hostfxr's char_t, and back. The identity everywhere but Windows.

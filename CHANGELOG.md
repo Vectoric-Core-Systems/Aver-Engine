@@ -8,7 +8,20 @@ parentheses are short refs into this repository — `git show <hash>` for the fu
 usually longer and more useful than the line here. `docs/BUGS.md` carries the full defect list with
 triggering inputs for anything summarised below.
 
-## [0.8.0] — not yet published
+## [Unreleased]
+
+### Extensions reach the engine through versioned services
+
+- Every engine seam (`aver.nav`, `aver.anim`, `aver.audio`, `aver.ui`, `aver.net`, `aver.framework`, `aver.physics` ... 14 in all) is offered
+  to extensions as a service: a table of its functions, at a version (`AverExtSeamService`, `aver_ext_services.h`). A managed
+  extension asks with `ExtensionContext.GetService(name, version)` and lists what it needs in `managed.services`; where the
+  engine does not offer that version, the extension is left out with one log line instead of calling into slots that mean
+  something else. Extensions P/Invoked seam DLLs by name before, outside the contract, and a changed signature crashed them.
+- `scripts/abi-services.lock` records each service's slots. `AbiServicesCheck` fails when a header changes a signature without a
+  new version; adding a function at the end keeps it. Design: `docs/plans/EXTENSION_SERVICES.md`.
+- The payload carries `player-start-icon.png`. 0.8.0 shipped without it, so the editor drew no player-start marker.
+
+## [0.8.0] — 2026-11-17
 
 Everything since 0.5.0. 0.6.0 (2026-10-04) and 0.7.0 (2026-10-12) were published with install notes only, so their
 changes are listed here too.

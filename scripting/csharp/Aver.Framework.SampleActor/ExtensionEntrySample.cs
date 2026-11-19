@@ -9,10 +9,14 @@ namespace Aver.Framework.SampleActor;
 /// actors it chooses with a predicate, not an actor base. Not a project script (it is not an actor).</summary>
 public sealed class SampleExtensionEntry : IAverExtension
 {
-    /// <summary>Logs what the context told it, then declares <see cref="Sphere"/> only.</summary>
+    /// <summary>Logs what the context told it and what the engine's services answer, then declares <see cref="Sphere"/> only.</summary>
     public void Load(ExtensionContext context)
     {
         context.Log($"entry ran: name={context.Name} version={context.Version} assemblies={context.Assemblies.Count} dir={context.Directory}");
+        // An engine seam is a table: {uint size, uint count, slots}. A service the engine does not offer answers zero.
+        IntPtr nav = context.GetService("aver.nav", 1);
+        int slots = nav == IntPtr.Zero ? -1 : System.Runtime.InteropServices.Marshal.ReadInt32(nav, 4);
+        context.Log($"services: aver.nav v1 slots={slots} aver.no-such v1 {(context.GetService("aver.no-such", 1) == IntPtr.Zero ? "absent" : "present")}");
         context.DeclareActors(t => t == typeof(Sphere));
     }
 }

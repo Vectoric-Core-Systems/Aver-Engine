@@ -55,6 +55,16 @@ typedef struct AverExtImportModelService {
     void (*freeResult)(AverExtModelResult* out);
 } AverExtImportModelService;
 
+/* "aver.<seam>" (aver.nav, aver.anim, aver.audio, aver.ui, aver.framework ... docs/abi/index.md lists the seams): one engine seam's exported
+ * functions. scripts/abi-services.lock gives each service's version and the functions' C signatures in slot order; slot i has the type of the
+ * lock's line i. Within a version the table only grows at the end, so read `count` and use no slot at or past it. A changed or removed
+ * signature is a new version, and the old one is no longer offered. The editor and the game runtime offer every seam their edition carries. */
+typedef struct AverExtSeamService {
+    uint32_t size;            /* bytes, header included: offsetof(AverExtSeamService, fn) + count * sizeof(void*) */
+    uint32_t count;           /* slots */
+    const void* fn[1];        /* count entries, in lock order */
+} AverExtSeamService;
+
 #ifdef __cplusplus
 }
 #endif

@@ -64,6 +64,7 @@ struct Extension {
     std::vector<std::string> managedRuntime;   // managed/<file> assemblies a game loads
     std::string managedEntry;               // the managed.entry type (Aver.Framework.Hosting.IAverExtension); empty for none
     std::string actorBase;                  // the base class of the actor types they declare
+    std::vector<std::pair<std::string, u32>> managedServices;   // managed.services: the services (name, version) the managed half needs
     std::vector<CommandInfo> commands;
     std::vector<ImporterInfo> importers;
     std::vector<std::string> runtimeFiles;  // what a packaged game copies
@@ -94,6 +95,8 @@ public:
     bool remove(std::string_view name, u32 version);
     // The table added for exactly (name, version), or null.
     const void* find(std::string_view name, u32 version) const;
+    // The versions of `name` on offer, lowest first: what a refusal names when an extension asks for another.
+    std::vector<u32> versionsOf(std::string_view name) const;
     void clear();
 
 private:
@@ -102,6 +105,15 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+// Offers every engine seam scripts/abi-services.lock lists as the service "aver.<seam>" at its version (aver_ext_services.h,
+// AverExtSeamService), resolving the functions from the seam's library in `exeDir` (default: the executable's folder). A seam whose library
+// is not in this build, or lacks a function, is not offered and is logged once. Returns how many are on offer. Calling it again adds nothing new.
+usize registerSeamServices(const std::string& exeDir = {});
+
+// AverExtHost::getService's lookup, for a host that hands it on some other way (the managed bridge).
+using ServiceLookupFn = const void* (*)(const char* name, uint32_t version);
+ServiceLookupFn serviceLookup();
 
 // The directory name an extension's native library sits under: "win-x64", "linux-x64", "osx-arm64" ...
 const char* platformDirName();

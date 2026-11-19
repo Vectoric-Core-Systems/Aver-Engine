@@ -12,6 +12,7 @@
 // through LoadExtensions. Headless: no device, no window, no audio.
 //
 // UNAVAILABLE IS NOT A FAILURE: a machine with no .NET runtime, or a build without the staged bridge or samples, exits 77 (skipped).
+#include "aver/core/DynamicLibrary.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/extensions/Extensions.hpp"
@@ -19,6 +20,7 @@
 #include "aver/platform/FileSystem.hpp"
 #include "aver/scripting/ScriptHost.hpp"
 
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -53,10 +55,12 @@ static void put(const fsys::path& path, const std::string& text) {
     f << text;
 }
 
-static std::string manifest(const std::string& name, const std::string& assembly, const std::string& actorBase, const std::string& entry = {}) {
+static std::string manifest(const std::string& name, const std::string& assembly, const std::string& actorBase, const std::string& entry = {},
+                            const std::string& services = {}) {
     return "{\n  \"name\": \"" + name + "\",\n  \"version\": \"1.0.0\",\n  \"abi\": " + std::to_string(AVER_EXT_ABI) +
            ",\n  \"engine\": \">=0.7.0 <0.9.0\",\n  \"license\": \"MIT\",\n  \"managed\": { \"runtime\": [\"" + assembly + "\"]" +
-           (entry.empty() ? std::string() : ", \"entry\": \"" + entry + "\"") + ", \"actorBase\": \"" + actorBase + "\" }\n}\n";
+           (entry.empty() ? std::string() : ", \"entry\": \"" + entry + "\"") + ", \"actorBase\": \"" + actorBase + "\"" +
+           (services.empty() ? std::string() : ", \"services\": " + services) + " }\n}\n";
 }
 
 int main() {
@@ -73,13 +77,21 @@ int main() {
     const fsys::path root = fsys::path(AVER_MEXT_WORKDIR) / "Extensions";
     fsys::remove_all(root.parent_path(), ec);
     put(root / "ActorExt" / "extension.json",
-        manifest("ActorExt", "Aver.Framework.SampleActor.dll", "Aver.Framework.SampleActor.TestActor", "Aver.Framework.SampleActor.SampleExtensionEntry"));
+        manifest("ActorExt", "Aver.Framework.SampleActor.dll", "Aver.Framework.SampleActor.TestActor", "Aver.Framework.SampleActor.SampleExtensionEntry",
+                 "{ \"aver.nav\": 1 }"));
     fsys::create_directories(root / "ActorExt" / "managed", ec);
     fsys::copy_file(actorDll, root / "ActorExt" / "managed" / "Aver.Framework.SampleActor.dll", fsys::copy_options::overwrite_existing, ec);
     put(root / "GoneExt" / "extension.json", manifest("GoneExt", "Missing.dll", "Gone.Base"));
     put(root / "NoBaseExt" / "extension.json", manifest("NoBaseExt", "Aver.Scripting.SampleBehaviour.dll", "No.Such.Type"));
     fsys::create_directories(root / "NoBaseExt" / "managed", ec);
     fsys::copy_file(behaviourDll, root / "NoBaseExt" / "managed" / "Aver.Scripting.SampleBehaviour.dll", fsys::copy_options::overwrite_existing, ec);
+    // NewerExt asks for a version of a seam this engine does not offer; BadSvcExt names a service with a name the rule refuses.
+    put(root / "NewerExt" / "extension.json", manifest("NewerExt", "Aver.Scripting.SampleBehaviour.dll", "", {}, "{ \"aver.nav\": 99 }"));
+    fsys::create_directories(root / "NewerExt" / "managed", ec);
+    fsys::copy_file(behaviourDll, root / "NewerExt" / "managed" / "Aver.Scripting.SampleBehaviour.dll", fsys::copy_options::overwrite_existing, ec);
+    put(root / "BadSvcExt" / "extension.json", manifest("BadSvcExt", "Aver.Scripting.SampleBehaviour.dll", "", {}, "{ \"Not A Name\": 1 }"));
+    fsys::create_directories(root / "BadSvcExt" / "managed", ec);
+    fsys::copy_file(behaviourDll, root / "BadSvcExt" / "managed" / "Aver.Scripting.SampleBehaviour.dll", fsys::copy_options::overwrite_existing, ec);
     check(fsys::exists(root / "ActorExt" / "managed" / "Aver.Framework.SampleActor.dll", ec) &&
               fsys::exists(root / "NoBaseExt" / "managed" / "Aver.Scripting.SampleBehaviour.dll", ec),
           "the fake extensions are staged");
@@ -94,6 +106,34 @@ int main() {
                   actor->managedEntry == "Aver.Framework.SampleActor.SampleExtensionEntry",
               "ActorExt is Ready with its managed assembly, entry type and actor base from the manifest");
         check(gone && !gone->ready() && gone->reason.find("Missing.dll") != std::string::npos, "GoneExt is Refused, naming the missing file");
+        check(actor && actor->managedServices.size() == 1 && actor->managedServices[0].first == "aver.nav" && actor->managedServices[0].second == 1,
+              "ActorExt's managed.services is read: aver.nav v1");
+        const ext::Extension* bad = registry.find("BadSvcExt");
+        check(bad && !bad->ready() && bad->reason.find("managed.services") != std::string::npos, "BadSvcExt is Refused: its service name breaks the rule");
+    }
+
+    AVER_INFO("-- the engine's seams are offered as services (scripts/abi-services.lock) --");
+    {
+        const usize offered = ext::registerSeamServices();
+        check(offered >= 10, "registerSeamServices offers the seams this build carries (" + std::to_string(offered) + ")");
+        const auto* nav = static_cast<const AverExtSeamService*>(ext::ServiceRegistry::instance().find("aver.nav", 1));
+#if defined(_WIN32)
+        void* lib = loadLibrary((executableDir() + "/Aver.Nav.Abi.dll").c_str());
+#elif defined(__APPLE__)
+        void* lib = loadLibrary((executableDir() + "/libAver.Nav.Abi.dylib").c_str());
+#else
+        void* lib = loadLibrary((executableDir() + "/libAver.Nav.Abi.so").c_str());
+#endif
+        void* direct = librarySymbol(lib, "aver_nav_region_set_mesh");
+        bool slotMatches = false;
+        if (nav && direct)
+            for (u32 i = 0; i < nav->count; ++i) slotMatches |= nav->fn[i] == direct;
+        check(nav && nav->count > 100 && nav->size == offsetof(AverExtSeamService, fn) + nav->count * sizeof(void*),
+              "aver.nav v1 is a table: its size and slot count agree");
+        check(slotMatches, "and one of its slots is the library's own aver_nav_region_set_mesh");
+        check(ext::ServiceRegistry::instance().find("aver.nav", 99) == nullptr && ext::ServiceRegistry::instance().versionsOf("aver.nav") == std::vector<u32>{1},
+              "aver.nav v99 is not offered; v1 is the one version on offer");
+        check(ext::registerSeamServices() == offered, "registering again adds nothing new");
     }
 
     setLogSink(&capture, nullptr);
@@ -121,6 +161,14 @@ int main() {
     check(linesWith("GoneExt", "not loaded") == 1 && linesWith("GoneExt", "Missing.dll") == 1, "GoneExt: one line, with the loader's reason");
     check(linesWith("NoBaseExt", "skipped") == 1 && linesWith("NoBaseExt", "No.Such.Type") == 1, "NoBaseExt: one line, naming the base type it lacks");
     check(linesWith("ActorExt", "skipped") == 0 && linesWith("ActorExt", "not loaded") == 0, "ActorExt, which is fine, says nothing");
+    check(linesWith("NewerExt", "not loaded") == 1 && linesWith("NewerExt", "aver.nav v99 and this engine offers v1") == 1,
+          "NewerExt: one line, naming the service version it needs and the one on offer");
+    check(linesWith("BadSvcExt", "not loaded") == 1, "BadSvcExt: one line, with the loader's reason");
+
+    AVER_INFO("-- the entry reaches a seam through its context --");
+    check(linesWith("[ActorExt] services: aver.nav v1 slots=") == 1 && linesWith("[ActorExt] services:", "slots=-1") == 0,
+          "GetService(\"aver.nav\", 1) hands the entry the table, with its slots");
+    check(linesWith("[ActorExt] services:", "aver.no-such v1 absent") == 1, "and a service the engine does not offer answers zero");
 
     AVER_INFO("-- project scripts that derive from an extension's type load after it, and are declared --");
     const fsys::path projectDll = exe / "ProjectScripts" / "Aver.Framework.SampleProject.dll";

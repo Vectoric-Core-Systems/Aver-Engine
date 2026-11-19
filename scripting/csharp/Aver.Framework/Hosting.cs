@@ -24,12 +24,29 @@ public sealed class ExtensionContext
 {
     private readonly List<Func<Type, bool>> _actorFilters = new();
 
-    internal ExtensionContext(string name, string version, string directory, IReadOnlyList<Assembly> assemblies)
+    private readonly IntPtr _serviceLookup;
+
+    internal ExtensionContext(string name, string version, string directory, IReadOnlyList<Assembly> assemblies, IntPtr serviceLookup = default)
     {
         Name = name;
         Version = version;
         Directory = directory;
         Assemblies = assemblies;
+        _serviceLookup = serviceLookup;
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate IntPtr ServiceLookup([MarshalAs(UnmanagedType.LPUTF8Str)] string name, uint version);
+
+    /// <summary>The table of a service the engine offers (docs/EXTENSIONS.md, "Services and interfaces") by name and version, or
+    /// <see cref="IntPtr.Zero"/> when this engine does not offer it. An engine seam (<c>aver.nav</c>, <c>aver.anim</c>, <c>aver.audio</c> ...) is an
+    /// <c>AverExtSeamService</c> (aver_ext_services.h) whose slots follow scripts/abi-services.lock. List the services the extension cannot do
+    /// without in its manifest's <c>managed.services</c>, and the engine refuses to load it, with a reason, where one is missing.</summary>
+    public IntPtr GetService(string name, uint version)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+        if (_serviceLookup == IntPtr.Zero) return IntPtr.Zero;
+        return Marshal.GetDelegateForFunctionPointer<ServiceLookup>(_serviceLookup)(name, version);
     }
 
     /// <summary>The extension's name (its folder and the <c>name</c> of its manifest).</summary>

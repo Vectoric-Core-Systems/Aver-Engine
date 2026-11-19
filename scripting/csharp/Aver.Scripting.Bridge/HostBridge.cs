@@ -1406,7 +1406,7 @@ public static class HostBridge
 
     /// <summary>Loads the managed half of each installed extension into the host context, runs its entry and declares its actor classes. The
     /// host calls this once, after Bootstrap and before LoadScripts. <paramref name="utf8Spec"/> is the host's extension list: a first
-    /// line <c>#aver-extensions 2</c>, then one extension per line, its fields separated by TAB: name, version, folder, entry type (or
+    /// line <c>#aver-extensions 3</c> with the host's service lookup after a TAB (2, without it, is still read), then one extension per line, its fields separated by TAB: name, version, folder, entry type (or
     /// empty), actor base type (or empty), then each assembly's full path. Another list version is refused with one log line. Returns the
     /// number of actor classes declared.</summary>
     /// <remarks>Host context, not the script context: the script context resolves host-first, so a converted project's scripts see the
@@ -1420,12 +1420,15 @@ public static class HostBridge
             if (string.IsNullOrEmpty(spec)) return 0;
             string[] lines = spec.Split('\n', StringSplitOptions.RemoveEmptyEntries);
             const string header = "#aver-extensions ";
-            if (lines.Length == 0 || !lines[0].StartsWith(header, StringComparison.Ordinal) ||
-                !int.TryParse(lines[0].AsSpan(header.Length), out int specVersion) || specVersion != ExtensionSpecVersion)
+            string[] head = lines.Length > 0 && lines[0].StartsWith(header, StringComparison.Ordinal) ? lines[0].Substring(header.Length).Split('	') : Array.Empty<string>();
+            if (head.Length == 0 || !int.TryParse(head[0], out int specVersion) || specVersion < 2 || specVersion > ExtensionSpecVersion)
             {
                 Emit((int)Log.Level.Warn, $"[Scripting] the extension list is not version {ExtensionSpecVersion} ({(lines.Length > 0 ? lines[0] : "empty")}); no extension managed half is loaded");
                 return 0;
             }
+            // Version 3 adds the host's service lookup (ext::serviceLookup) after a TAB, in hex; version 2 has none, and GetService then answers zero.
+            s_serviceLookup = specVersion >= 3 && head.Length > 1 && ulong.TryParse(head[1], System.Globalization.NumberStyles.HexNumber, null, out ulong lookup)
+                ? new IntPtr(unchecked((long)lookup)) : IntPtr.Zero;
             int declared = 0;
             foreach (string line in lines.Skip(1))
             {
@@ -1442,7 +1445,10 @@ public static class HostBridge
     }
 
     // The version of the extension list LoadExtensions reads (ScriptHost.cpp writes it; docs/EXTENSIONS.md, "The managed half").
-    private const int ExtensionSpecVersion = 2;
+    private const int ExtensionSpecVersion = 3;
+
+    // The host's service lookup from the extension list (version 3), handed to each extension's context.
+    private static IntPtr s_serviceLookup;
 
     // One extension: its assemblies into the host context, its entry (managed.entry) run with an ExtensionContext, then the actor types the
     // entry and the actor base asked for declared. A missing assembly, an entry that cannot start or a base type it does not hold logs one
@@ -1488,7 +1494,7 @@ public static class HostBridge
         }
 
         foreach ((Assembly asm, _) in loaded) s_extensionAssemblies.Add(asm.GetName().Name!);
-        var context = new Aver.Framework.Hosting.ExtensionContext(name, version, dir, loaded.Select(l => l.Asm).ToList());
+        var context = new Aver.Framework.Hosting.ExtensionContext(name, version, dir, loaded.Select(l => l.Asm).ToList(), s_serviceLookup);
         if (entry.Length > 0)
         {
             Type? entryType = null;

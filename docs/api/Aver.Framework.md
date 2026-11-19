@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-320 public types and 2655 public members, read from `scripting/csharp/Aver.Framework/` (163 source files). Members are grouped by kind and sorted alphabetically; signatures are single lines as declared, and the summary is the first sentence of the XML summary. Every type in every assembly: [index](index.md); every member: [members-a-z](members-a-z.md).
+320 public types and 2656 public members, read from `scripting/csharp/Aver.Framework/` (163 source files). Members are grouped by kind and sorted alphabetically; signatures are single lines as declared, and the summary is the first sentence of the XML summary. Every type in every assembly: [index](index.md); every member: [members-a-z](members-a-z.md).
 
 ## Contents
 
@@ -6357,6 +6357,7 @@
 | `DeclareActors` | `public void DeclareActors(Func<Type, bool> predicate)` | Declares every non-abstract actor type in Assemblies for which predicate is true. |
 | `DeclareActors` | `public void DeclareActors(Type baseType)` | Declares every non-abstract actor type in Assemblies that derives from baseType. |
 | `DeclareAllActors` | `public void DeclareAllActors()` | Declares every non-abstract actor type in Assemblies. |
+| `GetService` | `public IntPtr GetService(string name, uint version)` | The table of a service the engine offers (docs/EXTENSIONS.md, "Services and interfaces") by name and version, or Zero when this engine does not offer it. |
 | `Log` | `public void Log(string message, global::Aver.Scripting.Log.Level level = global::Aver.Scripting.Log.Level.Info)` | Writes one line to the engine's log, prefixed with the extension's name. |
 
 <a id="extensionhost"></a>

@@ -8,6 +8,9 @@ aver_add_module(Aver.Extensions
     src/Extensions.cpp
     # .avext packages: the zip reader, the check of a package before it is copied, and install / uninstall (the Extensions window drives it).
     src/Avext.cpp
+    # The engine seams offered as services: the table generated from scripts/abi-services.lock, resolved at run time.
+    src/SeamServices.cpp
+    src/SeamServices.gen.cpp
   DEPS
     Aver.Formats
     Aver.Platform

@@ -95,6 +95,9 @@ bool parseManifest(const std::string& text, Extension& e, std::string& why) {
     readStringList(managed["runtime"], e.managedRuntime);
     e.managedEntry = str(managed["entry"]);
     e.actorBase = str(managed["actorBase"]);
+    if (managed["services"].isObject())
+        for (const fmt::JsonMember& m : managed["services"].members())
+            e.managedServices.emplace_back(m.key, m.value.isNumber() ? static_cast<u32>(m.value.asDouble(0.0)) : 0u);
     for (const fmt::JsonValue& c : root["commands"].elements())
         if (c.isObject() && !str(c["name"]).empty()) e.commands.push_back({str(c["name"]), str(c["summary"]), str(c["usage"])});
     for (const fmt::JsonValue& i : root["importers"].elements()) {
@@ -147,6 +150,8 @@ std::string refusalReason(Extension& e, std::string_view engineVersion) {
     if (hasControlChar(e.version) || hasControlChar(e.managedEntry) || hasControlChar(e.actorBase))
         return "version, managed.entry and managed.actorBase must not contain control characters";
     if (e.nativeName.find_first_of("/\\") != std::string::npos) return "native \"" + e.nativeName + "\" must be a library name, not a path";
+    for (const auto& [name, version] : e.managedServices)
+        if (!isValidInterfaceName(name) || version == 0) return "managed.services: \"" + name + "\" needs a service name and a version of 1 or more";
     for (const std::string& m : e.managedRuntime)
         if (escapesDirectory(m)) return "managed.runtime \"" + m + "\" leaves the extension's directory";
     for (const std::string& f : e.runtimeFiles)
@@ -261,6 +266,16 @@ const void* ServiceRegistry::find(std::string_view name, u32 version) const {
     const auto it = impl_->tables.find(std::make_pair(std::string(name), version));
     return it == impl_->tables.end() ? nullptr : it->second;
 }
+
+std::vector<u32> ServiceRegistry::versionsOf(std::string_view name) const {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    std::vector<u32> out;
+    for (const auto& [key, table] : impl_->tables)
+        if (key.first == name) out.push_back(key.second);
+    return out;
+}
+
+ServiceLookupFn serviceLookup() { return hostGetService; }
 
 void ServiceRegistry::clear() {
     std::lock_guard<std::mutex> lock(impl_->mu);

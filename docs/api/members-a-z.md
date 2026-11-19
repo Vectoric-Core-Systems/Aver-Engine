@@ -2,7 +2,7 @@
 
 # C# API members A-Z
 
-Every public member of every assembly, alphabetically (4617 members). Back to the [index](index.md).
+Every public member of every assembly, alphabetically (4618 members). Back to the [index](index.md).
 
 [A](#a) [B](#b) [C](#c) [D](#d) [E](#e) [F](#f) [G](#g) [H](#h) [I](#i) [J](#j) [K](#k) [L](#l) [M](#m) [N](#n) [O](#o) [P](#p) [Q](#q) [R](#r) [S](#s) [T](#t) [U](#u) [V](#v) [W](#w) [X](#x) [Y](#y) [Z](#z)
 
@@ -1623,6 +1623,7 @@ Every public member of every assembly, alphabetically (4617 members). Back to th
 | `GetRow` | [DataTable](Aver.Framework.md#datatable) | Aver.Framework |
 | `GetSectionKeys` | [ConfigFile](Aver.Framework.md#configfile) | Aver.Framework |
 | `GetSections` | [ConfigFile](Aver.Framework.md#configfile) | Aver.Framework |
+| `GetService` | [ExtensionContext](Aver.Framework.md#extensioncontext) | Aver.Framework |
 | `GetSetting` | [Physics](Aver.Physics.md#physics) | Aver.Physics |
 | `GetShadowMode` | [Entity](Aver.Framework.md#entity) | Aver.Framework |
 | `GetSlideCollision` | [KinematicCharacter](Aver.Physics.md#kinematiccharacter) | Aver.Physics |
