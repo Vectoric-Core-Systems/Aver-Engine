@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.24)
 if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
 endif()
-project(AverEngine VERSION 0.8.0 LANGUAGES C CXX)
+project(AverEngine VERSION 0.8.1 LANGUAGES C CXX)
 # RC ONLY WHERE THERE IS A RESOURCE COMPILER. Naming it in project() above made configure fail on
 # line 2 everywhere but Windows ("No CMAKE_RC_COMPILER could be found"), before a single option was
 # read. The .rc files are icons and version blocks for Windows executables; nothing else has them.
