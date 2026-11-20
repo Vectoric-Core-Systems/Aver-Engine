@@ -9,6 +9,8 @@
 # stops being a decision about this module and becomes a decision about the whole tree.
 add_library(Aver.Physics SHARED
   src/PhysicsWorld.cpp
+  # Jolt's heap, zeroed (the file says why).
+  src/JoltAllocator.cpp
   # SHAPES_MATERIALS (physics_shape_builder_abi.h): the generic shape-handle table, every shape builder, bodies from shapes,
   # the one mesh builder and the surface materials shapes carry. PhysicsShapes.cpp and PhysicsWorld.cpp build through them.
   src/PhysicsShapeTable.cpp

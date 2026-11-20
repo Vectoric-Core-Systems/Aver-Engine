@@ -44,6 +44,9 @@
 
 namespace aver::physics::detail {
 
+// Jolt allocates zeroed memory through these (JoltAllocator.cpp says why). Instead of JPH::RegisterDefaultAllocator.
+void registerJoltAllocator();
+
 // ---- Layers ----
 // An object layer is userLayer * 2 + moving. The low bit alone picks the broad-phase tree; the user layer picks collisions via the caller's matrix.
 // User layer 0 gives object layers 0 (static) and 1 (moving), as before layers were user-definable.

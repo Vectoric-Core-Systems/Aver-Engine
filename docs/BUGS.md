@@ -5,6 +5,19 @@ reproduce is a rumour.
 
 ---
 
+# 2026-11-20
+
+- **A pulley whose far end is the world could fly its body off (NaN velocity).** Jolt's `IndependentAxisConstraintPart`
+  leaves a static body's vectors unset and reads them in every velocity solve, times a zero angular velocity; when that
+  memory held a NaN, so did the impulse. Seen as an intermittent `PhysicsOriginTest` failure on Linux Debug only (Jolt's
+  NaN assert; Windows' debug heap fills with a finite pattern, and Release has no assert). Trigger, now a test:
+  `JointTest` `testPulleyToWorldOnDirtyMemory` frees blocks filled with NaN bytes, hangs a box on
+  `aver_phys_joint_pulley(box, AVER_PHYS_WORLD_BODY, ...)` and steps it; with the default allocator its position went
+  non-finite. Fixed by handing Jolt zeroed memory (`modules/physics/src/JoltAllocator.cpp`); the Jolt sources are
+  unchanged (`modules/physics.jolt/README.md`, "Updating").
+
+---
+
 # Known issues from earlier releases, rechecked — 2026-11-15
 
 Every "Known issues" bullet from the 0.3.0–0.8.0 notes, the two "Open" lists below and the open GitHub issues,

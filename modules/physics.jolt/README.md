@@ -105,3 +105,10 @@ callbacks arrive.
 Replace `Jolt/` and `LICENSE` from a fresh archive, update the version and SHA-256 above, and re-run
 the conversion round-trip tests before trusting anything. Do not hand-edit the vendored sources — a
 local fix here is invisible at the next update.
+
+**Worked around outside these sources, to recheck at each update:** `IndependentAxisConstraintPart` (the pulley's solver
+part) leaves a static body's vectors unset and still reads them in `SolveVelocityConstraint`, times a zero angular
+velocity, so memory that held a NaN gives a NaN impulse (5.6.0, and upstream `master` on 2026-11-20). `Aver.Physics`
+registers a zeroing allocator instead of `RegisterDefaultAllocator` (`modules/physics/src/JoltAllocator.cpp`).
+`JointTest`'s `testPulleyToWorldOnDirtyMemory` reproduces it with the default allocator; once upstream initialises those
+members, the allocator can go back to the default.

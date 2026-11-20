@@ -293,7 +293,7 @@ int32_t aver_phys_init(void) {
     if (g_world) return 1;
 
     if (!g_joltStarted) {
-        JPH::RegisterDefaultAllocator();
+        registerJoltAllocator();
         JPH::Trace = traceImpl;
         JPH_IF_ENABLE_ASSERTS(JPH::AssertFailed = assertFailedImpl;)
         JPH::Factory::sInstance = new JPH::Factory();

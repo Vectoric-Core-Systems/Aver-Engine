@@ -19,6 +19,8 @@ triggering inputs for anything summarised below.
   something else. Extensions P/Invoked seam DLLs by name before, outside the contract, and a changed signature crashed them.
 - `scripts/abi-services.lock` records each service's slots. `AbiServicesCheck` fails when a header changes a signature without a
   new version; adding a function at the end keeps it. Design: `docs/plans/EXTENSION_SERVICES.md`.
+- A pulley whose far end is the world no longer sends its body off with a NaN velocity now and then. Jolt read memory it
+  had not set for a static body; the engine now hands Jolt zeroed memory (`docs/BUGS.md`, 2026-11-20).
 - The payload carries `player-start-icon.png`. 0.8.0 shipped without it, so the editor drew no player-start marker.
 
 ## [0.8.0] — 2026-11-17

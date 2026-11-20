@@ -29,6 +29,9 @@
 #include "aver/physics/physics_joints_abi.h"
 
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
 #include <string>
 
 using namespace aver;
@@ -482,6 +485,48 @@ static void testMotorRefusedOnNonMotorisedJoint() {
 
 // ---------------------------------------------------------------------------------------------------
 
+// A PULLEY WHOSE FAR END IS THE WORLD, ON MEMORY THAT HELD NaNs. Jolt's IndependentAxisConstraintPart (the pulley's solver
+// part) leaves its body-2 vectors unset when body 2 is static and still reads one of them, times the static body's zero
+// angular velocity, in every velocity solve. Unset memory that held a NaN turns that into a NaN impulse and a NaN velocity:
+// Linux Debug CI hit it now and then as Jolt's NaN assert in PhysicsOriginTest, and a Release build would fly the body off.
+// Freed blocks are filled with NaN bytes first, so the constraint is likely built on them. The engine hands Jolt zeroed
+// memory (registerJoltAllocator), which is what keeps the box hanging still.
+static void testPulleyToWorldOnDirtyMemory() {
+    AVER_INFO("-- a pulley to the world, built on memory that held NaNs --");
+    bool allFinite = true;
+    float worstHang = 0.0f;
+    for (int round = 0; round < 8; ++round) {
+        aver_phys_init();   // gravity default: the box hangs on the rope
+        const float cx = 0.0f;
+        const int32_t c = aver_phys_add_dynamic_box(cx, 0.0f, 300.0f, 15, 15, 15, 10.0f);
+        const float bpC[3] = {cx, 0, 300}, fpC[3] = {cx, 0, 600}, bpW[3] = {cx + 200.0f, 0, 300}, fpW[3] = {cx + 200.0f, 0, 600};
+        {
+            std::vector<void*> blocks;
+            for (size_t size = 32; size <= 2048; size += 16)
+                for (int k = 0; k < 4; ++k) {
+                    void* b = std::malloc(size);
+                    if (b) { std::memset(b, 0xFF, size); blocks.push_back(b); }   // 0xFFFFFFFF is a NaN as a float
+                }
+            for (void* b : blocks) std::free(b);
+        }
+        const int32_t pulley = aver_phys_joint_pulley(c, AVER_PHYS_WORLD_BODY, bpC, fpC, bpW, fpW, 1.0f, -1.0f, -1.0f);
+        if (pulley == 0) { check(false, "a pulley to the world exists"); aver_phys_shutdown(); return; }
+        float start[3] = {0, 0, 0};
+        aver_phys_body_position(c, start);
+        for (int i = 0; i < 60; ++i) {
+            aver_phys_step(kDt);
+            float p[3] = {0, 0, 0}, v[3] = {0, 0, 0};
+            aver_phys_body_position(c, p);
+            aver_phys_body_velocity(c, v);
+            for (int k = 0; k < 3; ++k) allFinite = allFinite && std::isfinite(p[k]) && std::isfinite(v[k]);
+            if (allFinite) worstHang = std::fmax(worstHang, dist3(p, start));
+        }
+        aver_phys_shutdown();
+    }
+    check(allFinite, "eight times over, the box's position and velocity stay finite");
+    check(allFinite && worstHang < 2.0f, "and it hangs where it was hung (moved at most " + f2s(worstHang) + " cm)");
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     AVER_INFO("==================================================");
@@ -498,6 +543,7 @@ int main() {
     testRefusals();
     testHingeVelocityMotorTurnsAndReverses();
     testMotorRefusedOnNonMotorisedJoint();
+    testPulleyToWorldOnDirtyMemory();
 
     AVER_INFO("==================================================");
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
