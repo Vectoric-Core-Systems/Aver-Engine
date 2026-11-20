@@ -7,6 +7,15 @@ reproduce is a rumour.
 
 # 2026-11-20
 
+- **A project with an embedded material shader had no GI volume.** `material_embedded.hlsl`'s slot helpers name the material
+  textures, which only a pass that binds a material declares (`AVER_MATERIAL_SRV`); the registry reaches every Voxi entry point,
+  so the volume clear, resolve and mip compute passes failed to compile and Voxi's init logged `clear=0 resolve=0 mip=0`.
+  Trigger: any project whose Godot shaders Fabric converts (the 3D demos `antialiasing`, `sprites`), or a hand-written embedded
+  shader, registered before Voxi starts. Fixed by declaring them, unbound, where no material is; `VoxiShaderCompileTest`
+  registers an embedded shader and builds Voxi again, and fails on the old file.
+- **A script exception's log line named no place.** `[Scripting] X.OnTick threw: NullReferenceException ...` now ends with
+  `(at <method>:<line>, from <the game's method>:<line>)` when symbols are there, the second part when the throw is inside the
+  engine or an extension.
 - **A pulley whose far end is the world could fly its body off (NaN velocity).** Jolt's `IndependentAxisConstraintPart`
   leaves a static body's vectors unset and reads them in every velocity solve, times a zero angular velocity; when that
   memory held a NaN, so did the impulse. Seen as an intermittent `PhysicsOriginTest` failure on Linux Debug only (Jolt's

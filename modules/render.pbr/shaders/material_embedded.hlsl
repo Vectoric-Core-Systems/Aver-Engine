@@ -183,6 +183,24 @@ static float4 gEmbG[AVER_CUSTOM_MAX_G];
 #define AVER_CUSTOM_IBUF gEmbI
 #define AVER_CUSTOM_GBUF gEmbG
 
+// A pass that binds no material (Voxi's volume clear, resolve and mip compute) still compiles this text, since the prelude carries the registry to
+// every Voxi entry point. It never calls the raster flavour; without these the whole pass failed to compile and the GI volume never built in a project
+// with an embedded shader. Unused, so the compiler drops them and they bind nothing.
+#ifndef AVER_MATERIAL_SRV
+Texture2D gBaseColorMap;
+Texture2D gMetalRoughMap;
+Texture2D gNormalMap;
+Texture2D gOcclusionMap;
+Texture2D gEmissiveMap;
+Texture2D gL1BaseColorMap;
+Texture2D gL1MetalRoughMap;
+Texture2D gL1NormalMap;
+SamplerState gMaterialSampler;
+#ifndef gSurfaceSampler
+#define gSurfaceSampler gMaterialSampler
+#endif
+#endif
+
 // ---- texture slots ---------------------------------------------------------------------------------------------------------------------------------
 // Slot s is pbr::TextureSlot s. The mode word of a sampler value: bit 0 nearest, 1 repeat, 2 mipmaps, bits 8-9 the colour of an unbound texture
 // (0 white, 1 black, 2 transparent, 3 flat normal).

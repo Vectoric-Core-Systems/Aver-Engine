@@ -2,11 +2,14 @@
 // real device, without a window or a scene, so a shader error shows up here instead of in the editor.
 // HLSL compiles at runtime: no other test reaches voxi.hlsl's CSRd* entries or nrd2.hlsl. That includes the
 // NeuRaC twins (buildAllVariants builds them), the cache's resolve (a standalone NeuRaC) and the guide pass
-// (a standalone NeuRaCGuide and NeuRaCNet).
+// (a standalone NeuRaCGuide and NeuRaCNet). Then once more with an embedded material shader registered (a converted Godot shader's shape):
+// the registry reaches every Voxi entry point, the volume clear/resolve/mip compute passes included, which bind no material.
 // Arguments: `warp` uses WARP (default: the adapter; ray tracing usually needs it). Skips (77) when the
 // device lacks ray tracing tier 1.1 / shader model 6.6, which the staged path requires.
 
 #include "aver/core/Log.hpp"
+#include "aver/formats/OcGraphHlsl.hpp"
+#include "aver/pbr/MaterialGraphRegistry.hpp"
 #include "aver/render/denoise/Nrd2.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/rhi/RHIResources.hpp"
@@ -74,6 +77,28 @@ int main(int argc, char** argv) {
             if (!voxi.manyLightsCompiled()) { AVER_ERROR("  FAIL  CSRdManyLights did not build (cs_6_5)"); ++failures; }
         }
         voxi.shutdown();
+    }
+    {
+        // An embedded shader in the registry: its helpers name the material textures, which a compute pass without a material does not declare.
+        // The volume clear, resolve and mip passes failed to compile and the GI volume never built in such a project.
+        fmt::EmbeddedHlslPart part;
+        part.name = "compile_test";
+        part.ns = "ge0000c0de_";
+        part.regsU = 1;
+        part.hasFragment = true;
+        part.fragmentSource = "void EMBN(main_fragment)() { AVER_CUSTOM_ALBEDO = float3(1.0, 0.0, 0.0); }\n";
+        fmt::OcGraphData g;
+        fmt::packEmbeddedHlsl(part, g);
+        pbr::materialGraphs().clear();
+        if (pbr::materialGraphs().add("$test/embedded", "VoxiShaderCompileTest embedded", g) == 0 || !pbr::materialGraphs().hasEmbeddedShaders()) {
+            AVER_ERROR("  FAIL  the embedded test shader did not register");
+            ++failures;
+        } else {
+            voxi::VoxiRenderer voxi;
+            if (!voxi.init(*dev)) { AVER_ERROR("  FAIL  VoxiRenderer::init with an embedded shader registered"); ++failures; }
+            voxi.shutdown();
+        }
+        pbr::materialGraphs().clear();
     }
     {
         // The cache's own pipelines, outside the renderer: the resolve shader and its buffers.

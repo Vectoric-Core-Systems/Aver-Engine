@@ -1210,7 +1210,30 @@ public static class HostBridge
 
     // Renders an exception as one log line.
     private static string Describe(Exception ex) =>
-        $"{ex.GetType().Name}: {ex.Message}".ReplaceLineEndings(" ");
+        $"{ex.GetType().Name}: {ex.Message}{Site(ex)}".ReplaceLineEndings(" ");
+
+    // Where it threw: the innermost method, and when that is .NET's, the engine's or an extension's, the first one of the game's own under it.
+    // A converted project's NullReferenceException mostly throws inside a runtime it calls, and the message alone names neither.
+    private static string Site(Exception ex)
+    {
+        static string Name(System.Reflection.MethodBase m) =>
+            m.DeclaringType is { } t ? $"{(t.DeclaringType is { } o && t.Name.StartsWith('<') ? o.Name : t.Name)}.{m.Name}" : m.Name;
+        static bool Ours(System.Reflection.MethodBase m)
+        {
+            string ns = m.DeclaringType?.Namespace ?? "";
+            return ns.StartsWith("System", StringComparison.Ordinal) || ns.StartsWith("Microsoft", StringComparison.Ordinal) || ns.StartsWith("Aver", StringComparison.Ordinal);
+        }
+        static string Line(System.Diagnostics.StackFrame f) => f.GetFileLineNumber() is > 0 and var n ? $":{n}" : "";   // when the assembly has its symbols
+        string? inner = null, game = null;
+        foreach (System.Diagnostics.StackFrame f in new System.Diagnostics.StackTrace(ex, true).GetFrames())
+        {
+            if (f.GetMethod() is not { } m) continue;
+            inner ??= Name(m) + Line(f);
+            if (!Ours(m)) { game = Name(m) + Line(f); break; }
+        }
+        if (inner == null) return "";
+        return game == null || game == inner ? $" (at {inner})" : $" (at {inner}, from {game})";
+    }
 
     // ================================================================== actor integration
 
